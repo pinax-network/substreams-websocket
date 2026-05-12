@@ -94,6 +94,10 @@ struct SubstreamsArgs {
 
     #[arg(long, env = "SUBSTREAMS_API_KEY_HEADER", default_value = "X-Api-Key")]
     api_key_header: String,
+
+    /// Pinax-style auth endpoint that exchanges an API key for a short-lived JWT.
+    #[arg(long, env = "SUBSTREAMS_AUTH_URL")]
+    auth_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -204,6 +208,7 @@ impl SubstreamsArgs {
             token: self.token,
             api_key: self.api_key,
             api_key_header: self.api_key_header,
+            auth_url: self.auth_url,
         }
     }
 }
@@ -255,6 +260,7 @@ struct FileSubstreamsDefaults {
     api_key: Option<String>,
     #[serde(default = "default_api_key_header")]
     api_key_header: String,
+    auth_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,10 +281,12 @@ struct FileStreamConfig {
     token: Option<String>,
     api_key: Option<String>,
     api_key_header: Option<String>,
+    auth_url: Option<String>,
 }
 
 impl FileConfig {
-    fn into_config(self) -> Config {
+    fn into_config(mut self) -> Config {
+        self.substreams.apply_env_overrides();
         Config {
             streams: self
                 .streams
@@ -288,6 +296,29 @@ impl FileConfig {
             websocket: self.websocket.into_config(),
         }
     }
+}
+
+impl FileSubstreamsDefaults {
+    /// Backfill secrets and connection settings from environment variables when
+    /// the TOML file leaves them unset. Lets operators keep secrets in `.env`.
+    fn apply_env_overrides(&mut self) {
+        self.endpoint = env_or(self.endpoint.take(), "SUBSTREAMS_ENDPOINT");
+        self.network = env_or(self.network.take(), "SUBSTREAMS_NETWORK");
+        self.start_block = env_or(self.start_block.take(), "SUBSTREAMS_START_BLOCK");
+        if let Some(value) = std::env::var("SUBSTREAMS_STOP_BLOCK")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            self.stop_block = value;
+        }
+        self.token = env_or(self.token.take(), "SUBSTREAMS_TOKEN");
+        self.api_key = env_or(self.api_key.take(), "SUBSTREAMS_API_KEY");
+        self.auth_url = env_or(self.auth_url.take(), "SUBSTREAMS_AUTH_URL");
+    }
+}
+
+fn env_or(current: Option<String>, key: &str) -> Option<String> {
+    current.or_else(|| std::env::var(key).ok().filter(|value| !value.is_empty()))
 }
 
 impl FileWebSocketConfig {
@@ -332,6 +363,7 @@ impl FileStreamConfig {
                 api_key_header: self
                     .api_key_header
                     .unwrap_or_else(|| defaults.api_key_header.clone()),
+                auth_url: self.auth_url.or_else(|| defaults.auth_url.clone()),
             },
         }
     }

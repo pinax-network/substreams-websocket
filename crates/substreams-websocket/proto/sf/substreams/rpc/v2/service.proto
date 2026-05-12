@@ -7,6 +7,26 @@ import "sf/substreams/v1/clock.proto";
 import "sf/substreams/v1/deltas.proto";
 import "sf/substreams/v1/modules.proto";
 
+service Stream {
+  rpc Blocks(Request) returns (stream Response);
+}
+
+message Request {
+  int64 start_block_num = 1;
+  string start_cursor = 2;
+  uint64 stop_block_num = 3;
+  bool final_blocks_only = 4;
+  bool production_mode = 5;
+  string output_module = 6;
+  sf.substreams.v1.Modules modules = 7;
+  repeated string debug_initial_store_snapshot_for_modules = 10;
+  bool noop_mode = 11;
+  uint64 limit_processed_blocks = 12;
+  repeated string dev_output_modules = 13;
+  uint64 progress_messages_interval_ms = 14;
+  bool partial_blocks = 16;
+}
+
 message Response {
   oneof message {
     SessionInit session = 1;

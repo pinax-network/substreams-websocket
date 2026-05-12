@@ -70,6 +70,7 @@ pub struct SubstreamsConfig {
     pub token: Option<String>,
     pub api_key: Option<String>,
     pub api_key_header: String,
+    pub auth_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
