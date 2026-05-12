@@ -11,19 +11,28 @@ serve a health endpoint.
 ## Quickstart
 
 ```bash
-cargo run --bin substreams-websocket -- serve ./dex-swaps-v0.5.1.spkg map_events
+cargo run --bin substreams-websocket -- serve --config config.example.toml
 ```
 
 To serve swaps and SPL token transfers for Solana mainnet from the same
-WebSocket server:
+WebSocket server, define both streams in TOML:
 
-```bash
-cargo run --bin substreams-websocket -- serve ./dex-swaps-v0.5.1.spkg map_events \
-  --endpoint https://solana.substreams.pinax.network:443 \
-  --network solana-mainnet \
-  --stream-id swaps \
-  --decoder swaps \
-  --extra-stream id=transfers,decoder=transfers,package=https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg,module=map_events,network=solana-mainnet
+```toml
+[substreams]
+endpoint = "https://solana.substreams.pinax.network:443"
+network = "solana-mainnet"
+
+[[streams]]
+id = "swaps"
+decoder = "swaps"
+package = "./dex-swaps-v0.5.1.spkg"
+module = "map_events"
+
+[[streams]]
+id = "transfers"
+decoder = "transfers"
+package = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg"
+module = "map_events"
 ```
 
 To verify Substreams package loading and gRPC connectivity directly:

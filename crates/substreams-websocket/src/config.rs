@@ -13,7 +13,8 @@ pub struct StreamConfig {
     pub substreams: SubstreamsConfig,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum StreamDecoder {
     Swaps,
     Transfers,

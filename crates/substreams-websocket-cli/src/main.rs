@@ -1,7 +1,8 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
+use serde::Deserialize;
 use substreams_websocket::{
     Config, StreamConfig, StreamDecoder, StreamEvent, SubstreamsClient, SubstreamsConfig,
     WebSocketConfig,
@@ -27,20 +28,9 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    #[command(flatten)]
-    substreams: SubstreamsArgs,
-
-    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAM_ID", default_value = "swaps")]
-    stream_id: String,
-
-    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_DECODER", default_value = "swaps")]
-    decoder: StreamDecoder,
-
-    #[arg(long = "extra-stream", value_parser = parse_extra_stream)]
-    extra_streams: Vec<ExtraStreamArg>,
-
-    #[command(flatten)]
-    websocket: WebSocketArgs,
+    /// Path to the server TOML config.
+    #[arg(short, long, env = "SUBSTREAMS_WEBSOCKET_CONFIG")]
+    config: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -153,15 +143,6 @@ struct WebSocketArgs {
     client_buffer_size: usize,
 }
 
-#[derive(Debug, Clone)]
-struct ExtraStreamArg {
-    id: String,
-    decoder: StreamDecoder,
-    package: String,
-    module: String,
-    network: Option<String>,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
@@ -171,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve(args) => {
-            let config = args.into_config();
+            let config = args.load_config().await?;
             config.validate()?;
             substreams_websocket::serve(config).await?;
         }
@@ -195,54 +176,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 impl ServeArgs {
-    fn into_config(self) -> Config {
-        let primary_substreams = self.substreams.into_config();
-        let mut streams = vec![StreamConfig {
-            id: self.stream_id,
-            decoder: self.decoder,
-            substreams: primary_substreams.clone(),
-        }];
+    async fn load_config(self) -> anyhow::Result<Config> {
+        let contents = tokio::fs::read_to_string(&self.config)
+            .await
+            .with_context(|| format!("failed to read config {}", self.config.display()))?;
+        let config = toml::from_str::<FileConfig>(&contents)
+            .with_context(|| format!("failed to parse config {}", self.config.display()))?;
 
-        streams.extend(self.extra_streams.into_iter().map(|stream| StreamConfig {
-            id: stream.id.clone(),
-            decoder: stream.decoder,
-            substreams: stream.into_config(&primary_substreams),
-        }));
-
-        Config {
-            streams,
-            websocket: WebSocketConfig {
-                listen: self.websocket.listen,
-                ws_path: self.websocket.ws_path,
-                health_path: self.websocket.health_path,
-                heartbeat_interval: Duration::from_secs(self.websocket.heartbeat_interval_secs),
-                heartbeat_timeout: Duration::from_secs(self.websocket.heartbeat_timeout_secs),
-                connection_ttl: self.websocket.connection_ttl_secs.map(Duration::from_secs),
-                max_clients: self.websocket.max_clients,
-                client_buffer_size: self.websocket.client_buffer_size,
-            },
-        }
-    }
-}
-
-impl ExtraStreamArg {
-    fn into_config(self, base: &SubstreamsConfig) -> SubstreamsConfig {
-        SubstreamsConfig {
-            package: self.package,
-            module: self.module,
-            endpoint: base.endpoint.clone(),
-            network: self.network.or_else(|| base.network.clone()),
-            start_block: base.start_block.clone(),
-            stop_block: base.stop_block.clone(),
-            params: base.params.clone(),
-            plaintext: base.plaintext,
-            insecure: base.insecure,
-            production_mode: base.production_mode,
-            final_blocks_only: base.final_blocks_only,
-            token: base.token.clone(),
-            api_key: base.api_key.clone(),
-            api_key_header: base.api_key_header.clone(),
-        }
+        Ok(config.into_config())
     }
 }
 
@@ -267,51 +208,179 @@ impl SubstreamsArgs {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct FileConfig {
+    websocket: FileWebSocketConfig,
+    substreams: FileSubstreamsDefaults,
+    streams: Vec<FileStreamConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileWebSocketConfig {
+    #[serde(default = "default_listen")]
+    listen: SocketAddr,
+    #[serde(default = "default_ws_path")]
+    ws_path: String,
+    #[serde(default = "default_health_path")]
+    health_path: String,
+    #[serde(default = "default_heartbeat_interval_secs")]
+    heartbeat_interval_secs: u64,
+    #[serde(default = "default_heartbeat_timeout_secs")]
+    heartbeat_timeout_secs: u64,
+    connection_ttl_secs: Option<u64>,
+    #[serde(default = "default_max_clients")]
+    max_clients: usize,
+    #[serde(default = "default_client_buffer_size")]
+    client_buffer_size: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileSubstreamsDefaults {
+    endpoint: Option<String>,
+    network: Option<String>,
+    start_block: Option<String>,
+    #[serde(default = "default_stop_block")]
+    stop_block: String,
+    #[serde(default)]
+    params: Vec<String>,
+    #[serde(default)]
+    plaintext: bool,
+    #[serde(default)]
+    insecure: bool,
+    #[serde(default)]
+    production_mode: bool,
+    #[serde(default)]
+    final_blocks_only: bool,
+    token: Option<String>,
+    api_key: Option<String>,
+    #[serde(default = "default_api_key_header")]
+    api_key_header: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileStreamConfig {
+    id: String,
+    decoder: StreamDecoder,
+    package: String,
+    module: String,
+    endpoint: Option<String>,
+    network: Option<String>,
+    start_block: Option<String>,
+    stop_block: Option<String>,
+    #[serde(default)]
+    params: Vec<String>,
+    plaintext: Option<bool>,
+    insecure: Option<bool>,
+    production_mode: Option<bool>,
+    final_blocks_only: Option<bool>,
+    token: Option<String>,
+    api_key: Option<String>,
+    api_key_header: Option<String>,
+}
+
+impl FileConfig {
+    fn into_config(self) -> Config {
+        Config {
+            streams: self
+                .streams
+                .into_iter()
+                .map(|stream| stream.into_config(&self.substreams))
+                .collect(),
+            websocket: self.websocket.into_config(),
+        }
+    }
+}
+
+impl FileWebSocketConfig {
+    fn into_config(self) -> WebSocketConfig {
+        WebSocketConfig {
+            listen: self.listen,
+            ws_path: self.ws_path,
+            health_path: self.health_path,
+            heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
+            heartbeat_timeout: Duration::from_secs(self.heartbeat_timeout_secs),
+            connection_ttl: self.connection_ttl_secs.map(Duration::from_secs),
+            max_clients: self.max_clients,
+            client_buffer_size: self.client_buffer_size,
+        }
+    }
+}
+
+impl FileStreamConfig {
+    fn into_config(self, defaults: &FileSubstreamsDefaults) -> StreamConfig {
+        StreamConfig {
+            id: self.id,
+            decoder: self.decoder,
+            substreams: SubstreamsConfig {
+                package: self.package,
+                module: self.module,
+                endpoint: self.endpoint.or_else(|| defaults.endpoint.clone()),
+                network: self.network.or_else(|| defaults.network.clone()),
+                start_block: self.start_block.or_else(|| defaults.start_block.clone()),
+                stop_block: self
+                    .stop_block
+                    .unwrap_or_else(|| defaults.stop_block.clone()),
+                params: if self.params.is_empty() {
+                    defaults.params.clone()
+                } else {
+                    self.params
+                },
+                plaintext: self.plaintext.unwrap_or(defaults.plaintext),
+                insecure: self.insecure.unwrap_or(defaults.insecure),
+                production_mode: self.production_mode.unwrap_or(defaults.production_mode),
+                final_blocks_only: self.final_blocks_only.unwrap_or(defaults.final_blocks_only),
+                token: self.token.or_else(|| defaults.token.clone()),
+                api_key: self.api_key.or_else(|| defaults.api_key.clone()),
+                api_key_header: self
+                    .api_key_header
+                    .unwrap_or_else(|| defaults.api_key_header.clone()),
+            },
+        }
+    }
+}
+
+fn default_listen() -> SocketAddr {
+    "127.0.0.1:8080".parse().expect("default listen parses")
+}
+
+fn default_ws_path() -> String {
+    "/ws".to_owned()
+}
+
+fn default_health_path() -> String {
+    "/healthz".to_owned()
+}
+
+fn default_heartbeat_interval_secs() -> u64 {
+    180
+}
+
+fn default_heartbeat_timeout_secs() -> u64 {
+    600
+}
+
+fn default_max_clients() -> usize {
+    1024
+}
+
+fn default_client_buffer_size() -> usize {
+    1024
+}
+
+fn default_stop_block() -> String {
+    "0".to_owned()
+}
+
+fn default_api_key_header() -> String {
+    "X-Api-Key".to_owned()
+}
+
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {
     let filter = EnvFilter::try_new(log_level)
         .with_context(|| format!("invalid log level {log_level:?}"))?;
 
     fmt().with_env_filter(filter).init();
     Ok(())
-}
-
-fn parse_extra_stream(value: &str) -> Result<ExtraStreamArg, String> {
-    let mut id = None;
-    let mut decoder = None;
-    let mut package = None;
-    let mut module = None;
-    let mut network = None;
-
-    for part in value.split(',') {
-        let Some((key, item_value)) = part.split_once('=') else {
-            return Err(format!(
-                "invalid extra stream segment {part:?}, expected key=value"
-            ));
-        };
-
-        match key {
-            "id" => id = Some(item_value.to_owned()),
-            "decoder" => {
-                decoder = Some(
-                    item_value
-                        .parse::<StreamDecoder>()
-                        .map_err(|error| error.to_string())?,
-                )
-            }
-            "package" => package = Some(item_value.to_owned()),
-            "module" => module = Some(item_value.to_owned()),
-            "network" => network = Some(item_value.to_owned()),
-            _ => return Err(format!("invalid extra stream key {key:?}")),
-        }
-    }
-
-    Ok(ExtraStreamArg {
-        id: id.ok_or_else(|| "extra stream requires id".to_owned())?,
-        decoder: decoder.ok_or_else(|| "extra stream requires decoder".to_owned())?,
-        package: package.ok_or_else(|| "extra stream requires package".to_owned())?,
-        module: module.ok_or_else(|| "extra stream requires module".to_owned())?,
-        network,
-    })
 }
 
 fn format_stream_event(event: StreamEvent) -> String {
