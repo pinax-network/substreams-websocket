@@ -501,12 +501,14 @@ mod tests {
     use std::{net::SocketAddr, time::Duration};
 
     use futures_util::StreamExt;
+    use prost::Message as ProstMessage;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     use super::*;
-    use crate::{SubstreamsConfig, WebSocketConfig};
+    use crate::decoder::pb::dex::swaps::v1::{Events as SwapEvents, Protocol, Swap, Transaction};
+    use crate::{StreamEvent, SubstreamsConfig, WebSocketConfig};
 
     #[tokio::test]
     async fn health_route_returns_ok() {
@@ -674,8 +676,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn websocket_client_receives_decoded_swap_block() {
+        let server = TestServer::start(config()).await;
+
+        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+            .await
+            .expect("websocket connects");
+
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        // Wait until the WS client is registered with the server before injecting.
+        for _ in 0..40 {
+            if server.clients.active_count().await > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let events = SwapEvents {
+            transactions: vec![Transaction {
+                signature: vec![1u8; 32],
+                fee_payer: vec![2u8; 32],
+                signers: vec![vec![2u8; 32]],
+                fee: 5_000,
+                compute_units_consumed: 1_234,
+                swaps: vec![Swap {
+                    protocol: Protocol::RaydiumAmmV4 as i32,
+                    program_id: vec![3u8; 32],
+                    stack_height: 1,
+                    amm: vec![4u8; 32],
+                    amm_pool: vec![5u8; 32],
+                    user: vec![6u8; 32],
+                    input_mint: vec![7u8; 32],
+                    input_amount: 1_000,
+                    output_mint: vec![8u8; 32],
+                    output_amount: 2_000,
+                }],
+            }],
+        };
+        let mut payload = Vec::new();
+        events.encode(&mut payload).expect("events encode");
+
+        let stream = server.config.streams[0].clone();
+        handle_substream_event(
+            &stream,
+            &server.clients,
+            StreamEvent::Block {
+                number: 999,
+                id: "block-999".to_owned(),
+                timestamp: "2026-05-12 17:30:00".to_owned(),
+                output_type_url: String::new(),
+                payload,
+            },
+        )
+        .await;
+
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("decoded block arrives")
+            .expect("decoded block message")
+            .expect("decoded block ok");
+
+        let TungsteniteMessage::Text(text) = message else {
+            panic!("expected text decoded block, got {message:?}");
+        };
+
+        let body: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
+        assert_eq!(body["type"], "swaps");
+        assert_eq!(body["network"], "solana-mainnet");
+        assert_eq!(body["block"]["number"], 999);
+        assert_eq!(body["block"]["hash"], "block-999");
+        assert_eq!(
+            body["transactions"][0]["swaps"][0]["protocol"],
+            "raydium_amm_v4"
+        );
+        assert_eq!(body["transactions"][0]["swaps"][0]["input_amount"], 1_000);
+        assert_eq!(body["transactions"][0]["swaps"][0]["output_amount"], 2_000);
+
+        socket.close(None).await.expect("client closes cleanly");
+    }
+
     struct TestServer {
         addr: SocketAddr,
+        clients: ClientRegistry,
+        config: Arc<Config>,
         shutdown: Option<oneshot::Sender<()>>,
     }
 
@@ -691,6 +776,8 @@ mod tests {
                 config: Arc::new(config),
                 clients: ClientRegistry::default(),
             };
+            let clients = state.clients.clone();
+            let config = state.config.clone();
             let app = build_app(state);
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -706,6 +793,8 @@ mod tests {
 
             Self {
                 addr,
+                clients,
+                config,
                 shutdown: Some(shutdown_tx),
             }
         }
