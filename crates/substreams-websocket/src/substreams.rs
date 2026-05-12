@@ -67,35 +67,37 @@ pub enum SubstreamsError {
     #[error("invalid params value {value:?}, expected module=value")]
     InvalidParam { value: String },
 
-    #[error("failed to read package {source}: {error}")]
+    #[error("failed to read manifest {source}: {error}")]
     ReadPackage {
         source: String,
         #[source]
         error: std::io::Error,
     },
 
-    #[error("failed to fetch package {source}: {error}")]
+    #[error("failed to fetch manifest {source}: {error}")]
     FetchPackage {
         source: String,
         #[source]
         error: reqwest::Error,
     },
 
-    #[error("failed to decompress zstd package {source}: {error}")]
+    #[error("failed to decompress zstd manifest {source}: {error}")]
     DecompressPackage {
         source: String,
         #[source]
         error: std::io::Error,
     },
 
-    #[error("failed to decode package {source}: {error}")]
+    #[error("failed to decode manifest {source}: {error}")]
     DecodePackage {
         source: String,
         #[source]
         error: prost::DecodeError,
     },
 
-    #[error("Substreams package does not define module {module:?}; available modules: {available}")]
+    #[error(
+        "Substreams manifest does not define module {module:?}; available modules: {available}"
+    )]
     MissingModule { module: String, available: String },
 
     #[error("failed to connect to Substreams endpoint: {0}")]
@@ -147,9 +149,9 @@ impl SubstreamsClient {
     }
 
     pub async fn stream(self) -> Result<SubstreamsStream, SubstreamsError> {
-        let package = load_package(&self.config.package).await?;
-        ensure_module_exists(&package, &self.config.module)?;
-        let request = build_blocks_request(&self.config, package)?;
+        let manifest = load_package(&self.config.manifest).await?;
+        ensure_module_exists(&manifest, &self.config.module)?;
+        let request = build_blocks_request(&self.config, manifest)?;
         let channel = connect_channel(&self.config).await?;
         let mut client = StreamClient::new(channel);
         let mut request = Request::new(request);
@@ -290,8 +292,8 @@ fn maybe_decompress_zstd(source: &str, bytes: Vec<u8>) -> Result<Vec<u8>, Substr
     })
 }
 
-fn ensure_module_exists(package: &Package, module: &str) -> Result<(), SubstreamsError> {
-    let Some(modules) = package.modules.as_ref() else {
+fn ensure_module_exists(manifest: &Package, module: &str) -> Result<(), SubstreamsError> {
+    let Some(modules) = manifest.modules.as_ref() else {
         return Err(SubstreamsError::MissingModule {
             module: module.to_owned(),
             available: "none".to_owned(),
@@ -455,7 +457,7 @@ mod tests {
     #[test]
     fn builds_request_from_config() {
         let config = config();
-        let request = build_blocks_request(&config, package()).expect("request builds");
+        let request = build_blocks_request(&config, manifest()).expect("request builds");
 
         assert_eq!(request.start_block_num, -10);
         assert_eq!(request.stop_block_num, 100);
@@ -476,17 +478,17 @@ mod tests {
         let mut config = config();
         config.params = vec!["bad-param".to_owned()];
 
-        let error = build_blocks_request(&config, package()).expect_err("params reject");
+        let error = build_blocks_request(&config, manifest()).expect_err("params reject");
         assert!(matches!(error, SubstreamsError::InvalidParam { .. }));
     }
 
     #[test]
     fn package_round_trip_decodes() {
-        let package = package();
+        let manifest = manifest();
         let mut bytes = Vec::new();
-        package.encode(&mut bytes).expect("package encodes");
+        manifest.encode(&mut bytes).expect("manifest encodes");
 
-        let decoded = Package::decode(bytes.as_slice()).expect("package decodes");
+        let decoded = Package::decode(bytes.as_slice()).expect("manifest decodes");
         ensure_module_exists(&decoded, "swaps").expect("module exists");
     }
 
@@ -505,7 +507,7 @@ mod tests {
 
     fn config() -> SubstreamsConfig {
         SubstreamsConfig {
-            package: "./demo.spkg".to_owned(),
+            manifest: "./demo.spkg".to_owned(),
             module: "swaps".to_owned(),
             endpoint: Some("localhost:9000".to_owned()),
             network: Some("mainnet".to_owned()),
@@ -522,7 +524,7 @@ mod tests {
         }
     }
 
-    fn package() -> Package {
+    fn manifest() -> Package {
         Package {
             version: 1,
             modules: Some(Modules {

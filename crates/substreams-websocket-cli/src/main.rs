@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 use substreams_websocket::{
-    Config, StreamConfig, StreamDecoder, StreamEvent, SubstreamsClient, SubstreamsConfig,
+    Config, StreamConfig, StreamEvent, StreamName, SubstreamsClient, SubstreamsConfig,
     WebSocketConfig,
 };
 use tracing_subscriber::{EnvFilter, fmt};
@@ -48,8 +48,8 @@ struct StreamArgs {
 
 #[derive(Debug, Args)]
 struct SubstreamsArgs {
-    /// Local path or URL to a Substreams .spkg package.
-    package: String,
+    /// Local path or URL to a Substreams .spkg manifest.
+    manifest: String,
 
     /// Output module to stream.
     module: String,
@@ -190,7 +190,7 @@ impl ServeArgs {
 impl SubstreamsArgs {
     fn into_config(self) -> SubstreamsConfig {
         SubstreamsConfig {
-            package: self.package,
+            manifest: self.manifest,
             module: self.module,
             endpoint: self.endpoint,
             network: self.network,
@@ -259,9 +259,8 @@ struct FileSubstreamsDefaults {
 
 #[derive(Debug, Deserialize)]
 struct FileStreamConfig {
-    id: String,
-    decoder: StreamDecoder,
-    package: String,
+    name: StreamName,
+    manifest: String,
     module: String,
     endpoint: Option<String>,
     network: Option<String>,
@@ -309,10 +308,9 @@ impl FileWebSocketConfig {
 impl FileStreamConfig {
     fn into_config(self, defaults: &FileSubstreamsDefaults) -> StreamConfig {
         StreamConfig {
-            id: self.id,
-            decoder: self.decoder,
+            name: self.name,
             substreams: SubstreamsConfig {
-                package: self.package,
+                manifest: self.manifest,
                 module: self.module,
                 endpoint: self.endpoint.or_else(|| defaults.endpoint.clone()),
                 network: self.network.or_else(|| defaults.network.clone()),

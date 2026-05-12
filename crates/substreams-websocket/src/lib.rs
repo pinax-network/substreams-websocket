@@ -4,7 +4,7 @@ pub mod server;
 pub mod substreams;
 
 pub use config::{
-    Config, ConfigError, StreamConfig, StreamDecoder, StreamDecoderParseError, SubstreamsConfig,
+    Config, ConfigError, StreamConfig, StreamName, StreamNameParseError, SubstreamsConfig,
     WebSocketConfig,
 };
 pub use decoder::{

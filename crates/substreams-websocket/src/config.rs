@@ -8,19 +8,18 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
-    pub id: String,
-    pub decoder: StreamDecoder,
+    pub name: StreamName,
     pub substreams: SubstreamsConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum StreamDecoder {
+pub enum StreamName {
     Swaps,
     Transfers,
 }
 
-impl StreamDecoder {
+impl StreamName {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Swaps => "swaps",
@@ -29,20 +28,20 @@ impl StreamDecoder {
     }
 }
 
-impl std::fmt::Display for StreamDecoder {
+impl std::fmt::Display for StreamName {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl std::str::FromStr for StreamDecoder {
-    type Err = StreamDecoderParseError;
+impl std::str::FromStr for StreamName {
+    type Err = StreamNameParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "swaps" => Ok(Self::Swaps),
             "transfers" => Ok(Self::Transfers),
-            _ => Err(StreamDecoderParseError {
+            _ => Err(StreamNameParseError {
                 value: value.to_owned(),
             }),
         }
@@ -50,14 +49,14 @@ impl std::str::FromStr for StreamDecoder {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("invalid stream decoder {value:?}, expected swaps or transfers")]
-pub struct StreamDecoderParseError {
+#[error("invalid stream name {value:?}, expected swaps or transfers")]
+pub struct StreamNameParseError {
     value: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct SubstreamsConfig {
-    pub package: String,
+    pub manifest: String,
     pub module: String,
     pub endpoint: Option<String>,
     pub network: Option<String>,

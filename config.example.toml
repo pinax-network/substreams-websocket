@@ -15,13 +15,11 @@ production_mode = false
 final_blocks_only = false
 
 [[streams]]
-id = "swaps"
-decoder = "swaps"
-package = "./dex-swaps-v0.5.1.spkg"
+name = "swaps"
+manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/dex-swaps-v0.5.1.spkg"
 module = "map_events"
 
 [[streams]]
-id = "transfers"
-decoder = "transfers"
-package = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg"
+name = "transfers"
+manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg"
 module = "map_events"

@@ -23,19 +23,17 @@ endpoint = "https://solana.substreams.pinax.network:443"
 network = "solana-mainnet"
 
 [[streams]]
-id = "swaps"
-decoder = "swaps"
-package = "./dex-swaps-v0.5.1.spkg"
+name = "swaps"
+manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/dex-swaps-v0.5.1.spkg"
 module = "map_events"
 
 [[streams]]
-id = "transfers"
-decoder = "transfers"
-package = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg"
+name = "transfers"
+manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg"
 module = "map_events"
 ```
 
-To verify Substreams package loading and gRPC connectivity directly:
+To verify Substreams manifest loading and gRPC connectivity directly:
 
 ```bash
 cargo run --bin substreams-websocket -- stream ./dex-swaps-v0.5.1.spkg map_events \
@@ -65,7 +63,7 @@ frames within 600 seconds.
 On startup, the server starts one Substreams read per configured stream and
 broadcasts decoded block messages from each stream to every connected WebSocket
 client. The welcome message includes a `streams` array describing the active
-stream IDs, decoders, networks, packages, and modules.
+stream names, networks, manifests, and modules.
 
 The configured Substreams network is included in the WebSocket session message
 and decoded block messages.
