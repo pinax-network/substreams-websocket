@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package sf.substreams.v1;
+
+import "google/protobuf/timestamp.proto";
+
+message Clock {
+  string id = 1;
+  uint64 number = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+message BlockRef {
+  string id = 1;
+  uint64 number = 2;
+}
