@@ -101,12 +101,58 @@ pub enum ConfigError {
 
     #[error("at least one stream must be configured")]
     NoStreams,
+
+    #[error("stream {index} ({name}) is missing a Substreams endpoint")]
+    MissingStreamEndpoint { index: usize, name: String },
+
+    #[error("stream {index} ({name}) is missing a network")]
+    MissingStreamNetwork { index: usize, name: String },
+
+    #[error("duplicate stream registration: network={network:?} name={name:?}")]
+    DuplicateStream { network: String, name: String },
 }
 
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.streams.is_empty() {
             return Err(ConfigError::NoStreams);
+        }
+
+        let mut seen = std::collections::HashSet::<(String, &'static str)>::new();
+        for (index, stream) in self.streams.iter().enumerate() {
+            let name = stream.name.as_str();
+            let endpoint = stream
+                .substreams
+                .endpoint
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
+            if endpoint.is_empty() {
+                return Err(ConfigError::MissingStreamEndpoint {
+                    index,
+                    name: name.to_owned(),
+                });
+            }
+
+            let network = stream
+                .substreams
+                .network
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
+            if network.is_empty() {
+                return Err(ConfigError::MissingStreamNetwork {
+                    index,
+                    name: name.to_owned(),
+                });
+            }
+
+            if !seen.insert((network.to_owned(), name)) {
+                return Err(ConfigError::DuplicateStream {
+                    network: network.to_owned(),
+                    name: name.to_owned(),
+                });
+            }
         }
 
         validate_path("ws_path", &self.websocket.ws_path)?;
@@ -133,5 +179,101 @@ fn validate_path(field: &'static str, value: &str) -> Result<(), ConfigError> {
         Ok(())
     } else {
         Err(ConfigError::PathMustStartWithSlash { field })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(name: StreamName, network: &str, endpoint: &str) -> StreamConfig {
+        StreamConfig {
+            name,
+            substreams: SubstreamsConfig {
+                manifest: "./demo.spkg".to_owned(),
+                module: "map_events".to_owned(),
+                endpoint: Some(endpoint.to_owned()),
+                network: Some(network.to_owned()),
+                start_block: None,
+                stop_block: "0".to_owned(),
+                params: Vec::new(),
+                plaintext: false,
+                insecure: false,
+                production_mode: false,
+                final_blocks_only: false,
+                token: None,
+                api_key: None,
+                api_key_header: "X-Api-Key".to_owned(),
+                auth_url: None,
+            },
+        }
+    }
+
+    fn websocket() -> WebSocketConfig {
+        WebSocketConfig {
+            listen: "127.0.0.1:0".parse().expect("listen"),
+            ws_path: "/ws".to_owned(),
+            health_path: "/healthz".to_owned(),
+            heartbeat_interval: Duration::from_secs(60),
+            heartbeat_timeout: Duration::from_secs(180),
+            connection_ttl: None,
+            max_clients: 16,
+            client_buffer_size: 16,
+        }
+    }
+
+    #[test]
+    fn rejects_streams_missing_endpoint() {
+        let mut stream = stream(StreamName::Swaps, "solana-mainnet", "");
+        stream.substreams.endpoint = None;
+        let config = Config {
+            streams: vec![stream],
+            websocket: websocket(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::MissingStreamEndpoint { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_streams_missing_network() {
+        let mut stream = stream(StreamName::Transfers, "", "https://e:443");
+        stream.substreams.network = None;
+        let config = Config {
+            streams: vec![stream],
+            websocket: websocket(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::MissingStreamNetwork { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_network_name_pairs() {
+        let config = Config {
+            streams: vec![
+                stream(StreamName::Transfers, "solana-mainnet", "https://e:443"),
+                stream(StreamName::Transfers, "solana-mainnet", "https://e:443"),
+            ],
+            websocket: websocket(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::DuplicateStream { .. })
+        ));
+    }
+
+    #[test]
+    fn allows_same_name_on_different_networks() {
+        let config = Config {
+            streams: vec![
+                stream(StreamName::Transfers, "solana-mainnet", "https://a:443"),
+                stream(StreamName::Transfers, "ethereum-mainnet", "https://b:443"),
+            ],
+            websocket: websocket(),
+        };
+        config.validate().expect("distinct networks are allowed");
     }
 }

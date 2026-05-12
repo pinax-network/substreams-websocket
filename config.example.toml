@@ -7,19 +7,29 @@ heartbeat_timeout_secs = 600
 max_clients = 1024
 client_buffer_size = 1024
 
+# Shared defaults applied to every [[streams]] entry that omits the field.
+# Secrets (api_key/token) and the default endpoint/network are typically read
+# from .env via SUBSTREAMS_* environment variables.
 [substreams]
-endpoint = "https://solana.substreams.pinax.network:443"
-network = "solana-mainnet"
 stop_block = "0"
 production_mode = false
 final_blocks_only = false
 
+# Each [[streams]] entry is identified by the (network, name) pair. The same
+# `name` can appear multiple times as long as each entry targets a different
+# network — for example, SPL transfers on Solana mainnet plus ERC-20 transfers
+# on a future EVM endpoint would both be `name = "transfers"`.
+
 [[streams]]
 name = "swaps"
+network = "solana-mainnet"
+endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/dex-swaps-v0.5.1.spkg"
 module = "map_events"
 
 [[streams]]
 name = "transfers"
+network = "solana-mainnet"
+endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg"
 module = "map_events"
