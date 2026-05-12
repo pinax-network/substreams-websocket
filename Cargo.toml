@@ -15,6 +15,7 @@ rust-version = "1.90"
 [workspace.dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+bs58 = "0.5"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
 futures-util = "0.3"

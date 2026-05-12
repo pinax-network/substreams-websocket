@@ -40,4 +40,8 @@ WebSocket clients connect to `/ws` by default. The server sends heartbeat ping
 frames every 180 seconds and disconnects clients that do not respond with pong
 frames within 600 seconds.
 
+SVM DEX swap payloads are decoded from `dex.swaps.v1.Events` and flattened into
+one JSON-ready message per swap. Solana byte fields are encoded as base58, and
+token amounts are serialized as strings to avoid lossy JSON number handling.
+
 See `.env.example` for the initial environment variables.

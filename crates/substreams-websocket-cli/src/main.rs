@@ -241,9 +241,11 @@ fn format_stream_event(event: StreamEvent) -> String {
             id,
             cursor,
             final_block_height,
-            payload_len,
+            output_type_url,
+            payload,
         } => format!(
-            "block number={number} id={id} final_block_height={final_block_height} payload_len={payload_len} cursor={cursor}"
+            "block number={number} id={id} final_block_height={final_block_height} output_type_url={output_type_url} payload_len={} cursor={cursor}",
+            payload.len()
         ),
         StreamEvent::Undo {
             last_valid_block,
