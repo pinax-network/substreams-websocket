@@ -1,9 +1,11 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
+use serde::Deserialize;
 use substreams_websocket::{
-    Config, StreamEvent, SubstreamsClient, SubstreamsConfig, WebSocketConfig,
+    Config, StreamConfig, StreamEvent, StreamName, SubstreamsClient, SubstreamsConfig,
+    WebSocketConfig,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -26,11 +28,9 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    #[command(flatten)]
-    substreams: SubstreamsArgs,
-
-    #[command(flatten)]
-    websocket: WebSocketArgs,
+    /// Path to the server TOML config.
+    #[arg(short, long, env = "SUBSTREAMS_WEBSOCKET_CONFIG")]
+    config: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -48,8 +48,8 @@ struct StreamArgs {
 
 #[derive(Debug, Args)]
 struct SubstreamsArgs {
-    /// Local path or URL to a Substreams .spkg package.
-    package: String,
+    /// Local path or URL to a Substreams .spkg manifest.
+    manifest: String,
 
     /// Output module to stream.
     module: String,
@@ -70,9 +70,6 @@ struct SubstreamsArgs {
 
     #[arg(short = 't', long, env = "SUBSTREAMS_STOP_BLOCK", default_value = "0")]
     stop_block: String,
-
-    #[arg(short, long, env = "SUBSTREAMS_CURSOR")]
-    cursor: Option<String>,
 
     #[arg(short = 'p', long = "params", env = "SUBSTREAMS_PARAMS")]
     params: Vec<String>,
@@ -155,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve(args) => {
-            let config = args.into_config();
+            let config = args.load_config().await?;
             config.validate()?;
             substreams_websocket::serve(config).await?;
         }
@@ -179,33 +176,26 @@ async fn main() -> anyhow::Result<()> {
 }
 
 impl ServeArgs {
-    fn into_config(self) -> Config {
-        Config {
-            substreams: self.substreams.into_config(),
-            websocket: WebSocketConfig {
-                listen: self.websocket.listen,
-                ws_path: self.websocket.ws_path,
-                health_path: self.websocket.health_path,
-                heartbeat_interval: Duration::from_secs(self.websocket.heartbeat_interval_secs),
-                heartbeat_timeout: Duration::from_secs(self.websocket.heartbeat_timeout_secs),
-                connection_ttl: self.websocket.connection_ttl_secs.map(Duration::from_secs),
-                max_clients: self.websocket.max_clients,
-                client_buffer_size: self.websocket.client_buffer_size,
-            },
-        }
+    async fn load_config(self) -> anyhow::Result<Config> {
+        let contents = tokio::fs::read_to_string(&self.config)
+            .await
+            .with_context(|| format!("failed to read config {}", self.config.display()))?;
+        let config = toml::from_str::<FileConfig>(&contents)
+            .with_context(|| format!("failed to parse config {}", self.config.display()))?;
+
+        Ok(config.into_config())
     }
 }
 
 impl SubstreamsArgs {
     fn into_config(self) -> SubstreamsConfig {
         SubstreamsConfig {
-            package: self.package,
+            manifest: self.manifest,
             module: self.module,
             endpoint: self.endpoint,
             network: self.network,
             start_block: self.start_block,
             stop_block: self.stop_block,
-            cursor: self.cursor,
             params: self.params,
             plaintext: self.plaintext,
             insecure: self.insecure,
@@ -216,6 +206,171 @@ impl SubstreamsArgs {
             api_key_header: self.api_key_header,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct FileConfig {
+    websocket: FileWebSocketConfig,
+    substreams: FileSubstreamsDefaults,
+    streams: Vec<FileStreamConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileWebSocketConfig {
+    #[serde(default = "default_listen")]
+    listen: SocketAddr,
+    #[serde(default = "default_ws_path")]
+    ws_path: String,
+    #[serde(default = "default_health_path")]
+    health_path: String,
+    #[serde(default = "default_heartbeat_interval_secs")]
+    heartbeat_interval_secs: u64,
+    #[serde(default = "default_heartbeat_timeout_secs")]
+    heartbeat_timeout_secs: u64,
+    connection_ttl_secs: Option<u64>,
+    #[serde(default = "default_max_clients")]
+    max_clients: usize,
+    #[serde(default = "default_client_buffer_size")]
+    client_buffer_size: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileSubstreamsDefaults {
+    endpoint: Option<String>,
+    network: Option<String>,
+    start_block: Option<String>,
+    #[serde(default = "default_stop_block")]
+    stop_block: String,
+    #[serde(default)]
+    params: Vec<String>,
+    #[serde(default)]
+    plaintext: bool,
+    #[serde(default)]
+    insecure: bool,
+    #[serde(default)]
+    production_mode: bool,
+    #[serde(default)]
+    final_blocks_only: bool,
+    token: Option<String>,
+    api_key: Option<String>,
+    #[serde(default = "default_api_key_header")]
+    api_key_header: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileStreamConfig {
+    name: StreamName,
+    manifest: String,
+    module: String,
+    endpoint: Option<String>,
+    network: Option<String>,
+    start_block: Option<String>,
+    stop_block: Option<String>,
+    #[serde(default)]
+    params: Vec<String>,
+    plaintext: Option<bool>,
+    insecure: Option<bool>,
+    production_mode: Option<bool>,
+    final_blocks_only: Option<bool>,
+    token: Option<String>,
+    api_key: Option<String>,
+    api_key_header: Option<String>,
+}
+
+impl FileConfig {
+    fn into_config(self) -> Config {
+        Config {
+            streams: self
+                .streams
+                .into_iter()
+                .map(|stream| stream.into_config(&self.substreams))
+                .collect(),
+            websocket: self.websocket.into_config(),
+        }
+    }
+}
+
+impl FileWebSocketConfig {
+    fn into_config(self) -> WebSocketConfig {
+        WebSocketConfig {
+            listen: self.listen,
+            ws_path: self.ws_path,
+            health_path: self.health_path,
+            heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
+            heartbeat_timeout: Duration::from_secs(self.heartbeat_timeout_secs),
+            connection_ttl: self.connection_ttl_secs.map(Duration::from_secs),
+            max_clients: self.max_clients,
+            client_buffer_size: self.client_buffer_size,
+        }
+    }
+}
+
+impl FileStreamConfig {
+    fn into_config(self, defaults: &FileSubstreamsDefaults) -> StreamConfig {
+        StreamConfig {
+            name: self.name,
+            substreams: SubstreamsConfig {
+                manifest: self.manifest,
+                module: self.module,
+                endpoint: self.endpoint.or_else(|| defaults.endpoint.clone()),
+                network: self.network.or_else(|| defaults.network.clone()),
+                start_block: self.start_block.or_else(|| defaults.start_block.clone()),
+                stop_block: self
+                    .stop_block
+                    .unwrap_or_else(|| defaults.stop_block.clone()),
+                params: if self.params.is_empty() {
+                    defaults.params.clone()
+                } else {
+                    self.params
+                },
+                plaintext: self.plaintext.unwrap_or(defaults.plaintext),
+                insecure: self.insecure.unwrap_or(defaults.insecure),
+                production_mode: self.production_mode.unwrap_or(defaults.production_mode),
+                final_blocks_only: self.final_blocks_only.unwrap_or(defaults.final_blocks_only),
+                token: self.token.or_else(|| defaults.token.clone()),
+                api_key: self.api_key.or_else(|| defaults.api_key.clone()),
+                api_key_header: self
+                    .api_key_header
+                    .unwrap_or_else(|| defaults.api_key_header.clone()),
+            },
+        }
+    }
+}
+
+fn default_listen() -> SocketAddr {
+    "127.0.0.1:8080".parse().expect("default listen parses")
+}
+
+fn default_ws_path() -> String {
+    "/ws".to_owned()
+}
+
+fn default_health_path() -> String {
+    "/healthz".to_owned()
+}
+
+fn default_heartbeat_interval_secs() -> u64 {
+    180
+}
+
+fn default_heartbeat_timeout_secs() -> u64 {
+    600
+}
+
+fn default_max_clients() -> usize {
+    1024
+}
+
+fn default_client_buffer_size() -> usize {
+    1024
+}
+
+fn default_stop_block() -> String {
+    "0".to_owned()
+}
+
+fn default_api_key_header() -> String {
+    "X-Api-Key".to_owned()
 }
 
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {
@@ -239,18 +394,16 @@ fn format_stream_event(event: StreamEvent) -> String {
         StreamEvent::Block {
             number,
             id,
-            cursor,
-            final_block_height,
+            timestamp,
             output_type_url,
             payload,
         } => format!(
-            "block number={number} id={id} final_block_height={final_block_height} output_type_url={output_type_url} payload_len={} cursor={cursor}",
+            "block block_num={number} block_hash={id} timestamp={timestamp} output_type_url={output_type_url} payload_len={}",
             payload.len()
         ),
-        StreamEvent::Undo {
-            last_valid_block,
-            last_valid_cursor,
-        } => format!("undo last_valid_block={last_valid_block} cursor={last_valid_cursor}"),
+        StreamEvent::Undo { last_valid_block } => {
+            format!("undo last_valid_block={last_valid_block}")
+        }
         StreamEvent::Fatal { message } => format!("fatal message={message}"),
         StreamEvent::SnapshotData {
             module_name,
@@ -259,7 +412,7 @@ fn format_stream_event(event: StreamEvent) -> String {
         } => format!(
             "snapshot_data module={module_name} sent_keys={sent_keys} total_keys={total_keys}"
         ),
-        StreamEvent::SnapshotComplete { cursor } => format!("snapshot_complete cursor={cursor}"),
+        StreamEvent::SnapshotComplete => "snapshot_complete".to_owned(),
         StreamEvent::Unknown => "unknown".to_owned(),
     }
 }

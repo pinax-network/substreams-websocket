@@ -67,35 +67,37 @@ pub enum SubstreamsError {
     #[error("invalid params value {value:?}, expected module=value")]
     InvalidParam { value: String },
 
-    #[error("failed to read package {source}: {error}")]
+    #[error("failed to read manifest {source}: {error}")]
     ReadPackage {
         source: String,
         #[source]
         error: std::io::Error,
     },
 
-    #[error("failed to fetch package {source}: {error}")]
+    #[error("failed to fetch manifest {source}: {error}")]
     FetchPackage {
         source: String,
         #[source]
         error: reqwest::Error,
     },
 
-    #[error("failed to decompress zstd package {source}: {error}")]
+    #[error("failed to decompress zstd manifest {source}: {error}")]
     DecompressPackage {
         source: String,
         #[source]
         error: std::io::Error,
     },
 
-    #[error("failed to decode package {source}: {error}")]
+    #[error("failed to decode manifest {source}: {error}")]
     DecodePackage {
         source: String,
         #[source]
         error: prost::DecodeError,
     },
 
-    #[error("Substreams package does not define module {module:?}; available modules: {available}")]
+    #[error(
+        "Substreams manifest does not define module {module:?}; available modules: {available}"
+    )]
     MissingModule { module: String, available: String },
 
     #[error("failed to connect to Substreams endpoint: {0}")]
@@ -118,14 +120,12 @@ pub enum StreamEvent {
     Block {
         number: u64,
         id: String,
-        cursor: String,
-        final_block_height: u64,
+        timestamp: String,
         output_type_url: String,
         payload: Vec<u8>,
     },
     Undo {
         last_valid_block: u64,
-        last_valid_cursor: String,
     },
     Fatal {
         message: String,
@@ -135,9 +135,7 @@ pub enum StreamEvent {
         sent_keys: u64,
         total_keys: u64,
     },
-    SnapshotComplete {
-        cursor: String,
-    },
+    SnapshotComplete,
     Unknown,
 }
 
@@ -151,9 +149,9 @@ impl SubstreamsClient {
     }
 
     pub async fn stream(self) -> Result<SubstreamsStream, SubstreamsError> {
-        let package = load_package(&self.config.package).await?;
-        ensure_module_exists(&package, &self.config.module)?;
-        let request = build_blocks_request(&self.config, package)?;
+        let manifest = load_package(&self.config.manifest).await?;
+        ensure_module_exists(&manifest, &self.config.module)?;
+        let request = build_blocks_request(&self.config, manifest)?;
         let channel = connect_channel(&self.config).await?;
         let mut client = StreamClient::new(channel);
         let mut request = Request::new(request);
@@ -191,6 +189,7 @@ impl From<Response> for StreamEvent {
             },
             Some(response::Message::BlockScopedData(data)) => {
                 let clock = data.clock.unwrap_or_default();
+                let timestamp = format_clickhouse_timestamp(clock.timestamp);
                 let output = data.output.and_then(|output| output.map_output);
                 let output_type_url = output
                     .as_ref()
@@ -201,15 +200,13 @@ impl From<Response> for StreamEvent {
                 Self::Block {
                     number: clock.number,
                     id: clock.id,
-                    cursor: data.cursor,
-                    final_block_height: data.final_block_height,
+                    timestamp,
                     output_type_url,
                     payload,
                 }
             }
             Some(response::Message::BlockUndoSignal(undo)) => Self::Undo {
                 last_valid_block: undo.last_valid_block.map(|block| block.number).unwrap_or(0),
-                last_valid_cursor: undo.last_valid_cursor,
             },
             Some(response::Message::FatalError(error)) => Self::Fatal {
                 message: error.message,
@@ -219,12 +216,20 @@ impl From<Response> for StreamEvent {
                 sent_keys: data.sent_keys,
                 total_keys: data.total_keys,
             },
-            Some(response::Message::DebugSnapshotComplete(complete)) => Self::SnapshotComplete {
-                cursor: complete.cursor,
-            },
+            Some(response::Message::DebugSnapshotComplete(_)) => Self::SnapshotComplete,
             None => Self::Unknown,
         }
     }
+}
+
+fn format_clickhouse_timestamp(timestamp: Option<prost_types::Timestamp>) -> String {
+    let value = timestamp.unwrap_or_default().to_string();
+    let value = value
+        .split_once('.')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or_else(|| value.trim_end_matches('Z'));
+
+    value.replace('T', " ")
 }
 
 pub async fn load_package(source: &str) -> Result<Package, SubstreamsError> {
@@ -287,8 +292,8 @@ fn maybe_decompress_zstd(source: &str, bytes: Vec<u8>) -> Result<Vec<u8>, Substr
     })
 }
 
-fn ensure_module_exists(package: &Package, module: &str) -> Result<(), SubstreamsError> {
-    let Some(modules) = package.modules.as_ref() else {
+fn ensure_module_exists(manifest: &Package, module: &str) -> Result<(), SubstreamsError> {
+    let Some(modules) = manifest.modules.as_ref() else {
         return Err(SubstreamsError::MissingModule {
             module: module.to_owned(),
             available: "none".to_owned(),
@@ -322,7 +327,7 @@ pub fn build_blocks_request(
 ) -> Result<BlocksRequest, SubstreamsError> {
     Ok(BlocksRequest {
         start_block_num: parse_start_block(config.start_block.as_deref())?,
-        start_cursor: config.cursor.clone().unwrap_or_default(),
+        start_cursor: String::new(),
         stop_block_num: parse_stop_block(&config.stop_block)?,
         final_blocks_only: config.final_blocks_only,
         production_mode: config.production_mode,
@@ -452,11 +457,11 @@ mod tests {
     #[test]
     fn builds_request_from_config() {
         let config = config();
-        let request = build_blocks_request(&config, package()).expect("request builds");
+        let request = build_blocks_request(&config, manifest()).expect("request builds");
 
         assert_eq!(request.start_block_num, -10);
         assert_eq!(request.stop_block_num, 100);
-        assert_eq!(request.start_cursor, "cursor");
+        assert_eq!(request.start_cursor, "");
         assert_eq!(request.output_module, "swaps");
         assert_eq!(request.network, "mainnet");
         assert_eq!(
@@ -473,29 +478,41 @@ mod tests {
         let mut config = config();
         config.params = vec!["bad-param".to_owned()];
 
-        let error = build_blocks_request(&config, package()).expect_err("params reject");
+        let error = build_blocks_request(&config, manifest()).expect_err("params reject");
         assert!(matches!(error, SubstreamsError::InvalidParam { .. }));
     }
 
     #[test]
     fn package_round_trip_decodes() {
-        let package = package();
+        let manifest = manifest();
         let mut bytes = Vec::new();
-        package.encode(&mut bytes).expect("package encodes");
+        manifest.encode(&mut bytes).expect("manifest encodes");
 
-        let decoded = Package::decode(bytes.as_slice()).expect("package decodes");
+        let decoded = Package::decode(bytes.as_slice()).expect("manifest decodes");
         ensure_module_exists(&decoded, "swaps").expect("module exists");
+    }
+
+    #[test]
+    fn formats_timestamps_for_clickhouse_datetime() {
+        let timestamp = prost_types::Timestamp {
+            seconds: 1_778_608_800,
+            nanos: 123_000_000,
+        };
+
+        assert_eq!(
+            format_clickhouse_timestamp(Some(timestamp)),
+            "2026-05-12 18:00:00"
+        );
     }
 
     fn config() -> SubstreamsConfig {
         SubstreamsConfig {
-            package: "./demo.spkg".to_owned(),
+            manifest: "./demo.spkg".to_owned(),
             module: "swaps".to_owned(),
             endpoint: Some("localhost:9000".to_owned()),
             network: Some("mainnet".to_owned()),
             start_block: Some("-10".to_owned()),
             stop_block: "100".to_owned(),
-            cursor: Some("cursor".to_owned()),
             params: vec!["swaps=protocol=raydium".to_owned()],
             plaintext: true,
             insecure: false,
@@ -507,7 +524,7 @@ mod tests {
         }
     }
 
-    fn package() -> Package {
+    fn manifest() -> Package {
         Package {
             version: 1,
             modules: Some(Modules {

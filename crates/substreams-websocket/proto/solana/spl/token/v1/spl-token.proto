@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package solana.spl.token.v1;
+
+message Events {
+  repeated Transaction transactions = 1;
+}
+
+message Transaction {
+  bytes signature = 1;
+  bytes fee_payer = 2;
+  repeated bytes signers = 3;
+  uint64 fee = 4;
+  uint64 compute_units_consumed = 5;
+  repeated Instruction instructions = 6;
+}
+
+message Instruction {
+  bytes program_id = 1;
+  uint32 stack_height = 2;
+  bool is_root = 3;
+
+  oneof instruction {
+    Transfer transfer = 10;
+    Transfer mint = 11;
+    Transfer burn = 12;
+  }
+}
+
+message Transfer {
+  bytes authority = 1;
+  repeated bytes multisig_authority = 2;
+  bytes source = 10;
+  bytes destination = 11;
+  uint64 amount = 12;
+  bytes mint = 13;
+  optional uint32 decimals = 14;
+}

@@ -2,19 +2,66 @@ use std::{net::SocketAddr, time::Duration};
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub substreams: SubstreamsConfig,
+    pub streams: Vec<StreamConfig>,
     pub websocket: WebSocketConfig,
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamConfig {
+    pub name: StreamName,
+    pub substreams: SubstreamsConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamName {
+    Swaps,
+    Transfers,
+}
+
+impl StreamName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Swaps => "swaps",
+            Self::Transfers => "transfers",
+        }
+    }
+}
+
+impl std::fmt::Display for StreamName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for StreamName {
+    type Err = StreamNameParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "swaps" => Ok(Self::Swaps),
+            "transfers" => Ok(Self::Transfers),
+            _ => Err(StreamNameParseError {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid stream name {value:?}, expected swaps or transfers")]
+pub struct StreamNameParseError {
+    value: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct SubstreamsConfig {
-    pub package: String,
+    pub manifest: String,
     pub module: String,
     pub endpoint: Option<String>,
     pub network: Option<String>,
     pub start_block: Option<String>,
     pub stop_block: String,
-    pub cursor: Option<String>,
     pub params: Vec<String>,
     pub plaintext: bool,
     pub insecure: bool,
@@ -50,10 +97,17 @@ pub enum ConfigError {
 
     #[error("client buffer size must be greater than zero")]
     InvalidClientBufferSize,
+
+    #[error("at least one stream must be configured")]
+    NoStreams,
 }
 
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.streams.is_empty() {
+            return Err(ConfigError::NoStreams);
+        }
+
         validate_path("ws_path", &self.websocket.ws_path)?;
         validate_path("health_path", &self.websocket.health_path)?;
 

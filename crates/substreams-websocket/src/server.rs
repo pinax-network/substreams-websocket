@@ -25,9 +25,12 @@ use tokio::{
     time::Instant,
 };
 use tower_http::trace::TraceLayer;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::Config;
+use crate::{
+    BlockContext, Config, StreamConfig, StreamEvent, StreamName, SubstreamsClient, decode_swaps,
+    decode_transfers,
+};
 
 type ClientId = u64;
 
@@ -65,6 +68,7 @@ pub async fn serve_with_shutdown(
     let listen = state.config.websocket.listen;
     let ws_path = state.config.websocket.ws_path.clone();
     let health_path = state.config.websocket.health_path.clone();
+    let stream_tasks = spawn_streams(&state);
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(listen)
@@ -74,7 +78,13 @@ pub async fn serve_with_shutdown(
             source,
         })?;
 
-    serve_listener(listener, app, ws_path, health_path, shutdown).await
+    let result = serve_listener(listener, app, ws_path, health_path, shutdown).await;
+
+    for task in stream_tasks {
+        task.abort();
+    }
+
+    result
 }
 
 fn build_app(state: AppState) -> Router {
@@ -83,6 +93,161 @@ fn build_app(state: AppState) -> Router {
         .route(&state.config.websocket.ws_path, get(websocket))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+fn spawn_streams(state: &AppState) -> Vec<tokio::task::JoinHandle<()>> {
+    state
+        .config
+        .streams
+        .iter()
+        .cloned()
+        .map(|stream| {
+            let clients = state.clients.clone();
+            tokio::spawn(async move {
+                run_substream(stream, clients).await;
+            })
+        })
+        .collect()
+}
+
+fn stream_metadata(stream: &StreamConfig) -> serde_json::Value {
+    serde_json::json!({
+        "name": stream.name.as_str(),
+        "network": stream.substreams.network.clone().unwrap_or_default(),
+        "module": stream.substreams.module,
+        "manifest": stream.substreams.manifest,
+    })
+}
+
+async fn run_substream(stream: StreamConfig, clients: ClientRegistry) {
+    info!(
+        stream = %stream.name,
+        network = %stream.substreams.network.clone().unwrap_or_default(),
+        module = %stream.substreams.module,
+        manifest = %stream.substreams.manifest,
+        "starting Substreams read"
+    );
+
+    let client = SubstreamsClient::new(stream.substreams.clone());
+    let mut substream = match client.stream().await {
+        Ok(substream) => substream,
+        Err(error) => {
+            error!(stream = %stream.name, %error, "Substreams read failed to start");
+            clients
+                .broadcast_json(stream_status(&stream, "error", error.to_string()))
+                .await;
+            return;
+        }
+    };
+
+    clients
+        .broadcast_json(stream_status(&stream, "started", String::new()))
+        .await;
+
+    loop {
+        let event = match substream.next_event().await {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                info!(stream = %stream.name, "Substreams read completed");
+                clients
+                    .broadcast_json(stream_status(&stream, "completed", String::new()))
+                    .await;
+                break;
+            }
+            Err(error) => {
+                error!(stream = %stream.name, %error, "Substreams read failed");
+                clients
+                    .broadcast_json(stream_status(&stream, "error", error.to_string()))
+                    .await;
+                break;
+            }
+        };
+
+        handle_substream_event(&stream, &clients, event).await;
+    }
+}
+
+async fn handle_substream_event(
+    stream: &StreamConfig,
+    clients: &ClientRegistry,
+    event: StreamEvent,
+) {
+    match event {
+        StreamEvent::Block {
+            number,
+            id,
+            timestamp,
+            output_type_url: _,
+            payload,
+        } => {
+            let context = BlockContext {
+                block_num: number,
+                block_hash: id,
+                timestamp,
+                network: stream.substreams.network.clone().unwrap_or_default(),
+            };
+            let decoded = match decode_stream_payload(stream.name, &payload, context) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    warn!(stream = %stream.name, %error, "failed to decode Substreams block output");
+                    clients
+                        .broadcast_json(stream_status(stream, "decode_error", error.to_string()))
+                        .await;
+                    return;
+                }
+            };
+
+            clients.broadcast_json(decoded).await;
+        }
+        StreamEvent::Fatal { message } => {
+            clients
+                .broadcast_json(stream_status(stream, "fatal", message))
+                .await;
+        }
+        StreamEvent::Undo { last_valid_block } => {
+            clients
+                .broadcast_json(serde_json::json!({
+                    "type": "stream",
+                    "status": "undo",
+                    "name": stream.name.as_str(),
+                    "network": stream.substreams.network.clone().unwrap_or_default(),
+                    "last_valid_block": last_valid_block,
+                }))
+                .await;
+        }
+        StreamEvent::Session { .. }
+        | StreamEvent::Progress { .. }
+        | StreamEvent::SnapshotData { .. }
+        | StreamEvent::SnapshotComplete
+        | StreamEvent::Unknown => {}
+    }
+}
+
+fn decode_stream_payload(
+    name: StreamName,
+    payload: &[u8],
+    context: BlockContext,
+) -> Result<serde_json::Value, crate::DecodeError> {
+    match name {
+        StreamName::Swaps => serde_json::to_value(decode_swaps(payload, context)?),
+        StreamName::Transfers => serde_json::to_value(decode_transfers(payload, context)?),
+    }
+    .map_err(crate::DecodeError::Serialize)
+}
+
+fn stream_status(stream: &StreamConfig, status: &str, message: String) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "type": "stream",
+        "status": status,
+        "name": stream.name.as_str(),
+        "network": stream.substreams.network.clone().unwrap_or_default(),
+    });
+
+    if !message.is_empty() {
+        value["message"] = serde_json::Value::String(message);
+    }
+
+    value
 }
 
 async fn serve_listener(
@@ -126,12 +291,12 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         return;
     };
 
-    info!(client_id = client.id, "WebSocket client connected");
+    info!(client_id = client.name, "WebSocket client connected");
 
     let (mut sender, mut receiver) = socket.split();
     let mut messages = client.rx;
     let outbound = client.tx.clone();
-    let client_id = client.id;
+    let client_id = client.name;
     let connected_at = Instant::now();
     let last_pong_at = Arc::new(RwLock::new(connected_at));
     let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
@@ -159,8 +324,7 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         "type": "session",
         "status": "connected",
         "client_id": client_id,
-        "module": state.config.substreams.module,
-        "package": state.config.substreams.package,
+        "streams": state.config.streams.iter().map(stream_metadata).collect::<Vec<_>>(),
     });
 
     if outbound
@@ -233,27 +397,43 @@ impl ClientRegistry {
             return None;
         }
 
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let name = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel(config.websocket.client_buffer_size);
-        clients.insert(id, ClientHandle);
+        clients.insert(name, ClientHandle { tx: tx.clone() });
 
-        Some(RegisteredClient { id, tx, rx })
+        Some(RegisteredClient { name, tx, rx })
     }
 
-    async fn unregister(&self, id: ClientId) {
-        self.clients.write().await.remove(&id);
+    async fn unregister(&self, name: ClientId) {
+        self.clients.write().await.remove(&name);
     }
 
     async fn active_count(&self) -> usize {
         self.clients.read().await.len()
     }
+
+    async fn broadcast_json(&self, value: serde_json::Value) {
+        let message = Message::Text(value.to_string().into());
+        let clients = self.clients.read().await;
+
+        for (client_id, client) in clients.iter() {
+            if client.tx.try_send(message.clone()).is_err() {
+                warn!(
+                    client_id,
+                    "dropping broadcast message for slow WebSocket client"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
-struct ClientHandle;
+struct ClientHandle {
+    tx: mpsc::Sender<Message>,
+}
 
 struct RegisteredClient {
-    id: ClientId,
+    name: ClientId,
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
 }
@@ -372,8 +552,11 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&text).expect("welcome json");
         assert_eq!(body["type"], "session");
         assert_eq!(body["status"], "connected");
-        assert_eq!(body["module"], "swaps");
-        assert_eq!(body["package"], "./demo.spkg");
+        assert_eq!(body["streams"][0]["name"], "swaps");
+        assert_eq!(body["streams"][0]["name"], "swaps");
+        assert_eq!(body["streams"][0]["module"], "swaps");
+        assert_eq!(body["streams"][0]["network"], "solana-mainnet");
+        assert_eq!(body["streams"][0]["manifest"], "./demo.spkg");
         assert!(body["client_id"].as_u64().is_some());
 
         socket
@@ -549,23 +732,25 @@ mod tests {
 
     fn config() -> Config {
         Config {
-            substreams: SubstreamsConfig {
-                package: "./demo.spkg".to_owned(),
-                module: "swaps".to_owned(),
-                endpoint: None,
-                network: None,
-                start_block: None,
-                stop_block: "0".to_owned(),
-                cursor: None,
-                params: Vec::new(),
-                plaintext: false,
-                insecure: false,
-                production_mode: false,
-                final_blocks_only: false,
-                token: None,
-                api_key: None,
-                api_key_header: "X-Api-Key".to_owned(),
-            },
+            streams: vec![StreamConfig {
+                name: StreamName::Swaps,
+                substreams: SubstreamsConfig {
+                    manifest: "./demo.spkg".to_owned(),
+                    module: "swaps".to_owned(),
+                    endpoint: None,
+                    network: Some("solana-mainnet".to_owned()),
+                    start_block: None,
+                    stop_block: "0".to_owned(),
+                    params: Vec::new(),
+                    plaintext: false,
+                    insecure: false,
+                    production_mode: false,
+                    final_blocks_only: false,
+                    token: None,
+                    api_key: None,
+                    api_key_header: "X-Api-Key".to_owned(),
+                },
+            }],
             websocket: WebSocketConfig {
                 listen: "127.0.0.1:0".parse().expect("listen address"),
                 ws_path: "/ws".to_owned(),
