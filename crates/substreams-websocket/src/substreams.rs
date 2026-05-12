@@ -118,14 +118,12 @@ pub enum StreamEvent {
     Block {
         number: u64,
         id: String,
-        cursor: String,
-        final_block_height: u64,
+        timestamp: String,
         output_type_url: String,
         payload: Vec<u8>,
     },
     Undo {
         last_valid_block: u64,
-        last_valid_cursor: String,
     },
     Fatal {
         message: String,
@@ -135,9 +133,7 @@ pub enum StreamEvent {
         sent_keys: u64,
         total_keys: u64,
     },
-    SnapshotComplete {
-        cursor: String,
-    },
+    SnapshotComplete,
     Unknown,
 }
 
@@ -191,6 +187,7 @@ impl From<Response> for StreamEvent {
             },
             Some(response::Message::BlockScopedData(data)) => {
                 let clock = data.clock.unwrap_or_default();
+                let timestamp = format_clickhouse_timestamp(clock.timestamp);
                 let output = data.output.and_then(|output| output.map_output);
                 let output_type_url = output
                     .as_ref()
@@ -201,15 +198,13 @@ impl From<Response> for StreamEvent {
                 Self::Block {
                     number: clock.number,
                     id: clock.id,
-                    cursor: data.cursor,
-                    final_block_height: data.final_block_height,
+                    timestamp,
                     output_type_url,
                     payload,
                 }
             }
             Some(response::Message::BlockUndoSignal(undo)) => Self::Undo {
                 last_valid_block: undo.last_valid_block.map(|block| block.number).unwrap_or(0),
-                last_valid_cursor: undo.last_valid_cursor,
             },
             Some(response::Message::FatalError(error)) => Self::Fatal {
                 message: error.message,
@@ -219,12 +214,20 @@ impl From<Response> for StreamEvent {
                 sent_keys: data.sent_keys,
                 total_keys: data.total_keys,
             },
-            Some(response::Message::DebugSnapshotComplete(complete)) => Self::SnapshotComplete {
-                cursor: complete.cursor,
-            },
+            Some(response::Message::DebugSnapshotComplete(_)) => Self::SnapshotComplete,
             None => Self::Unknown,
         }
     }
+}
+
+fn format_clickhouse_timestamp(timestamp: Option<prost_types::Timestamp>) -> String {
+    let value = timestamp.unwrap_or_default().to_string();
+    let value = value
+        .split_once('.')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or_else(|| value.trim_end_matches('Z'));
+
+    value.replace('T', " ")
 }
 
 pub async fn load_package(source: &str) -> Result<Package, SubstreamsError> {
@@ -322,7 +325,7 @@ pub fn build_blocks_request(
 ) -> Result<BlocksRequest, SubstreamsError> {
     Ok(BlocksRequest {
         start_block_num: parse_start_block(config.start_block.as_deref())?,
-        start_cursor: config.cursor.clone().unwrap_or_default(),
+        start_cursor: String::new(),
         stop_block_num: parse_stop_block(&config.stop_block)?,
         final_blocks_only: config.final_blocks_only,
         production_mode: config.production_mode,
@@ -456,7 +459,7 @@ mod tests {
 
         assert_eq!(request.start_block_num, -10);
         assert_eq!(request.stop_block_num, 100);
-        assert_eq!(request.start_cursor, "cursor");
+        assert_eq!(request.start_cursor, "");
         assert_eq!(request.output_module, "swaps");
         assert_eq!(request.network, "mainnet");
         assert_eq!(
@@ -487,6 +490,19 @@ mod tests {
         ensure_module_exists(&decoded, "swaps").expect("module exists");
     }
 
+    #[test]
+    fn formats_timestamps_for_clickhouse_datetime() {
+        let timestamp = prost_types::Timestamp {
+            seconds: 1_778_608_800,
+            nanos: 123_000_000,
+        };
+
+        assert_eq!(
+            format_clickhouse_timestamp(Some(timestamp)),
+            "2026-05-12 18:00:00"
+        );
+    }
+
     fn config() -> SubstreamsConfig {
         SubstreamsConfig {
             package: "./demo.spkg".to_owned(),
@@ -495,7 +511,6 @@ mod tests {
             network: Some("mainnet".to_owned()),
             start_block: Some("-10".to_owned()),
             stop_block: "100".to_owned(),
-            cursor: Some("cursor".to_owned()),
             params: vec!["swaps=protocol=raydium".to_owned()],
             plaintext: true,
             insecure: false,

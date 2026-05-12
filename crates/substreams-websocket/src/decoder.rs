@@ -9,39 +9,60 @@ pub mod pb {
             }
         }
     }
+
+    pub mod solana {
+        pub mod spl {
+            pub mod token {
+                pub mod v1 {
+                    tonic::include_proto!("solana.spl.token.v1");
+                }
+            }
+        }
+    }
 }
 
-use pb::dex::swaps::v1::{Events, Protocol, Transaction};
+use pb::{
+    dex::swaps::v1::{Events as SwapEvents, Protocol, Swap, Transaction as SwapTransaction},
+    solana::spl::token::v1::{
+        Events as TransferEvents, Instruction, Transaction as TransferTransaction, Transfer,
+        instruction,
+    },
+};
 
 #[derive(Debug, Clone)]
 pub struct BlockContext {
-    pub number: u64,
-    pub id: String,
-    pub cursor: String,
-    pub final_block_height: u64,
+    pub block_num: u64,
+    pub block_hash: String,
+    pub timestamp: String,
+    pub network: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error("failed to decode dex.swaps.v1.Events: {0}")]
-    Events(#[from] prost::DecodeError),
+    SwapEvents(#[source] prost::DecodeError),
+
+    #[error("failed to decode solana.spl.token.v1.Events: {0}")]
+    TransferEvents(#[source] prost::DecodeError),
+
+    #[error("failed to serialize decoded payload: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct SwapMessage {
+pub struct SwapBlockMessage {
     #[serde(rename = "type")]
     pub kind: &'static str,
+    pub network: String,
     pub block: BlockRef,
-    pub cursor: String,
-    pub transaction: TransactionRef,
-    pub swap: SwapRef,
+    pub transactions: Vec<TransactionRef>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BlockRef {
     pub number: u64,
-    pub id: String,
-    pub final_block_height: u64,
+    pub hash: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -49,8 +70,44 @@ pub struct TransactionRef {
     pub signature: String,
     pub fee_payer: String,
     pub signers: Vec<String>,
-    pub fee: String,
-    pub compute_units_consumed: String,
+    pub fee: u64,
+    pub compute_units_consumed: u64,
+    pub swaps: Vec<SwapRef>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TransferBlockMessage {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub network: String,
+    pub block: BlockRef,
+    pub transactions: Vec<TransferTransactionRef>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TransferTransactionRef {
+    pub signature: String,
+    pub fee_payer: String,
+    pub signers: Vec<String>,
+    pub fee: u64,
+    pub compute_units_consumed: u64,
+    pub transfers: Vec<TransferRef>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TransferRef {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub program_id: String,
+    pub stack_height: u32,
+    pub is_root: bool,
+    pub authority: String,
+    pub multisig_authority: Vec<String>,
+    pub source: String,
+    pub destination: String,
+    pub amount: u64,
+    pub mint: String,
+    pub decimals: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -62,29 +119,40 @@ pub struct SwapRef {
     pub amm_pool: String,
     pub user: String,
     pub input_mint: String,
-    pub input_amount: String,
+    pub input_amount: u64,
     pub output_mint: String,
-    pub output_amount: String,
+    pub output_amount: u64,
 }
 
 pub fn decode_swaps(
     payload: &[u8],
     context: BlockContext,
-) -> Result<Vec<SwapMessage>, DecodeError> {
-    let events = Events::decode(payload)?;
+) -> Result<SwapBlockMessage, DecodeError> {
+    let events = SwapEvents::decode(payload).map_err(DecodeError::SwapEvents)?;
     Ok(normalize_events(events, context))
 }
 
-pub fn normalize_events(events: Events, context: BlockContext) -> Vec<SwapMessage> {
-    events
+pub fn normalize_events(events: SwapEvents, context: BlockContext) -> SwapBlockMessage {
+    let transactions = events
         .transactions
         .into_iter()
-        .flat_map(|transaction| normalize_transaction(transaction, &context))
-        .collect()
+        .map(normalize_transaction)
+        .collect();
+
+    SwapBlockMessage {
+        kind: "swaps",
+        network: context.network,
+        block: BlockRef {
+            number: context.block_num,
+            hash: context.block_hash,
+            timestamp: context.timestamp,
+        },
+        transactions,
+    }
 }
 
-fn normalize_transaction(transaction: Transaction, context: &BlockContext) -> Vec<SwapMessage> {
-    let transaction_ref = TransactionRef {
+fn normalize_transaction(transaction: SwapTransaction) -> TransactionRef {
+    TransactionRef {
         signature: encode_bytes(&transaction.signature),
         fee_payer: encode_bytes(&transaction.fee_payer),
         signers: transaction
@@ -92,42 +160,127 @@ fn normalize_transaction(transaction: Transaction, context: &BlockContext) -> Ve
             .iter()
             .map(|signer| encode_bytes(signer))
             .collect(),
-        fee: transaction.fee.to_string(),
-        compute_units_consumed: transaction.compute_units_consumed.to_string(),
+        fee: transaction.fee,
+        compute_units_consumed: transaction.compute_units_consumed,
+        swaps: transaction.swaps.into_iter().map(normalize_swap).collect(),
+    }
+}
+
+pub fn decode_transfers(
+    payload: &[u8],
+    context: BlockContext,
+) -> Result<TransferBlockMessage, DecodeError> {
+    let events = TransferEvents::decode(payload).map_err(DecodeError::TransferEvents)?;
+    Ok(normalize_transfer_events(events, context))
+}
+
+pub fn normalize_transfer_events(
+    events: TransferEvents,
+    context: BlockContext,
+) -> TransferBlockMessage {
+    let transactions = events
+        .transactions
+        .into_iter()
+        .map(normalize_transfer_transaction)
+        .collect();
+
+    TransferBlockMessage {
+        kind: "transfers",
+        network: context.network,
+        block: BlockRef {
+            number: context.block_num,
+            hash: context.block_hash,
+            timestamp: context.timestamp,
+        },
+        transactions,
+    }
+}
+
+fn normalize_transfer_transaction(transaction: TransferTransaction) -> TransferTransactionRef {
+    TransferTransactionRef {
+        signature: encode_bytes(&transaction.signature),
+        fee_payer: encode_bytes(&transaction.fee_payer),
+        signers: transaction
+            .signers
+            .iter()
+            .map(|signer| encode_bytes(signer))
+            .collect(),
+        fee: transaction.fee,
+        compute_units_consumed: transaction.compute_units_consumed,
+        transfers: transaction
+            .instructions
+            .into_iter()
+            .filter_map(normalize_transfer_instruction)
+            .collect(),
+    }
+}
+
+fn normalize_transfer_instruction(instruction: Instruction) -> Option<TransferRef> {
+    let (kind, transfer) = match instruction.instruction? {
+        instruction::Instruction::Transfer(transfer) => ("transfer", transfer),
+        instruction::Instruction::Mint(transfer) => ("mint", transfer),
+        instruction::Instruction::Burn(transfer) => ("burn", transfer),
     };
 
-    transaction
-        .swaps
-        .into_iter()
-        .map(|swap| SwapMessage {
-            kind: "swap",
-            block: BlockRef {
-                number: context.number,
-                id: context.id.clone(),
-                final_block_height: context.final_block_height,
-            },
-            cursor: context.cursor.clone(),
-            transaction: transaction_ref.clone(),
-            swap: SwapRef {
-                protocol: protocol_name(swap.protocol),
-                program_id: encode_bytes(&swap.program_id),
-                stack_height: swap.stack_height,
-                amm: encode_bytes(&swap.amm),
-                amm_pool: encode_bytes(&swap.amm_pool),
-                user: encode_bytes(&swap.user),
-                input_mint: encode_bytes(&swap.input_mint),
-                input_amount: swap.input_amount.to_string(),
-                output_mint: encode_bytes(&swap.output_mint),
-                output_amount: swap.output_amount.to_string(),
-            },
-        })
-        .collect()
+    Some(normalize_transfer(
+        kind,
+        transfer,
+        instruction.program_id,
+        instruction.stack_height,
+        instruction.is_root,
+    ))
+}
+
+fn normalize_transfer(
+    kind: &'static str,
+    transfer: Transfer,
+    program_id: Vec<u8>,
+    stack_height: u32,
+    is_root: bool,
+) -> TransferRef {
+    TransferRef {
+        kind,
+        program_id: encode_bytes(&program_id),
+        stack_height,
+        is_root,
+        authority: encode_bytes(&transfer.authority),
+        multisig_authority: transfer
+            .multisig_authority
+            .iter()
+            .map(|authority| encode_bytes(authority))
+            .collect(),
+        source: encode_bytes(&transfer.source),
+        destination: encode_bytes(&transfer.destination),
+        amount: transfer.amount,
+        mint: encode_bytes(&transfer.mint),
+        decimals: transfer.decimals,
+    }
+}
+
+fn normalize_swap(swap: Swap) -> SwapRef {
+    SwapRef {
+        protocol: protocol_name(swap.protocol),
+        program_id: encode_bytes(&swap.program_id),
+        stack_height: swap.stack_height,
+        amm: encode_bytes(&swap.amm),
+        amm_pool: encode_bytes(&swap.amm_pool),
+        user: encode_bytes(&swap.user),
+        input_mint: encode_bytes(&swap.input_mint),
+        input_amount: swap.input_amount,
+        output_mint: encode_bytes(&swap.output_mint),
+        output_amount: swap.output_amount,
+    }
 }
 
 fn protocol_name(protocol: i32) -> String {
     Protocol::try_from(protocol)
-        .map(|protocol| protocol.as_str_name().to_owned())
-        .unwrap_or_else(|_| format!("PROTOCOL_UNKNOWN_{protocol}"))
+        .map(|protocol| {
+            protocol
+                .as_str_name()
+                .trim_start_matches("PROTOCOL_")
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_else(|_| format!("unknown_{protocol}"))
 }
 
 fn encode_bytes(bytes: &[u8]) -> String {
@@ -143,11 +296,17 @@ mod tests {
     use prost::Message;
 
     use super::*;
-    use crate::decoder::pb::dex::swaps::v1::{Swap, Transaction};
+    use crate::decoder::pb::{
+        dex::swaps::v1::{Events as SwapEvents, Swap, Transaction},
+        solana::spl::token::v1::{
+            Events as TransferEvents, Instruction as TransferInstruction,
+            Transaction as TokenTransaction, Transfer as TokenTransfer, instruction,
+        },
+    };
 
     #[test]
-    fn decodes_and_flattens_swap_events() {
-        let events = Events {
+    fn decodes_swap_events_into_one_block_message() {
+        let events = SwapEvents {
             transactions: vec![Transaction {
                 signature: bytes(1),
                 fee_payer: bytes(2),
@@ -186,38 +345,45 @@ mod tests {
         let mut payload = Vec::new();
         events.encode(&mut payload).expect("events encode");
 
-        let messages = decode_swaps(&payload, context()).expect("events decode");
+        let message = decode_swaps(&payload, context()).expect("events decode");
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].kind, "swap");
-        assert_eq!(messages[0].block.number, 123);
-        assert_eq!(messages[0].cursor, "cursor-123");
+        assert_eq!(message.kind, "swaps");
+        assert_eq!(message.network, "solana-mainnet");
+        assert_eq!(message.block.number, 123);
+        assert_eq!(message.block.hash, "block-hash");
+        assert_eq!(message.block.timestamp, "2026-05-12 17:00:00");
+        assert_eq!(message.transactions.len(), 1);
+        assert_eq!(message.transactions[0].swaps.len(), 2);
         assert_eq!(
-            messages[0].transaction.signature,
+            message.transactions[0].signature,
             bs58::encode(bytes(1)).into_string()
         );
         assert_eq!(
-            messages[0].transaction.fee_payer,
+            message.transactions[0].fee_payer,
             bs58::encode(bytes(2)).into_string()
         );
-        assert_eq!(messages[0].swap.protocol, "PROTOCOL_RAYDIUM_AMM_V4");
+        assert_eq!(message.transactions[0].swaps[0].protocol, "raydium_amm_v4");
         assert_eq!(
-            messages[0].swap.program_id,
+            message.transactions[0].swaps[0].program_id,
             bs58::encode(bytes(4)).into_string()
         );
-        assert_eq!(messages[0].swap.amm, bs58::encode(bytes(5)).into_string());
+        assert_eq!(message.transactions[0].swaps[0].stack_height, 2);
         assert_eq!(
-            messages[0].swap.amm_pool,
+            message.transactions[0].swaps[0].amm,
+            bs58::encode(bytes(5)).into_string()
+        );
+        assert_eq!(
+            message.transactions[0].swaps[0].amm_pool,
             bs58::encode(bytes(6)).into_string()
         );
-        assert_eq!(messages[0].swap.input_amount, u64::MAX.to_string());
-        assert_eq!(messages[0].swap.output_amount, "42");
-        assert_eq!(messages[1].swap.protocol, "PROTOCOL_JUPITER_V6");
+        assert_eq!(message.transactions[0].swaps[0].input_amount, u64::MAX);
+        assert_eq!(message.transactions[0].swaps[0].output_amount, 42);
+        assert_eq!(message.transactions[0].swaps[1].protocol, "jupiter_v6");
     }
 
     #[test]
-    fn serializes_amounts_as_strings() {
-        let events = Events {
+    fn serializes_block_message_with_all_swaps() {
+        let events = SwapEvents {
             transactions: vec![Transaction {
                 swaps: vec![Swap {
                     input_amount: u64::MAX,
@@ -228,29 +394,179 @@ mod tests {
             }],
         };
 
-        let message = normalize_events(events, context()).remove(0);
+        let message = normalize_events(events, context());
         let json = serde_json::to_value(message).expect("message serializes");
 
-        assert_eq!(json["swap"]["input_amount"], u64::MAX.to_string());
-        assert_eq!(json["swap"]["output_amount"], (u64::MAX - 1).to_string());
+        assert_eq!(json["type"], "swaps");
+        assert_eq!(json["block"]["number"], 123);
+        assert_eq!(json["block"]["hash"], "block-hash");
+        assert_eq!(json["block"]["timestamp"], "2026-05-12 17:00:00");
+        assert_eq!(
+            json["transactions"]
+                .as_array()
+                .expect("transactions array")
+                .len(),
+            1
+        );
+        assert_eq!(
+            json["transactions"][0]["swaps"][0]["input_amount"],
+            u64::MAX
+        );
+        assert_eq!(
+            json["transactions"][0]["swaps"][0]["output_amount"],
+            u64::MAX - 1
+        );
+        assert!(json.get("cursor").is_none());
+        assert!(json.get("transaction").is_none());
+        assert!(json.get("instruction").is_none());
+        assert!(json.get("swap").is_none());
+        assert!(json.get("swaps").is_none());
     }
 
     #[test]
     fn rejects_invalid_events_payload() {
         let error = decode_swaps(&[0xff, 0xff], context()).expect_err("payload rejects");
-        assert!(matches!(error, DecodeError::Events(_)));
+        assert!(matches!(error, DecodeError::SwapEvents(_)));
+    }
+
+    #[test]
+    fn decodes_transfer_events_into_one_block_message() {
+        let events = TransferEvents {
+            transactions: vec![TokenTransaction {
+                signature: bytes(1),
+                fee_payer: bytes(2),
+                signers: vec![bytes(2), bytes(3)],
+                fee: 5_000,
+                compute_units_consumed: 77_777,
+                instructions: vec![
+                    token_instruction(
+                        bytes(4),
+                        1,
+                        true,
+                        instruction::Instruction::Transfer(token_transfer(5, 100, Some(6))),
+                    ),
+                    token_instruction(
+                        bytes(7),
+                        2,
+                        false,
+                        instruction::Instruction::Mint(token_transfer(8, 200, None)),
+                    ),
+                    token_instruction(
+                        bytes(9),
+                        3,
+                        false,
+                        instruction::Instruction::Burn(token_transfer(10, 300, Some(9))),
+                    ),
+                    TransferInstruction {
+                        program_id: bytes(11),
+                        stack_height: 4,
+                        is_root: false,
+                        instruction: None,
+                    },
+                ],
+            }],
+        };
+
+        let mut payload = Vec::new();
+        events.encode(&mut payload).expect("events encode");
+
+        let message = decode_transfers(&payload, context()).expect("events decode");
+
+        assert_eq!(message.kind, "transfers");
+        assert_eq!(message.network, "solana-mainnet");
+        assert_eq!(message.block.number, 123);
+        assert_eq!(message.block.hash, "block-hash");
+        assert_eq!(message.transactions.len(), 1);
+        assert_eq!(message.transactions[0].transfers.len(), 3);
+        assert_eq!(
+            message.transactions[0].signature,
+            bs58::encode(bytes(1)).into_string()
+        );
+        assert_eq!(message.transactions[0].transfers[0].kind, "transfer");
+        assert_eq!(message.transactions[0].transfers[0].is_root, true);
+        assert_eq!(
+            message.transactions[0].transfers[0].program_id,
+            bs58::encode(bytes(4)).into_string()
+        );
+        assert_eq!(
+            message.transactions[0].transfers[0].authority,
+            bs58::encode(bytes(5)).into_string()
+        );
+        assert_eq!(message.transactions[0].transfers[0].amount, 100);
+        assert_eq!(message.transactions[0].transfers[0].decimals, Some(6));
+        assert_eq!(message.transactions[0].transfers[1].kind, "mint");
+        assert_eq!(message.transactions[0].transfers[1].decimals, None);
+        assert_eq!(message.transactions[0].transfers[2].kind, "burn");
+    }
+
+    #[test]
+    fn serializes_transfer_block_message() {
+        let events = TransferEvents {
+            transactions: vec![TokenTransaction {
+                instructions: vec![token_instruction(
+                    bytes(1),
+                    1,
+                    true,
+                    instruction::Instruction::Transfer(token_transfer(2, u64::MAX, Some(9))),
+                )],
+                ..Default::default()
+            }],
+        };
+
+        let message = normalize_transfer_events(events, context());
+        let json = serde_json::to_value(message).expect("message serializes");
+
+        assert_eq!(json["type"], "transfers");
+        assert_eq!(json["block"]["number"], 123);
+        assert_eq!(json["transactions"].as_array().unwrap().len(), 1);
+        assert_eq!(json["transactions"][0]["transfers"][0]["type"], "transfer");
+        assert_eq!(json["transactions"][0]["transfers"][0]["amount"], u64::MAX);
+        assert_eq!(json["transactions"][0]["transfers"][0]["decimals"], 9);
+        assert!(json.get("cursor").is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_transfer_events_payload() {
+        let error = decode_transfers(&[0xff, 0xff], context()).expect_err("payload rejects");
+        assert!(matches!(error, DecodeError::TransferEvents(_)));
     }
 
     fn context() -> BlockContext {
         BlockContext {
-            number: 123,
-            id: "block-id".to_owned(),
-            cursor: "cursor-123".to_owned(),
-            final_block_height: 120,
+            block_num: 123,
+            block_hash: "block-hash".to_owned(),
+            timestamp: "2026-05-12 17:00:00".to_owned(),
+            network: "solana-mainnet".to_owned(),
         }
     }
 
     fn bytes(seed: u8) -> Vec<u8> {
         vec![seed; 32]
+    }
+
+    fn token_instruction(
+        program_id: Vec<u8>,
+        stack_height: u32,
+        is_root: bool,
+        instruction: instruction::Instruction,
+    ) -> TransferInstruction {
+        TransferInstruction {
+            program_id,
+            stack_height,
+            is_root,
+            instruction: Some(instruction),
+        }
+    }
+
+    fn token_transfer(seed: u8, amount: u64, decimals: Option<u32>) -> TokenTransfer {
+        TokenTransfer {
+            authority: bytes(seed),
+            multisig_authority: vec![bytes(seed + 1)],
+            source: bytes(seed + 2),
+            destination: bytes(seed + 3),
+            amount,
+            mint: bytes(seed + 4),
+            decimals,
+        }
     }
 }

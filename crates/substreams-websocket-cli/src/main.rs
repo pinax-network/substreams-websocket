@@ -3,7 +3,8 @@ use std::{net::SocketAddr, time::Duration};
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use substreams_websocket::{
-    Config, StreamEvent, SubstreamsClient, SubstreamsConfig, WebSocketConfig,
+    Config, StreamConfig, StreamDecoder, StreamEvent, SubstreamsClient, SubstreamsConfig,
+    WebSocketConfig,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -28,6 +29,15 @@ enum Command {
 struct ServeArgs {
     #[command(flatten)]
     substreams: SubstreamsArgs,
+
+    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAM_ID", default_value = "swaps")]
+    stream_id: String,
+
+    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_DECODER", default_value = "swaps")]
+    decoder: StreamDecoder,
+
+    #[arg(long = "extra-stream", value_parser = parse_extra_stream)]
+    extra_streams: Vec<ExtraStreamArg>,
 
     #[command(flatten)]
     websocket: WebSocketArgs,
@@ -70,9 +80,6 @@ struct SubstreamsArgs {
 
     #[arg(short = 't', long, env = "SUBSTREAMS_STOP_BLOCK", default_value = "0")]
     stop_block: String,
-
-    #[arg(short, long, env = "SUBSTREAMS_CURSOR")]
-    cursor: Option<String>,
 
     #[arg(short = 'p', long = "params", env = "SUBSTREAMS_PARAMS")]
     params: Vec<String>,
@@ -146,6 +153,15 @@ struct WebSocketArgs {
     client_buffer_size: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ExtraStreamArg {
+    id: String,
+    decoder: StreamDecoder,
+    package: String,
+    module: String,
+    network: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
@@ -180,8 +196,21 @@ async fn main() -> anyhow::Result<()> {
 
 impl ServeArgs {
     fn into_config(self) -> Config {
+        let primary_substreams = self.substreams.into_config();
+        let mut streams = vec![StreamConfig {
+            id: self.stream_id,
+            decoder: self.decoder,
+            substreams: primary_substreams.clone(),
+        }];
+
+        streams.extend(self.extra_streams.into_iter().map(|stream| StreamConfig {
+            id: stream.id.clone(),
+            decoder: stream.decoder,
+            substreams: stream.into_config(&primary_substreams),
+        }));
+
         Config {
-            substreams: self.substreams.into_config(),
+            streams,
             websocket: WebSocketConfig {
                 listen: self.websocket.listen,
                 ws_path: self.websocket.ws_path,
@@ -196,6 +225,27 @@ impl ServeArgs {
     }
 }
 
+impl ExtraStreamArg {
+    fn into_config(self, base: &SubstreamsConfig) -> SubstreamsConfig {
+        SubstreamsConfig {
+            package: self.package,
+            module: self.module,
+            endpoint: base.endpoint.clone(),
+            network: self.network.or_else(|| base.network.clone()),
+            start_block: base.start_block.clone(),
+            stop_block: base.stop_block.clone(),
+            params: base.params.clone(),
+            plaintext: base.plaintext,
+            insecure: base.insecure,
+            production_mode: base.production_mode,
+            final_blocks_only: base.final_blocks_only,
+            token: base.token.clone(),
+            api_key: base.api_key.clone(),
+            api_key_header: base.api_key_header.clone(),
+        }
+    }
+}
+
 impl SubstreamsArgs {
     fn into_config(self) -> SubstreamsConfig {
         SubstreamsConfig {
@@ -205,7 +255,6 @@ impl SubstreamsArgs {
             network: self.network,
             start_block: self.start_block,
             stop_block: self.stop_block,
-            cursor: self.cursor,
             params: self.params,
             plaintext: self.plaintext,
             insecure: self.insecure,
@@ -226,6 +275,45 @@ fn init_tracing(log_level: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_extra_stream(value: &str) -> Result<ExtraStreamArg, String> {
+    let mut id = None;
+    let mut decoder = None;
+    let mut package = None;
+    let mut module = None;
+    let mut network = None;
+
+    for part in value.split(',') {
+        let Some((key, item_value)) = part.split_once('=') else {
+            return Err(format!(
+                "invalid extra stream segment {part:?}, expected key=value"
+            ));
+        };
+
+        match key {
+            "id" => id = Some(item_value.to_owned()),
+            "decoder" => {
+                decoder = Some(
+                    item_value
+                        .parse::<StreamDecoder>()
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            "package" => package = Some(item_value.to_owned()),
+            "module" => module = Some(item_value.to_owned()),
+            "network" => network = Some(item_value.to_owned()),
+            _ => return Err(format!("invalid extra stream key {key:?}")),
+        }
+    }
+
+    Ok(ExtraStreamArg {
+        id: id.ok_or_else(|| "extra stream requires id".to_owned())?,
+        decoder: decoder.ok_or_else(|| "extra stream requires decoder".to_owned())?,
+        package: package.ok_or_else(|| "extra stream requires package".to_owned())?,
+        module: module.ok_or_else(|| "extra stream requires module".to_owned())?,
+        network,
+    })
+}
+
 fn format_stream_event(event: StreamEvent) -> String {
     match event {
         StreamEvent::Session {
@@ -239,18 +327,16 @@ fn format_stream_event(event: StreamEvent) -> String {
         StreamEvent::Block {
             number,
             id,
-            cursor,
-            final_block_height,
+            timestamp,
             output_type_url,
             payload,
         } => format!(
-            "block number={number} id={id} final_block_height={final_block_height} output_type_url={output_type_url} payload_len={} cursor={cursor}",
+            "block block_num={number} block_hash={id} timestamp={timestamp} output_type_url={output_type_url} payload_len={}",
             payload.len()
         ),
-        StreamEvent::Undo {
-            last_valid_block,
-            last_valid_cursor,
-        } => format!("undo last_valid_block={last_valid_block} cursor={last_valid_cursor}"),
+        StreamEvent::Undo { last_valid_block } => {
+            format!("undo last_valid_block={last_valid_block}")
+        }
         StreamEvent::Fatal { message } => format!("fatal message={message}"),
         StreamEvent::SnapshotData {
             module_name,
@@ -259,7 +345,7 @@ fn format_stream_event(event: StreamEvent) -> String {
         } => format!(
             "snapshot_data module={module_name} sent_keys={sent_keys} total_keys={total_keys}"
         ),
-        StreamEvent::SnapshotComplete { cursor } => format!("snapshot_complete cursor={cursor}"),
+        StreamEvent::SnapshotComplete => "snapshot_complete".to_owned(),
         StreamEvent::Unknown => "unknown".to_owned(),
     }
 }
