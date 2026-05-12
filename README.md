@@ -11,7 +11,15 @@ serve a health endpoint.
 ## Quickstart
 
 ```bash
-cargo run --bin substreams-websocket -- serve ./dex-swaps-v0.5.1.spkg swaps
+cargo run --bin substreams-websocket -- serve ./dex-swaps-v0.5.1.spkg map_events
+```
+
+To verify Substreams package loading and gRPC connectivity directly:
+
+```bash
+cargo run --bin substreams-websocket -- stream ./dex-swaps-v0.5.1.spkg map_events \
+  --endpoint https://solana.substreams.pinax.network:443 \
+  --max-messages 1
 ```
 
 Useful development checks:
