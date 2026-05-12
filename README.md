@@ -28,4 +28,8 @@ The server listens on `127.0.0.1:8080` by default:
 curl http://127.0.0.1:8080/healthz
 ```
 
+WebSocket clients connect to `/ws` by default. The server sends heartbeat ping
+frames every 180 seconds and disconnects clients that do not respond with pong
+frames within 600 seconds.
+
 See `.env.example` for the initial environment variables.

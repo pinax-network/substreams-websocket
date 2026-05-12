@@ -6,6 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
@@ -19,7 +20,10 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{RwLock, mpsc};
+use tokio::{
+    sync::{RwLock, mpsc, oneshot},
+    time::Instant,
+};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, warn};
 
@@ -128,6 +132,9 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     let mut messages = client.rx;
     let outbound = client.tx.clone();
     let client_id = client.id;
+    let connected_at = Instant::now();
+    let last_pong_at = Arc::new(RwLock::new(connected_at));
+    let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
 
     let writer = tokio::spawn(async move {
         while let Some(message) = messages.recv().await {
@@ -136,6 +143,17 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
             }
         }
     });
+
+    let heartbeat = tokio::spawn(run_heartbeat(
+        client_id,
+        outbound.clone(),
+        Arc::clone(&last_pong_at),
+        state.config.websocket.heartbeat_interval,
+        state.config.websocket.heartbeat_timeout,
+        state.config.websocket.connection_ttl,
+        connected_at,
+        disconnect_tx,
+    ));
 
     let welcome = serde_json::json!({
         "type": "session",
@@ -151,35 +169,52 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         .is_err()
     {
         state.clients.unregister(client_id).await;
+        heartbeat.abort();
         writer.abort();
         return;
     }
 
-    while let Some(message) = receiver.next().await {
-        match message {
-            Ok(Message::Text(text)) => {
-                debug!(%text, "received WebSocket text message");
-            }
-            Ok(Message::Binary(_)) => {
-                debug!("received WebSocket binary message");
-            }
-            Ok(Message::Ping(payload)) => {
-                if outbound.send(Message::Pong(payload)).await.is_err() {
+    loop {
+        tokio::select! {
+            message = receiver.next() => {
+                let Some(message) = message else {
                     break;
+                };
+
+                match message {
+                    Ok(Message::Text(text)) => {
+                        debug!(%text, "received WebSocket text message");
+                    }
+                    Ok(Message::Binary(_)) => {
+                        debug!("received WebSocket binary message");
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        if outbound.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Pong(_)) => {
+                        *last_pong_at.write().await = Instant::now();
+                        debug!(client_id, "received WebSocket pong");
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Err(error) => {
+                        debug!(%error, "WebSocket client error");
+                        break;
+                    }
                 }
             }
-            Ok(Message::Pong(_)) => {
-                debug!("received WebSocket pong");
-            }
-            Ok(Message::Close(_)) => break,
-            Err(error) => {
-                debug!(%error, "WebSocket client error");
+            reason = &mut disconnect_rx => {
+                if let Ok(reason) = reason {
+                    info!(client_id, %reason, "disconnecting WebSocket client");
+                }
                 break;
             }
         }
     }
 
     state.clients.unregister(client_id).await;
+    heartbeat.abort();
     drop(outbound);
     let _ = writer.await;
     info!(client_id, "WebSocket client disconnected");
@@ -221,6 +256,58 @@ struct RegisteredClient {
     id: ClientId,
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DisconnectReason {
+    HeartbeatTimeout,
+    ConnectionTtl,
+    OutboundClosed,
+}
+
+impl std::fmt::Display for DisconnectReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HeartbeatTimeout => formatter.write_str("heartbeat timeout"),
+            Self::ConnectionTtl => formatter.write_str("connection ttl reached"),
+            Self::OutboundClosed => formatter.write_str("outbound channel closed"),
+        }
+    }
+}
+
+async fn run_heartbeat(
+    client_id: ClientId,
+    outbound: mpsc::Sender<Message>,
+    last_pong_at: Arc<RwLock<Instant>>,
+    interval: Duration,
+    timeout: Duration,
+    connection_ttl: Option<Duration>,
+    connected_at: Instant,
+    disconnect: oneshot::Sender<DisconnectReason>,
+) {
+    let reason = loop {
+        tokio::time::sleep(interval).await;
+
+        let now = Instant::now();
+        if connection_ttl.is_some_and(|ttl| now.duration_since(connected_at) >= ttl) {
+            break DisconnectReason::ConnectionTtl;
+        }
+
+        let last_pong_at = *last_pong_at.read().await;
+        if now.duration_since(last_pong_at) >= timeout {
+            break DisconnectReason::HeartbeatTimeout;
+        }
+
+        let payload = client_id.to_string();
+        if outbound.send(Message::Ping(payload.into())).await.is_err() {
+            break DisconnectReason::OutboundClosed;
+        }
+
+        debug!(client_id, "sent WebSocket heartbeat ping");
+    };
+
+    let _ = outbound.send(Message::Close(None)).await;
+    let _ = disconnect.send(reason);
 }
 
 async fn shutdown_signal() {
@@ -307,6 +394,101 @@ mod tests {
 
         let second = connect_async(format!("ws://{}/ws", server.addr)).await;
         assert!(second.is_err(), "second websocket should be rejected");
+    }
+
+    #[tokio::test]
+    async fn websocket_receives_heartbeat_ping() {
+        let mut cfg = config();
+        cfg.websocket.heartbeat_interval = Duration::from_millis(25);
+        cfg.websocket.heartbeat_timeout = Duration::from_secs(1);
+        let server = TestServer::start(cfg).await;
+
+        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+            .await
+            .expect("websocket connects");
+
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .expect("heartbeat arrives before timeout")
+            .expect("heartbeat message")
+            .expect("heartbeat message ok");
+
+        assert!(
+            matches!(message, TungsteniteMessage::Ping(_)),
+            "expected heartbeat ping, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_disconnects_stale_client() {
+        let mut cfg = config();
+        cfg.websocket.max_clients = 1;
+        cfg.websocket.heartbeat_interval = Duration::from_millis(20);
+        cfg.websocket.heartbeat_timeout = Duration::from_millis(80);
+        let server = TestServer::start(cfg).await;
+
+        let (mut stale_socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+            .await
+            .expect("first websocket connects");
+        let _welcome = stale_socket
+            .next()
+            .await
+            .expect("welcome")
+            .expect("welcome ok");
+
+        let mut connected_after_eviction = false;
+        for _ in 0..40 {
+            if connect_async(format!("ws://{}/ws", server.addr))
+                .await
+                .is_ok()
+            {
+                connected_after_eviction = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            connected_after_eviction,
+            "a new client should connect after stale client eviction"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_disconnects_after_connection_ttl() {
+        let mut cfg = config();
+        cfg.websocket.max_clients = 1;
+        cfg.websocket.heartbeat_interval = Duration::from_millis(20);
+        cfg.websocket.heartbeat_timeout = Duration::from_secs(1);
+        cfg.websocket.connection_ttl = Some(Duration::from_millis(80));
+        let server = TestServer::start(cfg).await;
+
+        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+            .await
+            .expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        let mut disconnected = false;
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(25), socket.next()).await {
+                Ok(None) => {
+                    disconnected = true;
+                    break;
+                }
+                Ok(Some(Ok(TungsteniteMessage::Close(_)))) => {
+                    disconnected = true;
+                    break;
+                }
+                Ok(Some(_)) | Err(_) => {}
+            }
+        }
+
+        assert!(
+            disconnected,
+            "client should disconnect after connection ttl"
+        );
     }
 
     struct TestServer {
