@@ -120,7 +120,8 @@ pub enum StreamEvent {
         id: String,
         cursor: String,
         final_block_height: u64,
-        payload_len: usize,
+        output_type_url: String,
+        payload: Vec<u8>,
     },
     Undo {
         last_valid_block: u64,
@@ -190,16 +191,20 @@ impl From<Response> for StreamEvent {
             },
             Some(response::Message::BlockScopedData(data)) => {
                 let clock = data.clock.unwrap_or_default();
+                let output = data.output.and_then(|output| output.map_output);
+                let output_type_url = output
+                    .as_ref()
+                    .map(|any| any.type_url.clone())
+                    .unwrap_or_default();
+                let payload = output.map(|any| any.value).unwrap_or_default();
+
                 Self::Block {
                     number: clock.number,
                     id: clock.id,
                     cursor: data.cursor,
                     final_block_height: data.final_block_height,
-                    payload_len: data
-                        .output
-                        .and_then(|output| output.map_output)
-                        .map(|any| any.value.len())
-                        .unwrap_or_default(),
+                    output_type_url,
+                    payload,
                 }
             }
             Some(response::Message::BlockUndoSignal(undo)) => Self::Undo {

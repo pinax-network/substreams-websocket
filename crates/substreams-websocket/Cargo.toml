@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum.workspace = true
+bs58.workspace = true
 futures-util.workspace = true
 http.workspace = true
 prost.workspace = true
