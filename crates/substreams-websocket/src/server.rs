@@ -838,6 +838,7 @@ mod tests {
                     token: None,
                     api_key: None,
                     api_key_header: "X-Api-Key".to_owned(),
+                    auth_url: None,
                 },
             }],
             websocket: WebSocketConfig {

@@ -7,6 +7,7 @@ use tonic::{
     metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataValue},
     transport::{Channel, ClientTlsConfig, Endpoint},
 };
+use tracing::{debug, info};
 
 use crate::SubstreamsConfig;
 
@@ -31,17 +32,32 @@ pub mod pb {
 }
 
 use pb::sf::substreams::{
-    rpc::{
-        v2::{Response, response},
-        v3::{Request as BlocksRequest, stream_client::StreamClient},
-    },
+    rpc::v2::{Request as BlocksRequest, Response, response, stream_client::StreamClient},
     v1::Package,
 };
+use tonic::codec::CompressionEncoding;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SubstreamsError {
     #[error("Substreams endpoint is required")]
     MissingEndpoint,
+
+    #[error("failed to exchange Substreams API key for JWT at {url}: {error}")]
+    AuthRequest {
+        url: String,
+        #[source]
+        error: reqwest::Error,
+    },
+
+    #[error("Substreams auth endpoint {url} returned status {status}: {body}")]
+    AuthStatus {
+        url: String,
+        status: http::StatusCode,
+        body: String,
+    },
+
+    #[error("Substreams auth endpoint {url} returned no token in response: {body}")]
+    AuthMissingToken { url: String, body: String },
 
     #[error("invalid endpoint URI: {0}")]
     InvalidEndpoint(#[from] InvalidUri),
@@ -148,12 +164,16 @@ impl SubstreamsClient {
         Self { config }
     }
 
-    pub async fn stream(self) -> Result<SubstreamsStream, SubstreamsError> {
+    pub async fn stream(mut self) -> Result<SubstreamsStream, SubstreamsError> {
+        resolve_auth_token(&mut self.config).await?;
         let manifest = load_package(&self.config.manifest).await?;
         ensure_module_exists(&manifest, &self.config.module)?;
         let request = build_blocks_request(&self.config, manifest)?;
         let channel = connect_channel(&self.config).await?;
-        let mut client = StreamClient::new(channel);
+        let mut client = StreamClient::new(channel)
+            .send_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd);
         let mut request = Request::new(request);
         apply_auth_metadata(request.metadata_mut(), &self.config)?;
         let stream = client.blocks(request).await?.into_inner();
@@ -325,6 +345,7 @@ pub fn build_blocks_request(
     config: &SubstreamsConfig,
     package: Package,
 ) -> Result<BlocksRequest, SubstreamsError> {
+    let modules = apply_params(package.modules.clone().unwrap_or_default(), &config.params)?;
     Ok(BlocksRequest {
         start_block_num: parse_start_block(config.start_block.as_deref())?,
         start_cursor: String::new(),
@@ -332,9 +353,7 @@ pub fn build_blocks_request(
         final_blocks_only: config.final_blocks_only,
         production_mode: config.production_mode,
         output_module: config.module.clone(),
-        package: Some(package),
-        params: parse_params(&config.params)?,
-        network: config.network.clone().unwrap_or_default(),
+        modules: Some(modules),
         debug_initial_store_snapshot_for_modules: Vec::new(),
         noop_mode: false,
         limit_processed_blocks: 0,
@@ -342,6 +361,31 @@ pub fn build_blocks_request(
         progress_messages_interval_ms: 0,
         partial_blocks: false,
     })
+}
+
+/// Apply `module=value` params to module inputs as Substreams parameter values.
+fn apply_params(
+    mut modules: pb::sf::substreams::v1::Modules,
+    raw_params: &[String],
+) -> Result<pb::sf::substreams::v1::Modules, SubstreamsError> {
+    let params = parse_params(raw_params)?;
+    for (module_name, value) in params {
+        let Some(module) = modules
+            .modules
+            .iter_mut()
+            .find(|module| module.name == module_name)
+        else {
+            continue;
+        };
+        if let Some(first) = module.inputs.first_mut() {
+            if let Some(pb::sf::substreams::v1::module::input::Input::Params(p)) =
+                first.input.as_mut()
+            {
+                p.value = value;
+            }
+        }
+    }
+    Ok(modules)
 }
 
 fn parse_start_block(value: Option<&str>) -> Result<i64, SubstreamsError> {
@@ -423,6 +467,7 @@ fn apply_auth_metadata(
                 source,
             })?;
         metadata.insert("authorization", value);
+        return Ok(());
     }
 
     if let Some(api_key) = &config.api_key {
@@ -445,6 +490,71 @@ fn apply_auth_metadata(
     Ok(())
 }
 
+pub const DEFAULT_AUTH_URL: &str = "https://auth.pinax.network/v1/auth/issue";
+
+/// If an API key is configured but no bearer token, exchange the API key for a
+/// short-lived JWT at the configured auth URL (Pinax/StreamingFast style) and
+/// store it on the config so the request uses `Authorization: Bearer <jwt>`.
+async fn resolve_auth_token(config: &mut SubstreamsConfig) -> Result<(), SubstreamsError> {
+    if config.token.is_some() || config.api_key.is_none() {
+        return Ok(());
+    }
+
+    let url = config
+        .auth_url
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_AUTH_URL.to_owned());
+
+    // Setting SUBSTREAMS_AUTH_URL="none" or "off" disables the JWT exchange and
+    // sends the API key directly via the configured api_key_header instead.
+    if matches!(url.as_str(), "none" | "off" | "disabled") {
+        return Ok(());
+    }
+
+    let api_key = config.api_key.clone().expect("api_key checked above");
+
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({ "api_key": api_key }))
+        .send()
+        .await
+        .map_err(|error| SubstreamsError::AuthRequest {
+            url: url.clone(),
+            error,
+        })?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(SubstreamsError::AuthStatus { url, status, body });
+    }
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| SubstreamsError::AuthMissingToken {
+            url: url.clone(),
+            body: body.clone(),
+        })?;
+    let token = parsed
+        .get("token")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| SubstreamsError::AuthMissingToken {
+            url: url.clone(),
+            body: body.clone(),
+        })?;
+
+    info!(
+        url = %url,
+        token_len = token.len(),
+        "exchanged Substreams API key for JWT"
+    );
+    debug!(token = %token, "Substreams JWT issued");
+    config.token = Some(token);
+    config.api_key = None;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use prost::Message;
@@ -463,14 +573,9 @@ mod tests {
         assert_eq!(request.stop_block_num, 100);
         assert_eq!(request.start_cursor, "");
         assert_eq!(request.output_module, "swaps");
-        assert_eq!(request.network, "mainnet");
-        assert_eq!(
-            request.params.get("swaps"),
-            Some(&"protocol=raydium".to_owned())
-        );
         assert!(request.production_mode);
         assert!(request.final_blocks_only);
-        assert!(request.package.is_some());
+        assert!(request.modules.is_some());
     }
 
     #[test]
@@ -521,6 +626,7 @@ mod tests {
             token: None,
             api_key: None,
             api_key_header: "X-Api-Key".to_owned(),
+            auth_url: None,
         }
     }
 
