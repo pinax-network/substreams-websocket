@@ -28,8 +28,8 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    BlockContext, Config, StreamConfig, StreamEvent, StreamName, SubstreamsClient, decode_swaps,
-    decode_transfers,
+    BlockContext, Config, CursorStore, StreamConfig, StreamEvent, StreamName, SubstreamsClient,
+    decode_swaps, decode_transfers,
 };
 
 type ClientId = u64;
@@ -96,6 +96,7 @@ fn build_app(state: AppState) -> Router {
 }
 
 fn spawn_streams(state: &AppState) -> Vec<tokio::task::JoinHandle<()>> {
+    let cursors = CursorStore::new(state.config.cursors_dir.clone());
     state
         .config
         .streams
@@ -103,8 +104,9 @@ fn spawn_streams(state: &AppState) -> Vec<tokio::task::JoinHandle<()>> {
         .cloned()
         .map(|stream| {
             let clients = state.clients.clone();
+            let cursors = cursors.clone();
             tokio::spawn(async move {
-                run_substream(stream, clients).await;
+                run_substream(stream, clients, cursors).await;
             })
         })
         .collect()
@@ -119,12 +121,33 @@ fn stream_metadata(stream: &StreamConfig) -> serde_json::Value {
     })
 }
 
-async fn run_substream(stream: StreamConfig, clients: ClientRegistry) {
+async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursors: CursorStore) {
+    let network = stream.substreams.network.clone().unwrap_or_default();
+    let name = stream.name.as_str();
+
+    match cursors.load(&network, name).await {
+        Ok(Some(cursor)) => {
+            info!(
+                stream = %stream.name,
+                network = %network,
+                cursor_len = cursor.len(),
+                "resuming Substreams read from persisted cursor"
+            );
+            stream.substreams.start_cursor = Some(cursor);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(stream = %stream.name, network = %network, %error, "failed to load cursor; starting from configured block");
+        }
+    }
+
     info!(
         stream = %stream.name,
-        network = %stream.substreams.network.clone().unwrap_or_default(),
+        network = %network,
         module = %stream.substreams.module,
         manifest = %stream.substreams.manifest,
+        start_block = ?stream.substreams.start_block,
+        has_cursor = stream.substreams.start_cursor.is_some(),
         "starting Substreams read"
     );
 
@@ -163,15 +186,19 @@ async fn run_substream(stream: StreamConfig, clients: ClientRegistry) {
             }
         };
 
-        handle_substream_event(&stream, &clients, event).await;
+        handle_substream_event(&stream, &clients, &cursors, event).await;
     }
 }
 
 async fn handle_substream_event(
     stream: &StreamConfig,
     clients: &ClientRegistry,
+    cursors: &CursorStore,
     event: StreamEvent,
 ) {
+    let network = stream.substreams.network.clone().unwrap_or_default();
+    let name = stream.name.as_str();
+
     match event {
         StreamEvent::Block {
             number,
@@ -179,12 +206,13 @@ async fn handle_substream_event(
             timestamp,
             output_type_url: _,
             payload,
+            cursor,
         } => {
             let context = BlockContext {
                 block_num: number,
                 block_hash: id,
                 timestamp,
-                network: stream.substreams.network.clone().unwrap_or_default(),
+                network: network.clone(),
             };
             let decoded = match decode_stream_payload(stream.name, &payload, context) {
                 Ok(decoded) => decoded,
@@ -198,22 +226,32 @@ async fn handle_substream_event(
             };
 
             clients.broadcast_json(decoded).await;
+
+            if let Err(error) = cursors.save(&network, name, &cursor).await {
+                warn!(stream = %stream.name, %error, "failed to persist Substreams cursor");
+            }
         }
         StreamEvent::Fatal { message } => {
             clients
                 .broadcast_json(stream_status(stream, "fatal", message))
                 .await;
         }
-        StreamEvent::Undo { last_valid_block } => {
+        StreamEvent::Undo {
+            last_valid_block,
+            last_valid_cursor,
+        } => {
             clients
                 .broadcast_json(serde_json::json!({
                     "type": "stream",
                     "status": "undo",
-                    "name": stream.name.as_str(),
-                    "network": stream.substreams.network.clone().unwrap_or_default(),
+                    "name": name,
+                    "network": network,
                     "last_valid_block": last_valid_block,
                 }))
                 .await;
+            if let Err(error) = cursors.save(&network, name, &last_valid_cursor).await {
+                warn!(stream = %stream.name, %error, "failed to persist last-valid cursor");
+            }
         }
         StreamEvent::Session { .. }
         | StreamEvent::Progress { .. }
@@ -719,15 +757,19 @@ mod tests {
         events.encode(&mut payload).expect("events encode");
 
         let stream = server.config.streams[0].clone();
+        let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
+        let cursors = CursorStore::new(cursors_dir.path());
         handle_substream_event(
             &stream,
             &server.clients,
+            &cursors,
             StreamEvent::Block {
                 number: 999,
                 id: "block-999".to_owned(),
                 timestamp: "2026-05-12 17:30:00".to_owned(),
                 output_type_url: String::new(),
                 payload,
+                cursor: "abc123".to_owned(),
             },
         )
         .await;
@@ -829,6 +871,7 @@ mod tests {
                     endpoint: None,
                     network: Some("solana-mainnet".to_owned()),
                     start_block: None,
+                    start_cursor: None,
                     stop_block: "0".to_owned(),
                     params: Vec::new(),
                     plaintext: false,
@@ -851,6 +894,7 @@ mod tests {
                 max_clients: 16,
                 client_buffer_size: 16,
             },
+            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
         }
     }
 }

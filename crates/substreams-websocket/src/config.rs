@@ -4,6 +4,7 @@ use std::{net::SocketAddr, time::Duration};
 pub struct Config {
     pub streams: Vec<StreamConfig>,
     pub websocket: WebSocketConfig,
+    pub cursors_dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +62,7 @@ pub struct SubstreamsConfig {
     pub endpoint: Option<String>,
     pub network: Option<String>,
     pub start_block: Option<String>,
+    pub start_cursor: Option<String>,
     pub stop_block: String,
     pub params: Vec<String>,
     pub plaintext: bool,
@@ -110,6 +112,9 @@ pub enum ConfigError {
 
     #[error("duplicate stream registration: network={network:?} name={name:?}")]
     DuplicateStream { network: String, name: String },
+
+    #[error("stream {index} ({name}) is missing a start_block")]
+    MissingStreamStartBlock { index: usize, name: String },
 }
 
 impl Config {
@@ -142,6 +147,19 @@ impl Config {
                 .unwrap_or("");
             if network.is_empty() {
                 return Err(ConfigError::MissingStreamNetwork {
+                    index,
+                    name: name.to_owned(),
+                });
+            }
+
+            let start_block = stream
+                .substreams
+                .start_block
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
+            if start_block.is_empty() {
+                return Err(ConfigError::MissingStreamStartBlock {
                     index,
                     name: name.to_owned(),
                 });
@@ -194,7 +212,8 @@ mod tests {
                 module: "map_events".to_owned(),
                 endpoint: Some(endpoint.to_owned()),
                 network: Some(network.to_owned()),
-                start_block: None,
+                start_block: Some("-1".to_owned()),
+                start_cursor: None,
                 stop_block: "0".to_owned(),
                 params: Vec::new(),
                 plaintext: false,
@@ -229,6 +248,7 @@ mod tests {
         let config = Config {
             streams: vec![stream],
             websocket: websocket(),
+            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
         };
         assert!(matches!(
             config.validate(),
@@ -243,10 +263,26 @@ mod tests {
         let config = Config {
             streams: vec![stream],
             websocket: websocket(),
+            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
         };
         assert!(matches!(
             config.validate(),
             Err(ConfigError::MissingStreamNetwork { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_streams_missing_start_block() {
+        let mut s = stream(StreamName::Swaps, "solana-mainnet", "https://e:443");
+        s.substreams.start_block = None;
+        let config = Config {
+            streams: vec![s],
+            websocket: websocket(),
+            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::MissingStreamStartBlock { .. })
         ));
     }
 
@@ -258,6 +294,7 @@ mod tests {
                 stream(StreamName::Transfers, "solana-mainnet", "https://e:443"),
             ],
             websocket: websocket(),
+            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
         };
         assert!(matches!(
             config.validate(),
@@ -273,6 +310,7 @@ mod tests {
                 stream(StreamName::Transfers, "ethereum-mainnet", "https://b:443"),
             ],
             websocket: websocket(),
+            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
         };
         config.validate().expect("distinct networks are allowed");
     }

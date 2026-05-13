@@ -29,4 +29,5 @@ tonic-build.workspace = true
 tonic-prost-build.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio-tungstenite = "0.29"

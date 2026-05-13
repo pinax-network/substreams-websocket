@@ -28,9 +28,51 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    /// Path to the server TOML config.
+    /// Path to the streams TOML config. The file contains only the
+    /// `[[streams]]` array — single-value settings come from env/flags.
     #[arg(short, long, env = "SUBSTREAMS_WEBSOCKET_CONFIG")]
     config: PathBuf,
+
+    #[command(flatten)]
+    websocket: WebSocketArgs,
+
+    #[command(flatten)]
+    substreams_defaults: SubstreamsServeDefaults,
+
+    /// Directory where per-stream cursor files are persisted.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_CURSORS_DIR",
+        default_value = "./cursors"
+    )]
+    cursors_dir: PathBuf,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SubstreamsServeDefaults {
+    #[arg(long, env = "SUBSTREAMS_PRODUCTION_MODE")]
+    production_mode: bool,
+
+    #[arg(long, env = "SUBSTREAMS_FINAL_BLOCKS_ONLY")]
+    final_blocks_only: bool,
+
+    #[arg(long, env = "SUBSTREAMS_PLAINTEXT")]
+    plaintext: bool,
+
+    #[arg(long, env = "SUBSTREAMS_INSECURE")]
+    insecure: bool,
+
+    #[arg(long, env = "SUBSTREAMS_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+
+    #[arg(long, env = "SUBSTREAMS_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+
+    #[arg(long, env = "SUBSTREAMS_API_KEY_HEADER", default_value = "X-Api-Key")]
+    api_key_header: String,
+
+    #[arg(long, env = "SUBSTREAMS_AUTH_URL")]
+    auth_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -147,6 +189,21 @@ struct WebSocketArgs {
     client_buffer_size: usize,
 }
 
+impl WebSocketArgs {
+    fn into_config(self) -> WebSocketConfig {
+        WebSocketConfig {
+            listen: self.listen,
+            ws_path: self.ws_path,
+            health_path: self.health_path,
+            heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
+            heartbeat_timeout: Duration::from_secs(self.heartbeat_timeout_secs),
+            connection_ttl: self.connection_ttl_secs.map(Duration::from_secs),
+            max_clients: self.max_clients,
+            client_buffer_size: self.client_buffer_size,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
@@ -184,10 +241,18 @@ impl ServeArgs {
         let contents = tokio::fs::read_to_string(&self.config)
             .await
             .with_context(|| format!("failed to read config {}", self.config.display()))?;
-        let config = toml::from_str::<FileConfig>(&contents)
+        let file = toml::from_str::<FileConfig>(&contents)
             .with_context(|| format!("failed to parse config {}", self.config.display()))?;
 
-        Ok(config.into_config())
+        Ok(Config {
+            streams: file
+                .streams
+                .into_iter()
+                .map(|stream| stream.into_config(&self.substreams_defaults))
+                .collect(),
+            websocket: self.websocket.into_config(),
+            cursors_dir: self.cursors_dir,
+        })
     }
 }
 
@@ -199,6 +264,7 @@ impl SubstreamsArgs {
             endpoint: self.endpoint,
             network: self.network,
             start_block: self.start_block,
+            start_cursor: None,
             stop_block: self.stop_block,
             params: self.params,
             plaintext: self.plaintext,
@@ -215,149 +281,43 @@ impl SubstreamsArgs {
 
 #[derive(Debug, Deserialize)]
 struct FileConfig {
-    websocket: FileWebSocketConfig,
-    substreams: FileSubstreamsDefaults,
     streams: Vec<FileStreamConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileWebSocketConfig {
-    #[serde(default = "default_listen")]
-    listen: SocketAddr,
-    #[serde(default = "default_ws_path")]
-    ws_path: String,
-    #[serde(default = "default_health_path")]
-    health_path: String,
-    #[serde(default = "default_heartbeat_interval_secs")]
-    heartbeat_interval_secs: u64,
-    #[serde(default = "default_heartbeat_timeout_secs")]
-    heartbeat_timeout_secs: u64,
-    connection_ttl_secs: Option<u64>,
-    #[serde(default = "default_max_clients")]
-    max_clients: usize,
-    #[serde(default = "default_client_buffer_size")]
-    client_buffer_size: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileSubstreamsDefaults {
-    endpoint: Option<String>,
-    network: Option<String>,
-    start_block: Option<String>,
-    #[serde(default = "default_stop_block")]
-    stop_block: String,
-    #[serde(default)]
-    params: Vec<String>,
-    #[serde(default)]
-    plaintext: bool,
-    #[serde(default)]
-    insecure: bool,
-    #[serde(default)]
-    production_mode: bool,
-    #[serde(default)]
-    final_blocks_only: bool,
-    token: Option<String>,
-    api_key: Option<String>,
-    #[serde(default = "default_api_key_header")]
-    api_key_header: String,
-    auth_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FileStreamConfig {
     name: StreamName,
+    network: String,
+    endpoint: String,
     manifest: String,
     module: String,
-    endpoint: Option<String>,
-    network: Option<String>,
-    start_block: Option<String>,
+    start_block: String,
     stop_block: Option<String>,
     #[serde(default)]
     params: Vec<String>,
-    plaintext: Option<bool>,
-    insecure: Option<bool>,
-    production_mode: Option<bool>,
-    final_blocks_only: Option<bool>,
     token: Option<String>,
     api_key: Option<String>,
     api_key_header: Option<String>,
     auth_url: Option<String>,
 }
 
-impl FileConfig {
-    fn into_config(mut self) -> Config {
-        self.substreams.apply_env_overrides();
-        Config {
-            streams: self
-                .streams
-                .into_iter()
-                .map(|stream| stream.into_config(&self.substreams))
-                .collect(),
-            websocket: self.websocket.into_config(),
-        }
-    }
-}
-
-impl FileSubstreamsDefaults {
-    /// Backfill secrets and connection settings from environment variables when
-    /// the TOML file leaves them unset. Lets operators keep secrets in `.env`.
-    fn apply_env_overrides(&mut self) {
-        self.endpoint = env_or(self.endpoint.take(), "SUBSTREAMS_ENDPOINT");
-        self.network = env_or(self.network.take(), "SUBSTREAMS_NETWORK");
-        self.start_block = env_or(self.start_block.take(), "SUBSTREAMS_START_BLOCK");
-        if let Some(value) = std::env::var("SUBSTREAMS_STOP_BLOCK")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            self.stop_block = value;
-        }
-        self.token = env_or(self.token.take(), "SUBSTREAMS_TOKEN");
-        self.api_key = env_or(self.api_key.take(), "SUBSTREAMS_API_KEY");
-        self.auth_url = env_or(self.auth_url.take(), "SUBSTREAMS_AUTH_URL");
-    }
-}
-
-fn env_or(current: Option<String>, key: &str) -> Option<String> {
-    current.or_else(|| std::env::var(key).ok().filter(|value| !value.is_empty()))
-}
-
-impl FileWebSocketConfig {
-    fn into_config(self) -> WebSocketConfig {
-        WebSocketConfig {
-            listen: self.listen,
-            ws_path: self.ws_path,
-            health_path: self.health_path,
-            heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
-            heartbeat_timeout: Duration::from_secs(self.heartbeat_timeout_secs),
-            connection_ttl: self.connection_ttl_secs.map(Duration::from_secs),
-            max_clients: self.max_clients,
-            client_buffer_size: self.client_buffer_size,
-        }
-    }
-}
-
 impl FileStreamConfig {
-    fn into_config(self, defaults: &FileSubstreamsDefaults) -> StreamConfig {
+    fn into_config(self, defaults: &SubstreamsServeDefaults) -> StreamConfig {
         StreamConfig {
             name: self.name,
             substreams: SubstreamsConfig {
                 manifest: self.manifest,
                 module: self.module,
-                endpoint: self.endpoint.or_else(|| defaults.endpoint.clone()),
-                network: self.network.or_else(|| defaults.network.clone()),
-                start_block: self.start_block.or_else(|| defaults.start_block.clone()),
-                stop_block: self
-                    .stop_block
-                    .unwrap_or_else(|| defaults.stop_block.clone()),
-                params: if self.params.is_empty() {
-                    defaults.params.clone()
-                } else {
-                    self.params
-                },
-                plaintext: self.plaintext.unwrap_or(defaults.plaintext),
-                insecure: self.insecure.unwrap_or(defaults.insecure),
-                production_mode: self.production_mode.unwrap_or(defaults.production_mode),
-                final_blocks_only: self.final_blocks_only.unwrap_or(defaults.final_blocks_only),
+                endpoint: Some(self.endpoint),
+                network: Some(self.network),
+                start_block: Some(self.start_block),
+                start_cursor: None,
+                stop_block: self.stop_block.unwrap_or_else(|| "0".to_owned()),
+                params: self.params,
+                plaintext: defaults.plaintext,
+                insecure: defaults.insecure,
+                production_mode: defaults.production_mode,
+                final_blocks_only: defaults.final_blocks_only,
                 token: self.token.or_else(|| defaults.token.clone()),
                 api_key: self.api_key.or_else(|| defaults.api_key.clone()),
                 api_key_header: self
@@ -367,42 +327,6 @@ impl FileStreamConfig {
             },
         }
     }
-}
-
-fn default_listen() -> SocketAddr {
-    "127.0.0.1:8080".parse().expect("default listen parses")
-}
-
-fn default_ws_path() -> String {
-    "/ws".to_owned()
-}
-
-fn default_health_path() -> String {
-    "/healthz".to_owned()
-}
-
-fn default_heartbeat_interval_secs() -> u64 {
-    180
-}
-
-fn default_heartbeat_timeout_secs() -> u64 {
-    600
-}
-
-fn default_max_clients() -> usize {
-    1024
-}
-
-fn default_client_buffer_size() -> usize {
-    1024
-}
-
-fn default_stop_block() -> String {
-    "0".to_owned()
-}
-
-fn default_api_key_header() -> String {
-    "X-Api-Key".to_owned()
 }
 
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {
@@ -429,12 +353,20 @@ fn format_stream_event(event: StreamEvent) -> String {
             timestamp,
             output_type_url,
             payload,
+            cursor,
         } => format!(
-            "block block_num={number} block_hash={id} timestamp={timestamp} output_type_url={output_type_url} payload_len={}",
-            payload.len()
+            "block block_num={number} block_hash={id} timestamp={timestamp} output_type_url={output_type_url} payload_len={} cursor_len={}",
+            payload.len(),
+            cursor.len()
         ),
-        StreamEvent::Undo { last_valid_block } => {
-            format!("undo last_valid_block={last_valid_block}")
+        StreamEvent::Undo {
+            last_valid_block,
+            last_valid_cursor,
+        } => {
+            format!(
+                "undo last_valid_block={last_valid_block} cursor_len={}",
+                last_valid_cursor.len()
+            )
         }
         StreamEvent::Fatal { message } => format!("fatal message={message}"),
         StreamEvent::SnapshotData {
