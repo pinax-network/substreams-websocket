@@ -35,6 +35,7 @@ pub struct BlockContext {
     pub block_hash: String,
     pub timestamp: String,
     pub network: String,
+    pub cursor: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,15 +53,14 @@ pub struct DatabaseChangesBlockMessage {
     /// `(network, name)` identity that WebSocket subscribers register against.
     pub name: String,
     pub network: String,
-    pub block: BlockRef,
-    pub events: Vec<serde_json::Map<String, serde_json::Value>>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct BlockRef {
-    pub number: u64,
-    pub hash: String,
+    pub block_num: u64,
+    pub block_hash: String,
     pub timestamp: String,
+    /// Opaque Substreams cursor for the block being delivered. Subscribers may
+    /// persist this and reconnect to a Substreams endpoint directly using it
+    /// to resume from this exact position. This server does not replay.
+    pub cursor: String,
+    pub events: Vec<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Decode a `sf.substreams.sink.database.v1.DatabaseChanges` payload into a flat
@@ -103,11 +103,10 @@ pub fn normalize_database_changes(
     DatabaseChangesBlockMessage {
         name: name.to_owned(),
         network: context.network,
-        block: BlockRef {
-            number: context.block_num,
-            hash: context.block_hash,
-            timestamp: context.timestamp,
-        },
+        block_num: context.block_num,
+        block_hash: context.block_hash,
+        timestamp: context.timestamp,
+        cursor: context.cursor,
         events,
     }
 }
@@ -127,6 +126,7 @@ mod tests {
             block_hash: "block-hash".to_owned(),
             timestamp: "2026-05-13 17:00:00".to_owned(),
             network: "solana-mainnet".to_owned(),
+            cursor: "cur-xyz".to_owned(),
         }
     }
 
@@ -175,7 +175,10 @@ mod tests {
         let message = decode_database_changes("swaps", &payload, context()).expect("decode ok");
         assert_eq!(message.name, "swaps");
         assert_eq!(message.network, "solana-mainnet");
-        assert_eq!(message.block.number, 350_000_000);
+        assert_eq!(message.block_num, 350_000_000);
+        assert_eq!(message.block_hash, "block-hash");
+        assert_eq!(message.timestamp, "2026-05-13 17:00:00");
+        assert_eq!(message.cursor, "cur-xyz");
         assert_eq!(message.events.len(), 3);
         assert_eq!(message.events[0]["table"], "swaps");
         assert_eq!(message.events[1]["table"], "swaps");
@@ -240,7 +243,11 @@ mod tests {
         let json = serde_json::to_value(message).expect("serialize");
         assert_eq!(json["name"], "swaps");
         assert_eq!(json["network"], "solana-mainnet");
-        assert_eq!(json["block"]["number"], 350_000_000);
+        assert_eq!(json["block_num"], 350_000_000);
+        assert_eq!(json["block_hash"], "block-hash");
+        assert_eq!(json["timestamp"], "2026-05-13 17:00:00");
+        assert_eq!(json["cursor"], "cur-xyz");
+        assert!(json.get("block").is_none(), "no nested 'block' object");
         assert!(
             json.get("type").is_none(),
             "top-level 'type' must be removed"

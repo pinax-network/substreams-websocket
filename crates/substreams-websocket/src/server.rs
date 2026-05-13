@@ -270,6 +270,7 @@ async fn handle_substream_event(
                 block_hash: id,
                 timestamp,
                 network: network.clone(),
+                cursor: cursor.clone(),
             };
             let decoded = match decode_database_changes(&stream.name, &payload, context) {
                 Ok(decoded) => decoded,
@@ -844,8 +845,11 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
         assert_eq!(body["name"], "swaps");
         assert_eq!(body["network"], "solana-mainnet");
-        assert_eq!(body["block"]["number"], 999);
-        assert_eq!(body["block"]["hash"], "block-999");
+        assert_eq!(body["block_num"], 999);
+        assert_eq!(body["block_hash"], "block-999");
+        assert_eq!(body["timestamp"], "2026-05-13 17:30:00");
+        assert_eq!(body["cursor"], "abc123");
+        assert!(body.get("block").is_none(), "no nested 'block' object");
         assert!(body.get("type").is_none());
         assert!(body.get("changes").is_none());
         assert_eq!(body["events"][0]["table"], "swaps");
