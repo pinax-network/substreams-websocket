@@ -28,10 +28,15 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    /// Path to the streams TOML config. The file contains only the
+    /// Path to the streams TOML file. The file contains only the
     /// `[[streams]]` array — single-value settings come from env/flags.
-    #[arg(short, long, env = "SUBSTREAMS_WEBSOCKET_CONFIG")]
-    config: PathBuf,
+    #[arg(
+        short,
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_STREAMS",
+        default_value = "./streams.toml"
+    )]
+    streams: PathBuf,
 
     #[command(flatten)]
     websocket: WebSocketArgs,
@@ -238,11 +243,11 @@ async fn main() -> anyhow::Result<()> {
 
 impl ServeArgs {
     async fn load_config(self) -> anyhow::Result<Config> {
-        let contents = tokio::fs::read_to_string(&self.config)
+        let contents = tokio::fs::read_to_string(&self.streams)
             .await
-            .with_context(|| format!("failed to read config {}", self.config.display()))?;
+            .with_context(|| format!("failed to read streams file {}", self.streams.display()))?;
         let file = toml::from_str::<FileConfig>(&contents)
-            .with_context(|| format!("failed to parse config {}", self.config.display()))?;
+            .with_context(|| format!("failed to parse streams file {}", self.streams.display()))?;
 
         Ok(Config {
             streams: file
