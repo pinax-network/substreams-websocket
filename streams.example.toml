@@ -1,0 +1,25 @@
+# Only [[streams]] entries belong in this file. All other server settings
+# (listen address, heartbeat, max clients, production_mode, final_blocks_only,
+# credentials, auth URL) are read from environment variables or CLI flags so
+# that secrets stay in .env and the TOML only describes the streams to run.
+#
+# Each [[streams]] entry is identified by the (network, name) pair. The same
+# `name` can appear multiple times as long as each entry targets a different
+# network.
+
+[[streams]]
+name = "swaps"
+network = "solana-mainnet"
+endpoint = "https://solana.substreams.pinax.network:443"
+manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/dex-swaps-v0.5.1.spkg"
+module = "map_events"
+start_block = "-1"          # negative is relative to chain head; cursor resumes after first block
+# stop_block = "0"          # optional; "0" or omitted means stream indefinitely
+
+[[streams]]
+name = "transfers"
+network = "solana-mainnet"
+endpoint = "https://solana.substreams.pinax.network:443"
+manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/spl-token-v0.3.0.spkg"
+module = "map_events"
+start_block = "-1"

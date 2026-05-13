@@ -1,7 +1,10 @@
 pub mod config;
+pub mod cursor;
 pub mod decoder;
 pub mod server;
 pub mod substreams;
+
+pub use cursor::CursorStore;
 
 pub use config::{
     Config, ConfigError, StreamConfig, StreamName, StreamNameParseError, SubstreamsConfig,

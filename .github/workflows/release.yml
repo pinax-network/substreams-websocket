@@ -76,7 +76,7 @@ jobs:
           STAGING="substreams-websocket-${{ matrix.suffix }}"
           mkdir -p "$STAGING"
           cp "target/${{ matrix.target }}/release/substreams-websocket" "$STAGING/"
-          cp README.md config.example.toml .env.example "$STAGING/" 2>/dev/null || true
+          cp README.md streams.example.toml .env.example "$STAGING/" 2>/dev/null || true
           tar czf "${STAGING}.tar.gz" "$STAGING"
           echo "ASSET=${STAGING}.tar.gz" >> "$GITHUB_ENV"
 

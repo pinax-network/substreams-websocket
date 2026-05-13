@@ -7,7 +7,7 @@ WebSocket fanout server. Ships with built-in decoders for SVM DEX swaps
 ## Quickstart
 
 ```bash
-cargo run --bin substreams-websocket -- serve --config config.example.toml
+cargo run --bin substreams-websocket -- serve --streams streams.example.toml
 ```
 
 Health check:
@@ -200,12 +200,12 @@ cargo run --bin substreams-websocket -- stream ./dex-swaps-v0.5.1.spkg map_event
 ```bash
 cp .env.example .env
 # Fill in SUBSTREAMS_API_KEY or SUBSTREAMS_TOKEN
-cargo run --bin substreams-websocket -- serve --config config.example.toml
+cargo run --bin substreams-websocket -- serve --streams streams.example.toml
 ```
 
 ## Demo
 
-The bundled `config.example.toml` streams the SVM DEX swaps package
+The bundled `streams.example.toml` streams the SVM DEX swaps package
 (`dex-swaps-v0.5.1.spkg`) and the SPL token transfers package
 (`spl-token-v0.3.0.spkg`) from `solana.substreams.pinax.network`. Start the
 server, connect a WebSocket client to `/ws`, and you will receive the session

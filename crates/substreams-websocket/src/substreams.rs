@@ -139,9 +139,11 @@ pub enum StreamEvent {
         timestamp: String,
         output_type_url: String,
         payload: Vec<u8>,
+        cursor: String,
     },
     Undo {
         last_valid_block: u64,
+        last_valid_cursor: String,
     },
     Fatal {
         message: String,
@@ -208,6 +210,7 @@ impl From<Response> for StreamEvent {
                 modules: progress.modules.len(),
             },
             Some(response::Message::BlockScopedData(data)) => {
+                let cursor = data.cursor.clone();
                 let clock = data.clock.unwrap_or_default();
                 let timestamp = format_clickhouse_timestamp(clock.timestamp);
                 let output = data.output.and_then(|output| output.map_output);
@@ -223,10 +226,12 @@ impl From<Response> for StreamEvent {
                     timestamp,
                     output_type_url,
                     payload,
+                    cursor,
                 }
             }
             Some(response::Message::BlockUndoSignal(undo)) => Self::Undo {
                 last_valid_block: undo.last_valid_block.map(|block| block.number).unwrap_or(0),
+                last_valid_cursor: undo.last_valid_cursor,
             },
             Some(response::Message::FatalError(error)) => Self::Fatal {
                 message: error.message,
@@ -348,7 +353,7 @@ pub fn build_blocks_request(
     let modules = apply_params(package.modules.clone().unwrap_or_default(), &config.params)?;
     Ok(BlocksRequest {
         start_block_num: parse_start_block(config.start_block.as_deref())?,
-        start_cursor: String::new(),
+        start_cursor: config.start_cursor.clone().unwrap_or_default(),
         stop_block_num: parse_stop_block(&config.stop_block)?,
         final_blocks_only: config.final_blocks_only,
         production_mode: config.production_mode,
@@ -617,6 +622,7 @@ mod tests {
             endpoint: Some("localhost:9000".to_owned()),
             network: Some("mainnet".to_owned()),
             start_block: Some("-10".to_owned()),
+            start_cursor: None,
             stop_block: "100".to_owned(),
             params: vec!["swaps=protocol=raydium".to_owned()],
             plaintext: true,
