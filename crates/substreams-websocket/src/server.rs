@@ -28,8 +28,8 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    BlockContext, Config, CursorStore, StreamConfig, StreamEvent, StreamName, SubstreamsClient,
-    compute_module_hash_hex, decode_swaps, decode_transfers, substreams::load_package,
+    BlockContext, Config, CursorStore, SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent,
+    SubstreamsClient, compute_module_hash_hex, decode_database_changes, substreams::load_package,
 };
 
 type ClientId = u64;
@@ -50,6 +50,20 @@ pub enum ServerError {
 struct AppState {
     config: Arc<Config>,
     clients: ClientRegistry,
+    /// Per-stream metadata visible to WebSocket clients in the welcome
+    /// message. Indexes match `config.streams`. Empty when a stream's
+    /// package failed to load (hash will be empty string).
+    streams_meta: Arc<Vec<StreamMeta>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct StreamMeta {
+    #[serde(rename = "stream")]
+    name: String,
+    network: String,
+    module: String,
+    manifest: String,
+    module_hash: String,
 }
 
 pub async fn serve(config: Config) -> Result<(), ServerError> {
@@ -60,15 +74,29 @@ pub async fn serve_with_shutdown(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServerError> {
+    let config = Arc::new(config);
+
+    // Pre-load every Substreams package in parallel so the welcome message can
+    // expose each stream's module_hash. Failed loads land as empty `StreamMeta`
+    // here and re-fail inside the per-stream task with a clear error to clients.
+    let prepared = prepare_streams(&config).await;
+    let streams_meta = Arc::new(
+        prepared
+            .iter()
+            .map(|prep| prep.meta.clone())
+            .collect::<Vec<_>>(),
+    );
+
     let state = AppState {
-        config: Arc::new(config),
+        config: config.clone(),
         clients: ClientRegistry::default(),
+        streams_meta,
     };
 
     let listen = state.config.websocket.listen;
     let ws_path = state.config.websocket.ws_path.clone();
     let health_path = state.config.websocket.health_path.clone();
-    let stream_tasks = spawn_streams(&state);
+    let stream_tasks = spawn_streams(&state, prepared);
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(listen)
@@ -95,139 +123,241 @@ fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-fn spawn_streams(state: &AppState) -> Vec<tokio::task::JoinHandle<()>> {
+/// Outcome of pre-loading a single stream's package and computing its module
+/// hash. On failure, `package` is `None` and `error` carries the cause —
+/// the per-stream task will re-report it to clients.
+struct PreparedStream {
+    config: StreamConfig,
+    meta: StreamMeta,
+    package: Option<crate::substreams::pb::sf::substreams::v1::Package>,
+    error: Option<String>,
+}
+
+async fn prepare_streams(config: &Config) -> Vec<PreparedStream> {
+    let prepares = config.streams.iter().cloned().map(prepare_stream);
+    futures_util::future::join_all(prepares).await
+}
+
+async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
+    let network = stream.substreams.network.clone().unwrap_or_default();
+    let manifest = stream.substreams.manifest.clone();
+    let module = stream.substreams.module.clone();
+    let name = stream.name.clone();
+
+    let package = match load_package(&manifest).await {
+        Ok(package) => package,
+        Err(error) => {
+            return PreparedStream {
+                config: stream,
+                meta: StreamMeta {
+                    name,
+                    network,
+                    module,
+                    manifest,
+                    module_hash: String::new(),
+                },
+                package: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
+    let Some(modules_pb) = package.modules.as_ref() else {
+        return PreparedStream {
+            config: stream,
+            meta: StreamMeta {
+                name,
+                network,
+                module,
+                manifest,
+                module_hash: String::new(),
+            },
+            package: None,
+            error: Some("package contains no modules".to_owned()),
+        };
+    };
+
+    let module_def = modules_pb.modules.iter().find(|m| m.name == module);
+    let output_type = module_def
+        .and_then(|m| m.output.as_ref().map(|o| o.r#type.clone()))
+        .unwrap_or_default();
+    if output_type != SUPPORTED_OUTPUT_TYPE {
+        return PreparedStream {
+            config: stream,
+            meta: StreamMeta {
+                name,
+                network,
+                module: module.clone(),
+                manifest,
+                module_hash: String::new(),
+            },
+            package: None,
+            error: Some(format!(
+                "module {module:?} output type {output_type:?} is not supported; only {SUPPORTED_OUTPUT_TYPE} is accepted"
+            )),
+        };
+    }
+
+    match compute_module_hash_hex(modules_pb, &module) {
+        Ok(module_hash) => PreparedStream {
+            config: stream,
+            meta: StreamMeta {
+                name,
+                network,
+                module,
+                manifest,
+                module_hash,
+            },
+            package: Some(package),
+            error: None,
+        },
+        Err(error) => PreparedStream {
+            config: stream,
+            meta: StreamMeta {
+                name,
+                network,
+                module,
+                manifest,
+                module_hash: String::new(),
+            },
+            package: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn spawn_streams(
+    state: &AppState,
+    prepared: Vec<PreparedStream>,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let cursors = CursorStore::new(state.config.cursors_dir.clone());
-    state
-        .config
-        .streams
-        .iter()
-        .cloned()
-        .map(|stream| {
+    prepared
+        .into_iter()
+        .map(|prep| {
             let clients = state.clients.clone();
             let cursors = cursors.clone();
             tokio::spawn(async move {
-                run_substream(stream, clients, cursors).await;
+                run_substream(prep, clients, cursors).await;
             })
         })
         .collect()
 }
 
-fn stream_metadata(stream: &StreamConfig) -> serde_json::Value {
-    serde_json::json!({
-        "name": stream.name.as_str(),
-        "network": stream.substreams.network.clone().unwrap_or_default(),
-        "module": stream.substreams.module,
-        "manifest": stream.substreams.manifest,
-    })
-}
+async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: CursorStore) {
+    let PreparedStream {
+        mut config,
+        meta,
+        package,
+        error,
+    } = prep;
+    let network = meta.network.clone();
+    let module_hash = meta.module_hash.clone();
 
-async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursors: CursorStore) {
-    let network = stream.substreams.network.clone().unwrap_or_default();
-
-    let package = match load_package(&stream.substreams.manifest).await {
-        Ok(package) => package,
-        Err(error) => {
-            error!(stream = %stream.name, %error, "failed to load Substreams package");
-            clients
-                .broadcast_json(stream_status(&stream, "error", error.to_string()))
-                .await;
-            return;
-        }
-    };
-
-    let module_hash = match package
-        .modules
-        .as_ref()
-        .ok_or("package contains no modules".to_owned())
-        .and_then(|modules| {
-            compute_module_hash_hex(modules, &stream.substreams.module).map_err(|e| e.to_string())
-        }) {
-        Ok(hash) => hash,
-        Err(error) => {
-            error!(stream = %stream.name, error, "failed to compute module hash");
-            clients
-                .broadcast_json(stream_status(&stream, "error", error))
-                .await;
-            return;
-        }
-    };
+    if let Some(error) = error {
+        error!(stream = %config.name, error, "stream preparation failed");
+        clients
+            .broadcast_json(stream_status(&config, &module_hash, "error", error))
+            .await;
+        return;
+    }
+    let package = package.expect("prepared stream without error must have package");
 
     match cursors.load(&network, &module_hash).await {
         Ok(Some(cursor)) => {
             info!(
-                stream = %stream.name,
+                stream = %config.name,
                 network = %network,
                 module_hash = %module_hash,
                 cursor_len = cursor.len(),
                 "resuming Substreams read from persisted cursor"
             );
-            stream.substreams.start_cursor = Some(cursor);
+            config.substreams.start_cursor = Some(cursor);
         }
         Ok(None) => {}
         Err(error) => {
-            warn!(stream = %stream.name, network = %network, %error, "failed to load cursor; starting from configured block");
+            warn!(stream = %config.name, network = %network, %error, "failed to load cursor; starting from configured block");
         }
     }
 
     info!(
-        stream = %stream.name,
+        stream = %config.name,
         network = %network,
-        module = %stream.substreams.module,
+        module = %config.substreams.module,
         module_hash = %module_hash,
-        manifest = %stream.substreams.manifest,
-        start_block = ?stream.substreams.start_block,
-        has_cursor = stream.substreams.start_cursor.is_some(),
+        manifest = %config.substreams.manifest,
+        start_block = ?config.substreams.start_block,
+        has_cursor = config.substreams.start_cursor.is_some(),
         "starting Substreams read"
     );
 
-    let client = SubstreamsClient::new(stream.substreams.clone());
+    let client = SubstreamsClient::new(config.substreams.clone());
     let mut substream = match client.stream_with_package(package).await {
         Ok(substream) => substream,
         Err(error) => {
-            error!(stream = %stream.name, %error, "Substreams read failed to start");
+            error!(stream = %config.name, %error, "Substreams read failed to start");
             clients
-                .broadcast_json(stream_status(&stream, "error", error.to_string()))
+                .broadcast_json(stream_status(
+                    &config,
+                    &module_hash,
+                    "error",
+                    error.to_string(),
+                ))
                 .await;
             return;
         }
     };
 
     clients
-        .broadcast_json(stream_status(&stream, "started", String::new()))
+        .broadcast_json(stream_status(
+            &config,
+            &module_hash,
+            "started",
+            String::new(),
+        ))
         .await;
 
     loop {
         let event = match substream.next_event().await {
             Ok(Some(event)) => event,
             Ok(None) => {
-                info!(stream = %stream.name, "Substreams read completed");
+                info!(stream = %config.name, "Substreams read completed");
                 clients
-                    .broadcast_json(stream_status(&stream, "completed", String::new()))
+                    .broadcast_json(stream_status(
+                        &config,
+                        &module_hash,
+                        "completed",
+                        String::new(),
+                    ))
                     .await;
                 break;
             }
             Err(error) => {
-                error!(stream = %stream.name, %error, "Substreams read failed");
+                error!(stream = %config.name, %error, "Substreams read failed");
                 clients
-                    .broadcast_json(stream_status(&stream, "error", error.to_string()))
+                    .broadcast_json(stream_status(
+                        &config,
+                        &module_hash,
+                        "error",
+                        error.to_string(),
+                    ))
                     .await;
                 break;
             }
         };
 
-        handle_substream_event(&stream, &clients, &cursors, &module_hash, event).await;
+        handle_substream_event(&config, &clients, &cursors, &module_hash, event).await;
     }
 }
 
 async fn handle_substream_event(
-    stream: &StreamConfig,
+    config: &StreamConfig,
     clients: &ClientRegistry,
     cursors: &CursorStore,
     module_hash: &str,
     event: StreamEvent,
 ) {
-    let network = stream.substreams.network.clone().unwrap_or_default();
-    let name = stream.name.as_str();
+    let network = config.substreams.network.clone().unwrap_or_default();
+    let stream_name = config.name.as_str();
 
     match event {
         StreamEvent::Block {
@@ -243,27 +373,45 @@ async fn handle_substream_event(
                 block_hash: id,
                 timestamp,
                 network: network.clone(),
+                cursor: cursor.clone(),
+                module_hash: module_hash.to_owned(),
             };
-            let decoded = match decode_stream_payload(stream.name, &payload, context) {
+            let decoded = match decode_database_changes(&config.name, &payload, context) {
                 Ok(decoded) => decoded,
                 Err(error) => {
-                    warn!(stream = %stream.name, %error, "failed to decode Substreams block output");
+                    warn!(stream = %config.name, %error, "failed to decode Substreams block output");
                     clients
-                        .broadcast_json(stream_status(stream, "decode_error", error.to_string()))
+                        .broadcast_json(stream_status(
+                            config,
+                            module_hash,
+                            "decode_error",
+                            error.to_string(),
+                        ))
                         .await;
                     return;
                 }
             };
 
-            clients.broadcast_json(decoded).await;
+            // Skip empty-block broadcasts. Cursor is still persisted so resume
+            // continues from this block on restart.
+            if !decoded.events.is_empty() {
+                let json = match serde_json::to_value(decoded) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warn!(stream = %config.name, %error, "failed to serialize decoded block");
+                        return;
+                    }
+                };
+                clients.broadcast_json(json).await;
+            }
 
             if let Err(error) = cursors.save(&network, module_hash, &cursor).await {
-                warn!(stream = %stream.name, %error, "failed to persist Substreams cursor");
+                warn!(stream = %config.name, %error, "failed to persist Substreams cursor");
             }
         }
         StreamEvent::Fatal { message } => {
             clients
-                .broadcast_json(stream_status(stream, "fatal", message))
+                .broadcast_json(stream_status(config, module_hash, "fatal", message))
                 .await;
         }
         StreamEvent::Undo {
@@ -274,8 +422,9 @@ async fn handle_substream_event(
                 .broadcast_json(serde_json::json!({
                     "type": "stream",
                     "status": "undo",
-                    "name": name,
+                    "stream": stream_name,
                     "network": network,
+                    "module_hash": module_hash,
                     "last_valid_block": last_valid_block,
                 }))
                 .await;
@@ -283,7 +432,7 @@ async fn handle_substream_event(
                 .save(&network, module_hash, &last_valid_cursor)
                 .await
             {
-                warn!(stream = %stream.name, %error, "failed to persist last-valid cursor");
+                warn!(stream = %config.name, %error, "failed to persist last-valid cursor");
             }
         }
         StreamEvent::Session { .. }
@@ -294,24 +443,18 @@ async fn handle_substream_event(
     }
 }
 
-fn decode_stream_payload(
-    name: StreamName,
-    payload: &[u8],
-    context: BlockContext,
-) -> Result<serde_json::Value, crate::DecodeError> {
-    match name {
-        StreamName::Swaps => serde_json::to_value(decode_swaps(payload, context)?),
-        StreamName::Transfers => serde_json::to_value(decode_transfers(payload, context)?),
-    }
-    .map_err(crate::DecodeError::Serialize)
-}
-
-fn stream_status(stream: &StreamConfig, status: &str, message: String) -> serde_json::Value {
+fn stream_status(
+    config: &StreamConfig,
+    module_hash: &str,
+    status: &str,
+    message: String,
+) -> serde_json::Value {
     let mut value = serde_json::json!({
         "type": "stream",
         "status": status,
-        "name": stream.name.as_str(),
-        "network": stream.substreams.network.clone().unwrap_or_default(),
+        "stream": config.name,
+        "network": config.substreams.network.clone().unwrap_or_default(),
+        "module_hash": module_hash,
     });
 
     if !message.is_empty() {
@@ -395,7 +538,7 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         "type": "session",
         "status": "connected",
         "client_id": client_id,
-        "streams": state.config.streams.iter().map(stream_metadata).collect::<Vec<_>>(),
+        "streams": state.streams_meta.as_ref(),
     });
 
     if outbound
@@ -578,7 +721,9 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     use super::*;
-    use crate::decoder::pb::dex::swaps::v1::{Events as SwapEvents, Protocol, Swap, Transaction};
+    use crate::decoder::pb::sf::substreams::sink::database::v1::{
+        DatabaseChanges, Field, TableChange,
+    };
     use crate::{StreamEvent, SubstreamsConfig, WebSocketConfig};
 
     #[tokio::test]
@@ -625,9 +770,8 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&text).expect("welcome json");
         assert_eq!(body["type"], "session");
         assert_eq!(body["status"], "connected");
-        assert_eq!(body["streams"][0]["name"], "swaps");
-        assert_eq!(body["streams"][0]["name"], "swaps");
-        assert_eq!(body["streams"][0]["module"], "swaps");
+        assert_eq!(body["streams"][0]["stream"], "swaps");
+        assert_eq!(body["streams"][0]["module"], "db_out");
         assert_eq!(body["streams"][0]["network"], "solana-mainnet");
         assert_eq!(body["streams"][0]["manifest"], "./demo.spkg");
         assert!(body["client_id"].as_u64().is_some());
@@ -748,7 +892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_client_receives_decoded_swap_block() {
+    async fn websocket_client_receives_decoded_database_changes_block() {
         let server = TestServer::start(config()).await;
 
         let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
@@ -765,42 +909,41 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
-        let events = SwapEvents {
-            transactions: vec![Transaction {
-                signature: vec![1u8; 32],
-                fee_payer: vec![2u8; 32],
-                signers: vec![vec![2u8; 32]],
-                fee: 5_000,
-                compute_units_consumed: 1_234,
-                swaps: vec![Swap {
-                    protocol: Protocol::RaydiumAmmV4 as i32,
-                    program_id: vec![3u8; 32],
-                    stack_height: 1,
-                    amm: vec![4u8; 32],
-                    amm_pool: vec![5u8; 32],
-                    user: vec![6u8; 32],
-                    input_mint: vec![7u8; 32],
-                    input_amount: 1_000,
-                    output_mint: vec![8u8; 32],
-                    output_amount: 2_000,
-                }],
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![
+                    Field {
+                        name: "input_amount".to_owned(),
+                        value: "1287000000".to_owned(),
+                        update_op: 1,
+                    },
+                    Field {
+                        name: "block_num".to_owned(),
+                        value: "ignored".to_owned(),
+                        update_op: 1,
+                    },
+                ],
+                primary_key: None,
             }],
         };
         let mut payload = Vec::new();
-        events.encode(&mut payload).expect("events encode");
+        changes.encode(&mut payload).expect("events encode");
 
-        let stream = server.config.streams[0].clone();
+        let stream_config = server.config.streams[0].clone();
         let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
         let cursors = CursorStore::new(cursors_dir.path());
         handle_substream_event(
-            &stream,
+            &stream_config,
             &server.clients,
             &cursors,
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             StreamEvent::Block {
                 number: 999,
                 id: "block-999".to_owned(),
-                timestamp: "2026-05-12 17:30:00".to_owned(),
+                timestamp: "2026-05-13 17:30:00".to_owned(),
                 output_type_url: String::new(),
                 payload,
                 cursor: "abc123".to_owned(),
@@ -819,16 +962,23 @@ mod tests {
         };
 
         let body: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
-        assert_eq!(body["type"], "swaps");
+        assert_eq!(body["stream"], "swaps");
         assert_eq!(body["network"], "solana-mainnet");
-        assert_eq!(body["block"]["number"], 999);
-        assert_eq!(body["block"]["hash"], "block-999");
-        assert_eq!(
-            body["transactions"][0]["swaps"][0]["protocol"],
-            "raydium_amm_v4"
+        assert_eq!(body["block_num"], 999);
+        assert_eq!(body["block_hash"], "block-999");
+        assert_eq!(body["timestamp"], "2026-05-13 17:30:00");
+        assert_eq!(body["cursor"], "abc123");
+        assert!(body.get("block").is_none(), "no nested 'block' object");
+        assert!(body.get("type").is_none());
+        assert!(body.get("changes").is_none());
+        assert_eq!(body["events"][0]["@table"], "swaps");
+        assert_eq!(body["events"][0]["input_amount"], "1287000000");
+        // block_num stripped because it duplicates top-level @block_num
+        assert!(body["events"][0].get("block_num").is_none());
+        assert!(
+            body["events"][0].get("table").is_none(),
+            "bare 'table' must not appear"
         );
-        assert_eq!(body["transactions"][0]["swaps"][0]["input_amount"], 1_000);
-        assert_eq!(body["transactions"][0]["swaps"][0]["output_amount"], 2_000);
 
         socket.close(None).await.expect("client closes cleanly");
     }
@@ -848,9 +998,23 @@ mod tests {
             let addr = listener.local_addr().expect("test listener address");
             let ws_path = config.websocket.ws_path.clone();
             let health_path = config.websocket.health_path.clone();
+            let streams_meta = Arc::new(
+                config
+                    .streams
+                    .iter()
+                    .map(|s| StreamMeta {
+                        name: s.name.clone(),
+                        network: s.substreams.network.clone().unwrap_or_default(),
+                        module: s.substreams.module.clone(),
+                        manifest: s.substreams.manifest.clone(),
+                        module_hash: String::new(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
             let state = AppState {
                 config: Arc::new(config),
                 clients: ClientRegistry::default(),
+                streams_meta,
             };
             let clients = state.clients.clone();
             let config = state.config.clone();
@@ -898,10 +1062,10 @@ mod tests {
     fn config() -> Config {
         Config {
             streams: vec![StreamConfig {
-                name: StreamName::Swaps,
+                name: "swaps".to_owned(),
                 substreams: SubstreamsConfig {
                     manifest: "./demo.spkg".to_owned(),
-                    module: "swaps".to_owned(),
+                    module: "db_out".to_owned(),
                     endpoint: None,
                     network: Some("solana-mainnet".to_owned()),
                     start_block: None,

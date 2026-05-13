@@ -4,8 +4,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 use substreams_websocket::{
-    Config, StreamConfig, StreamEvent, StreamName, SubstreamsClient, SubstreamsConfig,
-    WebSocketConfig,
+    Config, StreamConfig, StreamEvent, SubstreamsClient, SubstreamsConfig, WebSocketConfig,
 };
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -291,10 +290,11 @@ struct FileConfig {
 
 #[derive(Debug, Deserialize)]
 struct FileStreamConfig {
-    name: StreamName,
+    name: String,
     network: String,
     endpoint: String,
     manifest: String,
+    #[serde(default = "default_module")]
     module: String,
     start_block: Option<String>,
     stop_block: Option<String>,
@@ -332,6 +332,10 @@ impl FileStreamConfig {
             },
         }
     }
+}
+
+fn default_module() -> String {
+    "db_out".to_owned()
 }
 
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {

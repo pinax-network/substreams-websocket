@@ -9,50 +9,10 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
-    pub name: StreamName,
+    /// User-defined display name. Forms the `(network, name)` identity used
+    /// by WebSocket subscribers and the cursor key. Has no effect on decoding.
+    pub name: String,
     pub substreams: SubstreamsConfig,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StreamName {
-    Swaps,
-    Transfers,
-}
-
-impl StreamName {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Swaps => "swaps",
-            Self::Transfers => "transfers",
-        }
-    }
-}
-
-impl std::fmt::Display for StreamName {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for StreamName {
-    type Err = StreamNameParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "swaps" => Ok(Self::Swaps),
-            "transfers" => Ok(Self::Transfers),
-            _ => Err(StreamNameParseError {
-                value: value.to_owned(),
-            }),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("invalid stream name {value:?}, expected swaps or transfers")]
-pub struct StreamNameParseError {
-    value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +83,7 @@ impl Config {
             return Err(ConfigError::NoStreams);
         }
 
-        let mut seen = std::collections::HashSet::<(String, &'static str)>::new();
+        let mut seen = std::collections::HashSet::<(String, String)>::new();
         for (index, stream) in self.streams.iter().enumerate() {
             let name = stream.name.as_str();
             let endpoint = stream
@@ -165,7 +125,7 @@ impl Config {
                 });
             }
 
-            if !seen.insert((network.to_owned(), name)) {
+            if !seen.insert((network.to_owned(), name.to_owned())) {
                 return Err(ConfigError::DuplicateStream {
                     network: network.to_owned(),
                     name: name.to_owned(),
@@ -204,12 +164,12 @@ fn validate_path(field: &'static str, value: &str) -> Result<(), ConfigError> {
 mod tests {
     use super::*;
 
-    fn stream(name: StreamName, network: &str, endpoint: &str) -> StreamConfig {
+    fn stream(name: &str, network: &str, endpoint: &str) -> StreamConfig {
         StreamConfig {
-            name,
+            name: name.to_owned(),
             substreams: SubstreamsConfig {
                 manifest: "./demo.spkg".to_owned(),
-                module: "map_events".to_owned(),
+                module: "db_out".to_owned(),
                 endpoint: Some(endpoint.to_owned()),
                 network: Some(network.to_owned()),
                 start_block: Some("-1".to_owned()),
@@ -243,7 +203,7 @@ mod tests {
 
     #[test]
     fn rejects_streams_missing_endpoint() {
-        let mut stream = stream(StreamName::Swaps, "solana-mainnet", "");
+        let mut stream = stream("swaps", "solana-mainnet", "");
         stream.substreams.endpoint = None;
         let config = Config {
             streams: vec![stream],
@@ -258,7 +218,7 @@ mod tests {
 
     #[test]
     fn rejects_streams_missing_network() {
-        let mut stream = stream(StreamName::Transfers, "", "https://e:443");
+        let mut stream = stream("transfers", "", "https://e:443");
         stream.substreams.network = None;
         let config = Config {
             streams: vec![stream],
@@ -273,7 +233,7 @@ mod tests {
 
     #[test]
     fn rejects_streams_missing_start_block() {
-        let mut s = stream(StreamName::Swaps, "solana-mainnet", "https://e:443");
+        let mut s = stream("swaps", "solana-mainnet", "https://e:443");
         s.substreams.start_block = None;
         let config = Config {
             streams: vec![s],
@@ -290,8 +250,8 @@ mod tests {
     fn rejects_duplicate_network_name_pairs() {
         let config = Config {
             streams: vec![
-                stream(StreamName::Transfers, "solana-mainnet", "https://e:443"),
-                stream(StreamName::Transfers, "solana-mainnet", "https://e:443"),
+                stream("transfers", "solana-mainnet", "https://e:443"),
+                stream("transfers", "solana-mainnet", "https://e:443"),
             ],
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
@@ -306,8 +266,8 @@ mod tests {
     fn allows_same_name_on_different_networks() {
         let config = Config {
             streams: vec![
-                stream(StreamName::Transfers, "solana-mainnet", "https://a:443"),
-                stream(StreamName::Transfers, "ethereum-mainnet", "https://b:443"),
+                stream("transfers", "solana-mainnet", "https://a:443"),
+                stream("transfers", "ethereum-mainnet", "https://b:443"),
             ],
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
