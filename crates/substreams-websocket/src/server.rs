@@ -58,15 +58,11 @@ struct AppState {
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct StreamMeta {
-    #[serde(rename = "@stream")]
+    #[serde(rename = "stream")]
     name: String,
-    #[serde(rename = "@network")]
     network: String,
-    #[serde(rename = "@module")]
     module: String,
-    #[serde(rename = "@manifest")]
     manifest: String,
-    #[serde(rename = "@module_hash")]
     module_hash: String,
 }
 
@@ -424,12 +420,12 @@ async fn handle_substream_event(
         } => {
             clients
                 .broadcast_json(serde_json::json!({
-                    "@type": "stream",
-                    "@status": "undo",
-                    "@stream": stream_name,
-                    "@network": network,
-                    "@module_hash": module_hash,
-                    "@last_valid_block": last_valid_block,
+                    "type": "stream",
+                    "status": "undo",
+                    "stream": stream_name,
+                    "network": network,
+                    "module_hash": module_hash,
+                    "last_valid_block": last_valid_block,
                 }))
                 .await;
             if let Err(error) = cursors
@@ -454,15 +450,15 @@ fn stream_status(
     message: String,
 ) -> serde_json::Value {
     let mut value = serde_json::json!({
-        "@type": "stream",
-        "@status": status,
-        "@stream": config.name,
-        "@network": config.substreams.network.clone().unwrap_or_default(),
-        "@module_hash": module_hash,
+        "type": "stream",
+        "status": status,
+        "stream": config.name,
+        "network": config.substreams.network.clone().unwrap_or_default(),
+        "module_hash": module_hash,
     });
 
     if !message.is_empty() {
-        value["@message"] = serde_json::Value::String(message);
+        value["message"] = serde_json::Value::String(message);
     }
 
     value
@@ -539,10 +535,10 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     ));
 
     let welcome = serde_json::json!({
-        "@type": "session",
-        "@status": "connected",
-        "@client_id": client_id,
-        "@streams": state.streams_meta.as_ref(),
+        "type": "session",
+        "status": "connected",
+        "client_id": client_id,
+        "streams": state.streams_meta.as_ref(),
     });
 
     if outbound
@@ -772,13 +768,13 @@ mod tests {
         };
 
         let body: serde_json::Value = serde_json::from_str(&text).expect("welcome json");
-        assert_eq!(body["@type"], "session");
-        assert_eq!(body["@status"], "connected");
-        assert_eq!(body["@streams"][0]["@stream"], "swaps");
-        assert_eq!(body["@streams"][0]["@module"], "db_out");
-        assert_eq!(body["@streams"][0]["@network"], "solana-mainnet");
-        assert_eq!(body["@streams"][0]["@manifest"], "./demo.spkg");
-        assert!(body["@client_id"].as_u64().is_some());
+        assert_eq!(body["type"], "session");
+        assert_eq!(body["status"], "connected");
+        assert_eq!(body["streams"][0]["stream"], "swaps");
+        assert_eq!(body["streams"][0]["module"], "db_out");
+        assert_eq!(body["streams"][0]["network"], "solana-mainnet");
+        assert_eq!(body["streams"][0]["manifest"], "./demo.spkg");
+        assert!(body["client_id"].as_u64().is_some());
 
         socket
             .close(None)
@@ -966,12 +962,12 @@ mod tests {
         };
 
         let body: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
-        assert_eq!(body["@stream"], "swaps");
-        assert_eq!(body["@network"], "solana-mainnet");
-        assert_eq!(body["@block_num"], 999);
-        assert_eq!(body["@block_hash"], "block-999");
-        assert_eq!(body["@timestamp"], "2026-05-13 17:30:00");
-        assert_eq!(body["@cursor"], "abc123");
+        assert_eq!(body["stream"], "swaps");
+        assert_eq!(body["network"], "solana-mainnet");
+        assert_eq!(body["block_num"], 999);
+        assert_eq!(body["block_hash"], "block-999");
+        assert_eq!(body["timestamp"], "2026-05-13 17:30:00");
+        assert_eq!(body["cursor"], "abc123");
         assert!(body.get("block").is_none(), "no nested 'block' object");
         assert!(body.get("type").is_none());
         assert!(body.get("changes").is_none());

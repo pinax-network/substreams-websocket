@@ -51,25 +51,18 @@ pub enum DecodeError {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DatabaseChangesBlockMessage {
     /// Stream display name (the TOML `[[streams]].name`). Forms the
-    /// `(@stream, @network)` identity WebSocket subscribers register against.
-    #[serde(rename = "@stream")]
+    /// `(stream, network)` identity WebSocket subscribers register against.
     pub stream: String,
-    #[serde(rename = "@network")]
     pub network: String,
-    #[serde(rename = "@block_num")]
     pub block_num: u64,
-    #[serde(rename = "@block_hash")]
     pub block_hash: String,
-    #[serde(rename = "@timestamp")]
     pub timestamp: String,
     /// Opaque Substreams cursor for the block being delivered. Subscribers may
     /// persist this and reconnect to a Substreams endpoint directly using it
     /// to resume from this exact position. This server does not replay.
-    #[serde(rename = "@cursor")]
     pub cursor: String,
     /// Canonical Substreams module hash of the configured output module.
     /// Subscribers can use it to detect spkg upgrades.
-    #[serde(rename = "@module_hash")]
     pub module_hash: String,
     pub events: Vec<serde_json::Map<String, serde_json::Value>>,
 }
@@ -254,31 +247,24 @@ mod tests {
         };
         let message = normalize_database_changes("swaps", changes, context());
         let json = serde_json::to_value(message).expect("serialize");
-        assert_eq!(json["@stream"], "swaps");
-        assert_eq!(json["@network"], "solana-mainnet");
-        assert_eq!(json["@block_num"], 350_000_000);
-        assert_eq!(json["@block_hash"], "block-hash");
-        assert_eq!(json["@timestamp"], "2026-05-13 17:00:00");
-        assert_eq!(json["@cursor"], "cur-xyz");
-        assert_eq!(json["@module_hash"], "deadbeef");
+        assert_eq!(json["stream"], "swaps");
+        assert_eq!(json["network"], "solana-mainnet");
+        assert_eq!(json["block_num"], 350_000_000);
+        assert_eq!(json["block_hash"], "block-hash");
+        assert_eq!(json["timestamp"], "2026-05-13 17:00:00");
+        assert_eq!(json["cursor"], "cur-xyz");
+        assert_eq!(json["module_hash"], "deadbeef");
         assert!(json.get("block").is_none(), "no nested 'block' object");
-        assert!(
-            json.get("stream").is_none(),
-            "bare 'stream' must not appear"
-        );
-        assert!(
-            json.get("network").is_none(),
-            "bare 'network' must not appear"
-        );
         assert!(
             json.get("type").is_none(),
             "top-level 'type' must be removed"
         );
         assert!(json.get("changes").is_none(), "renamed to 'events'");
+        assert!(json.get("@stream").is_none(), "no @-prefix on meta fields");
         assert!(json["events"].is_array());
         assert!(
             json["events"][0].get("table").is_none(),
-            "row-level 'table' must be '@table'"
+            "row-level 'table' must be '@table' (collision guard)"
         );
         assert_eq!(json["events"][0]["@table"], "swaps");
     }
