@@ -28,9 +28,8 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    BlockContext, Config, CursorStore, StreamConfig, StreamEvent, StreamName, SubstreamsClient,
-    compute_module_hash_hex, decode_database_changes, decode_swaps, decode_transfers,
-    substreams::load_package,
+    BlockContext, Config, CursorStore, SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent,
+    SubstreamsClient, compute_module_hash_hex, decode_database_changes, substreams::load_package,
 };
 
 type ClientId = u64;
@@ -115,7 +114,7 @@ fn spawn_streams(state: &AppState) -> Vec<tokio::task::JoinHandle<()>> {
 
 fn stream_metadata(stream: &StreamConfig) -> serde_json::Value {
     serde_json::json!({
-        "name": stream.name.as_str(),
+        "name": stream.name,
         "network": stream.substreams.network.clone().unwrap_or_default(),
         "module": stream.substreams.module,
         "manifest": stream.substreams.manifest,
@@ -136,18 +135,45 @@ async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursor
         }
     };
 
-    let module_hash = match package
+    let modules_pb = match package.modules.as_ref() {
+        Some(modules) => modules,
+        None => {
+            let msg = "package contains no modules".to_owned();
+            error!(stream = %stream.name, error = msg, "invalid package");
+            clients
+                .broadcast_json(stream_status(&stream, "error", msg))
+                .await;
+            return;
+        }
+    };
+
+    // Validate that the configured module emits DatabaseChanges. Anything else
+    // is rejected: this server only consumes db_out-style modules.
+    let module_def = modules_pb
         .modules
-        .as_ref()
-        .ok_or("package contains no modules".to_owned())
-        .and_then(|modules| {
-            compute_module_hash_hex(modules, &stream.substreams.module).map_err(|e| e.to_string())
-        }) {
+        .iter()
+        .find(|m| m.name == stream.substreams.module);
+    let output_type = module_def
+        .and_then(|m| m.output.as_ref().map(|o| o.r#type.clone()))
+        .unwrap_or_default();
+    if output_type != SUPPORTED_OUTPUT_TYPE {
+        let msg = format!(
+            "module {:?} output type {:?} is not supported; only {SUPPORTED_OUTPUT_TYPE} is accepted",
+            stream.substreams.module, output_type
+        );
+        error!(stream = %stream.name, output_type = %output_type, "unsupported module output");
+        clients
+            .broadcast_json(stream_status(&stream, "error", msg))
+            .await;
+        return;
+    }
+
+    let module_hash = match compute_module_hash_hex(modules_pb, &stream.substreams.module) {
         Ok(hash) => hash,
         Err(error) => {
-            error!(stream = %stream.name, error, "failed to compute module hash");
+            error!(stream = %stream.name, %error, "failed to compute module hash");
             clients
-                .broadcast_json(stream_status(&stream, "error", error))
+                .broadcast_json(stream_status(&stream, "error", error.to_string()))
                 .await;
             return;
         }
@@ -245,13 +271,21 @@ async fn handle_substream_event(
                 timestamp,
                 network: network.clone(),
             };
-            let decoded = match decode_stream_payload(stream.name, &payload, context) {
+            let decoded = match decode_database_changes(&stream.name, &payload, context) {
                 Ok(decoded) => decoded,
                 Err(error) => {
                     warn!(stream = %stream.name, %error, "failed to decode Substreams block output");
                     clients
                         .broadcast_json(stream_status(stream, "decode_error", error.to_string()))
                         .await;
+                    return;
+                }
+            };
+
+            let decoded = match serde_json::to_value(decoded) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(stream = %stream.name, %error, "failed to serialize decoded block");
                     return;
                 }
             };
@@ -295,24 +329,11 @@ async fn handle_substream_event(
     }
 }
 
-fn decode_stream_payload(
-    name: StreamName,
-    payload: &[u8],
-    context: BlockContext,
-) -> Result<serde_json::Value, crate::DecodeError> {
-    match name {
-        StreamName::Swaps => serde_json::to_value(decode_swaps(payload, context)?),
-        StreamName::Transfers => serde_json::to_value(decode_transfers(payload, context)?),
-        StreamName::DbOut => serde_json::to_value(decode_database_changes(payload, context)?),
-    }
-    .map_err(crate::DecodeError::Serialize)
-}
-
 fn stream_status(stream: &StreamConfig, status: &str, message: String) -> serde_json::Value {
     let mut value = serde_json::json!({
         "type": "stream",
         "status": status,
-        "name": stream.name.as_str(),
+        "name": stream.name,
         "network": stream.substreams.network.clone().unwrap_or_default(),
     });
 
@@ -580,7 +601,9 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     use super::*;
-    use crate::decoder::pb::dex::swaps::v1::{Events as SwapEvents, Protocol, Swap, Transaction};
+    use crate::decoder::pb::sf::substreams::sink::database::v1::{
+        DatabaseChanges, Field, TableChange,
+    };
     use crate::{StreamEvent, SubstreamsConfig, WebSocketConfig};
 
     #[tokio::test]
@@ -628,8 +651,7 @@ mod tests {
         assert_eq!(body["type"], "session");
         assert_eq!(body["status"], "connected");
         assert_eq!(body["streams"][0]["name"], "swaps");
-        assert_eq!(body["streams"][0]["name"], "swaps");
-        assert_eq!(body["streams"][0]["module"], "swaps");
+        assert_eq!(body["streams"][0]["module"], "db_out");
         assert_eq!(body["streams"][0]["network"], "solana-mainnet");
         assert_eq!(body["streams"][0]["manifest"], "./demo.spkg");
         assert!(body["client_id"].as_u64().is_some());
@@ -750,7 +772,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_client_receives_decoded_swap_block() {
+    async fn websocket_client_receives_decoded_database_changes_block() {
         let server = TestServer::start(config()).await;
 
         let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
@@ -767,29 +789,28 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
-        let events = SwapEvents {
-            transactions: vec![Transaction {
-                signature: vec![1u8; 32],
-                fee_payer: vec![2u8; 32],
-                signers: vec![vec![2u8; 32]],
-                fee: 5_000,
-                compute_units_consumed: 1_234,
-                swaps: vec![Swap {
-                    protocol: Protocol::RaydiumAmmV4 as i32,
-                    program_id: vec![3u8; 32],
-                    stack_height: 1,
-                    amm: vec![4u8; 32],
-                    amm_pool: vec![5u8; 32],
-                    user: vec![6u8; 32],
-                    input_mint: vec![7u8; 32],
-                    input_amount: 1_000,
-                    output_mint: vec![8u8; 32],
-                    output_amount: 2_000,
-                }],
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![
+                    Field {
+                        name: "input_amount".to_owned(),
+                        value: "1287000000".to_owned(),
+                        update_op: 1,
+                    },
+                    Field {
+                        name: "block_num".to_owned(),
+                        value: "ignored".to_owned(),
+                        update_op: 1,
+                    },
+                ],
+                primary_key: None,
             }],
         };
         let mut payload = Vec::new();
-        events.encode(&mut payload).expect("events encode");
+        changes.encode(&mut payload).expect("events encode");
 
         let stream = server.config.streams[0].clone();
         let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
@@ -802,7 +823,7 @@ mod tests {
             StreamEvent::Block {
                 number: 999,
                 id: "block-999".to_owned(),
-                timestamp: "2026-05-12 17:30:00".to_owned(),
+                timestamp: "2026-05-13 17:30:00".to_owned(),
                 output_type_url: String::new(),
                 payload,
                 cursor: "abc123".to_owned(),
@@ -821,16 +842,16 @@ mod tests {
         };
 
         let body: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
-        assert_eq!(body["type"], "swaps");
+        assert_eq!(body["name"], "swaps");
         assert_eq!(body["network"], "solana-mainnet");
         assert_eq!(body["block"]["number"], 999);
         assert_eq!(body["block"]["hash"], "block-999");
-        assert_eq!(
-            body["transactions"][0]["swaps"][0]["protocol"],
-            "raydium_amm_v4"
-        );
-        assert_eq!(body["transactions"][0]["swaps"][0]["input_amount"], 1_000);
-        assert_eq!(body["transactions"][0]["swaps"][0]["output_amount"], 2_000);
+        assert!(body.get("type").is_none());
+        assert!(body.get("changes").is_none());
+        assert_eq!(body["events"][0]["table"], "swaps");
+        assert_eq!(body["events"][0]["input_amount"], "1287000000");
+        // block_num stripped because it duplicates block.number
+        assert!(body["events"][0].get("block_num").is_none());
 
         socket.close(None).await.expect("client closes cleanly");
     }
@@ -900,10 +921,10 @@ mod tests {
     fn config() -> Config {
         Config {
             streams: vec![StreamConfig {
-                name: StreamName::Swaps,
+                name: "swaps".to_owned(),
                 substreams: SubstreamsConfig {
                     manifest: "./demo.spkg".to_owned(),
-                    module: "swaps".to_owned(),
+                    module: "db_out".to_owned(),
                     endpoint: None,
                     network: Some("solana-mainnet".to_owned()),
                     start_block: None,

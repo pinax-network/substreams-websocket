@@ -9,8 +9,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/sf/substreams/v1/modules.proto",
                 "proto/sf/substreams/v1/clock.proto",
                 "proto/sf/substreams/v1/deltas.proto",
-                "proto/dex/swaps/v1/dex-swaps.proto",
-                "proto/solana/spl/token/v1/spl-token.proto",
                 "proto/sf/substreams/sink/database/v1/database.proto",
             ],
             &["proto"],
