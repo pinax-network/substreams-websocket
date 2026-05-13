@@ -29,7 +29,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     BlockContext, Config, CursorStore, StreamConfig, StreamEvent, StreamName, SubstreamsClient,
-    compute_module_hash_hex, decode_swaps, decode_transfers, substreams::load_package,
+    compute_module_hash_hex, decode_database_changes, decode_swaps, decode_transfers,
+    substreams::load_package,
 };
 
 type ClientId = u64;
@@ -302,6 +303,7 @@ fn decode_stream_payload(
     match name {
         StreamName::Swaps => serde_json::to_value(decode_swaps(payload, context)?),
         StreamName::Transfers => serde_json::to_value(decode_transfers(payload, context)?),
+        StreamName::DbOut => serde_json::to_value(decode_database_changes(payload, context)?),
     }
     .map_err(crate::DecodeError::Serialize)
 }

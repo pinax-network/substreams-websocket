@@ -19,10 +19,23 @@ pub mod pb {
             }
         }
     }
+
+    pub mod sf {
+        pub mod substreams {
+            pub mod sink {
+                pub mod database {
+                    pub mod v1 {
+                        tonic::include_proto!("sf.substreams.sink.database.v1");
+                    }
+                }
+            }
+        }
+    }
 }
 
 use pb::{
     dex::swaps::v1::{Events as SwapEvents, Protocol, Swap, Transaction as SwapTransaction},
+    sf::substreams::sink::database::v1::DatabaseChanges,
     solana::spl::token::v1::{
         Events as TransferEvents, Instruction, Transaction as TransferTransaction, Transfer,
         instruction,
@@ -44,6 +57,9 @@ pub enum DecodeError {
 
     #[error("failed to decode solana.spl.token.v1.Events: {0}")]
     TransferEvents(#[source] prost::DecodeError),
+
+    #[error("failed to decode sf.substreams.sink.database.v1.DatabaseChanges: {0}")]
+    DatabaseChanges(#[source] prost::DecodeError),
 
     #[error("failed to serialize decoded payload: {0}")]
     Serialize(#[from] serde_json::Error),
@@ -291,6 +307,58 @@ fn encode_bytes(bytes: &[u8]) -> String {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DatabaseChangesBlockMessage {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub network: String,
+    pub block: BlockRef,
+    pub changes: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Decode a `sf.substreams.sink.database.v1.DatabaseChanges` payload into a flat
+/// block message. Each row in `table_changes` becomes one object containing the
+/// `table` name plus every `field.name -> field.value` pair. The `ordinal`,
+/// `operation`, `pk`/`composite_pk`, and `update_op` fields are intentionally
+/// dropped — values are passed through as-is (already strings on the wire).
+/// Order of rows mirrors the input `table_changes` order.
+pub fn decode_database_changes(
+    payload: &[u8],
+    context: BlockContext,
+) -> Result<DatabaseChangesBlockMessage, DecodeError> {
+    let changes = DatabaseChanges::decode(payload).map_err(DecodeError::DatabaseChanges)?;
+    Ok(normalize_database_changes(changes, context))
+}
+
+pub fn normalize_database_changes(
+    changes: DatabaseChanges,
+    context: BlockContext,
+) -> DatabaseChangesBlockMessage {
+    let rows = changes
+        .table_changes
+        .into_iter()
+        .map(|change| {
+            let mut row = serde_json::Map::with_capacity(change.fields.len() + 1);
+            row.insert("table".to_owned(), serde_json::Value::String(change.table));
+            for field in change.fields {
+                row.insert(field.name, serde_json::Value::String(field.value));
+            }
+            row
+        })
+        .collect();
+
+    DatabaseChangesBlockMessage {
+        kind: "database_changes",
+        network: context.network,
+        block: BlockRef {
+            number: context.block_num,
+            hash: context.block_hash,
+            timestamp: context.timestamp,
+        },
+        changes: rows,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use prost::Message;
@@ -529,6 +597,89 @@ mod tests {
     fn rejects_invalid_transfer_events_payload() {
         let error = decode_transfers(&[0xff, 0xff], context()).expect_err("payload rejects");
         assert!(matches!(error, DecodeError::TransferEvents(_)));
+    }
+
+    #[test]
+    fn flattens_database_changes_and_preserves_order() {
+        use crate::decoder::pb::sf::substreams::sink::database::v1::{
+            DatabaseChanges, Field, TableChange,
+        };
+
+        let changes = DatabaseChanges {
+            table_changes: vec![
+                TableChange {
+                    table: "swaps".to_owned(),
+                    ordinal: 0,
+                    operation: 1,
+                    fields: vec![
+                        Field {
+                            name: "block_num".to_owned(),
+                            value: "350000000".to_owned(),
+                            update_op: 1,
+                        },
+                        Field {
+                            name: "input_amount".to_owned(),
+                            value: "1287000000".to_owned(),
+                            update_op: 1,
+                        },
+                    ],
+                    primary_key: None,
+                },
+                TableChange {
+                    table: "swaps".to_owned(),
+                    ordinal: 1,
+                    operation: 1,
+                    fields: vec![Field {
+                        name: "block_num".to_owned(),
+                        value: "350000000".to_owned(),
+                        update_op: 1,
+                    }],
+                    primary_key: None,
+                },
+                TableChange {
+                    table: "transfers".to_owned(),
+                    ordinal: 2,
+                    operation: 1,
+                    fields: vec![Field {
+                        name: "amount".to_owned(),
+                        value: "42".to_owned(),
+                        update_op: 1,
+                    }],
+                    primary_key: None,
+                },
+            ],
+        };
+
+        let mut payload = Vec::new();
+        changes.encode(&mut payload).expect("changes encode");
+
+        let message = decode_database_changes(&payload, context()).expect("decode ok");
+        assert_eq!(message.kind, "database_changes");
+        assert_eq!(message.network, "solana-mainnet");
+        assert_eq!(message.block.number, 123);
+        assert_eq!(message.changes.len(), 3);
+
+        // Order preserved exactly.
+        assert_eq!(message.changes[0]["table"], "swaps");
+        assert_eq!(message.changes[1]["table"], "swaps");
+        assert_eq!(message.changes[2]["table"], "transfers");
+
+        // Flattened name:value, no operation / ordinal / pk / updateOp.
+        assert_eq!(message.changes[0]["block_num"], "350000000");
+        assert_eq!(message.changes[0]["input_amount"], "1287000000");
+        assert!(message.changes[0].get("ordinal").is_none());
+        assert!(message.changes[0].get("operation").is_none());
+        assert!(message.changes[0].get("updateOp").is_none());
+        assert!(message.changes[0].get("pk").is_none());
+        assert!(message.changes[0].get("compositePk").is_none());
+
+        assert_eq!(message.changes[2]["amount"], "42");
+    }
+
+    #[test]
+    fn rejects_invalid_database_changes_payload() {
+        let error = decode_database_changes(&[0xff, 0xff], context()).expect_err("rejects");
+        assert!(matches!(error, DecodeError::DatabaseChanges(_)));
     }
 
     fn context() -> BlockContext {

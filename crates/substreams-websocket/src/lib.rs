@@ -13,8 +13,8 @@ pub use config::{
     WebSocketConfig,
 };
 pub use decoder::{
-    BlockContext, DecodeError, SwapBlockMessage, TransferBlockMessage, decode_swaps,
-    decode_transfers,
+    BlockContext, DatabaseChangesBlockMessage, DecodeError, SwapBlockMessage, TransferBlockMessage,
+    decode_database_changes, decode_swaps, decode_transfers,
 };
 pub use server::{ServerError, serve};
 pub use substreams::{StreamEvent, SubstreamsClient, SubstreamsError};

@@ -18,6 +18,10 @@ pub struct StreamConfig {
 pub enum StreamName {
     Swaps,
     Transfers,
+    /// Generic `sf.substreams.sink.database.v1.DatabaseChanges` output. Used
+    /// for `db_out`-style Substreams modules across SVM and EVM packages.
+    #[serde(alias = "database-changes", alias = "db-out", alias = "db_out")]
+    DbOut,
 }
 
 impl StreamName {
@@ -25,6 +29,7 @@ impl StreamName {
         match self {
             Self::Swaps => "swaps",
             Self::Transfers => "transfers",
+            Self::DbOut => "db_out",
         }
     }
 }
@@ -42,6 +47,7 @@ impl std::str::FromStr for StreamName {
         match value {
             "swaps" => Ok(Self::Swaps),
             "transfers" => Ok(Self::Transfers),
+            "db_out" | "db-out" | "database-changes" => Ok(Self::DbOut),
             _ => Err(StreamNameParseError {
                 value: value.to_owned(),
             }),
@@ -50,7 +56,7 @@ impl std::str::FromStr for StreamName {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("invalid stream name {value:?}, expected swaps or transfers")]
+#[error("invalid stream name {value:?}, expected swaps, transfers, or db_out")]
 pub struct StreamNameParseError {
     value: String,
 }
