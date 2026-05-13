@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     BlockContext, Config, CursorStore, StreamConfig, StreamEvent, StreamName, SubstreamsClient,
-    decode_swaps, decode_transfers,
+    compute_module_hash_hex, decode_swaps, decode_transfers, substreams::load_package,
 };
 
 type ClientId = u64;
@@ -123,13 +123,41 @@ fn stream_metadata(stream: &StreamConfig) -> serde_json::Value {
 
 async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursors: CursorStore) {
     let network = stream.substreams.network.clone().unwrap_or_default();
-    let name = stream.name.as_str();
 
-    match cursors.load(&network, name).await {
+    let package = match load_package(&stream.substreams.manifest).await {
+        Ok(package) => package,
+        Err(error) => {
+            error!(stream = %stream.name, %error, "failed to load Substreams package");
+            clients
+                .broadcast_json(stream_status(&stream, "error", error.to_string()))
+                .await;
+            return;
+        }
+    };
+
+    let module_hash = match package
+        .modules
+        .as_ref()
+        .ok_or("package contains no modules".to_owned())
+        .and_then(|modules| {
+            compute_module_hash_hex(modules, &stream.substreams.module).map_err(|e| e.to_string())
+        }) {
+        Ok(hash) => hash,
+        Err(error) => {
+            error!(stream = %stream.name, error, "failed to compute module hash");
+            clients
+                .broadcast_json(stream_status(&stream, "error", error))
+                .await;
+            return;
+        }
+    };
+
+    match cursors.load(&network, &module_hash).await {
         Ok(Some(cursor)) => {
             info!(
                 stream = %stream.name,
                 network = %network,
+                module_hash = %module_hash,
                 cursor_len = cursor.len(),
                 "resuming Substreams read from persisted cursor"
             );
@@ -145,6 +173,7 @@ async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursor
         stream = %stream.name,
         network = %network,
         module = %stream.substreams.module,
+        module_hash = %module_hash,
         manifest = %stream.substreams.manifest,
         start_block = ?stream.substreams.start_block,
         has_cursor = stream.substreams.start_cursor.is_some(),
@@ -152,7 +181,7 @@ async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursor
     );
 
     let client = SubstreamsClient::new(stream.substreams.clone());
-    let mut substream = match client.stream().await {
+    let mut substream = match client.stream_with_package(package).await {
         Ok(substream) => substream,
         Err(error) => {
             error!(stream = %stream.name, %error, "Substreams read failed to start");
@@ -186,7 +215,7 @@ async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursor
             }
         };
 
-        handle_substream_event(&stream, &clients, &cursors, event).await;
+        handle_substream_event(&stream, &clients, &cursors, &module_hash, event).await;
     }
 }
 
@@ -194,6 +223,7 @@ async fn handle_substream_event(
     stream: &StreamConfig,
     clients: &ClientRegistry,
     cursors: &CursorStore,
+    module_hash: &str,
     event: StreamEvent,
 ) {
     let network = stream.substreams.network.clone().unwrap_or_default();
@@ -227,7 +257,7 @@ async fn handle_substream_event(
 
             clients.broadcast_json(decoded).await;
 
-            if let Err(error) = cursors.save(&network, name, &cursor).await {
+            if let Err(error) = cursors.save(&network, module_hash, &cursor).await {
                 warn!(stream = %stream.name, %error, "failed to persist Substreams cursor");
             }
         }
@@ -249,7 +279,10 @@ async fn handle_substream_event(
                     "last_valid_block": last_valid_block,
                 }))
                 .await;
-            if let Err(error) = cursors.save(&network, name, &last_valid_cursor).await {
+            if let Err(error) = cursors
+                .save(&network, module_hash, &last_valid_cursor)
+                .await
+            {
                 warn!(stream = %stream.name, %error, "failed to persist last-valid cursor");
             }
         }
@@ -763,6 +796,7 @@ mod tests {
             &stream,
             &server.clients,
             &cursors,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             StreamEvent::Block {
                 number: 999,
                 id: "block-999".to_owned(),

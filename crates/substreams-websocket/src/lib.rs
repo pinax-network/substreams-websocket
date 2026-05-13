@@ -1,10 +1,12 @@
 pub mod config;
 pub mod cursor;
 pub mod decoder;
+pub mod module_hash;
 pub mod server;
 pub mod substreams;
 
 pub use cursor::CursorStore;
+pub use module_hash::{ModuleHashError, compute_module_hash, compute_module_hash_hex};
 
 pub use config::{
     Config, ConfigError, StreamConfig, StreamName, StreamNameParseError, SubstreamsConfig,

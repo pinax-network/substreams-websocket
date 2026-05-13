@@ -166,11 +166,18 @@ impl SubstreamsClient {
         Self { config }
     }
 
-    pub async fn stream(mut self) -> Result<SubstreamsStream, SubstreamsError> {
+    pub async fn stream(self) -> Result<SubstreamsStream, SubstreamsError> {
+        let package = load_package(&self.config.manifest).await?;
+        self.stream_with_package(package).await
+    }
+
+    pub async fn stream_with_package(
+        mut self,
+        package: Package,
+    ) -> Result<SubstreamsStream, SubstreamsError> {
         resolve_auth_token(&mut self.config).await?;
-        let manifest = load_package(&self.config.manifest).await?;
-        ensure_module_exists(&manifest, &self.config.module)?;
-        let request = build_blocks_request(&self.config, manifest)?;
+        ensure_module_exists(&package, &self.config.module)?;
+        let request = build_blocks_request(&self.config, package)?;
         let channel = connect_channel(&self.config).await?;
         let mut client = StreamClient::new(channel)
             .send_compressed(CompressionEncoding::Gzip)
