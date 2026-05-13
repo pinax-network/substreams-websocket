@@ -152,7 +152,7 @@ async fn run_substream(mut stream: StreamConfig, clients: ClientRegistry, cursor
         }
     };
 
-    match cursors.load(&module_hash).await {
+    match cursors.load(&network, &module_hash).await {
         Ok(Some(cursor)) => {
             info!(
                 stream = %stream.name,
@@ -257,7 +257,7 @@ async fn handle_substream_event(
 
             clients.broadcast_json(decoded).await;
 
-            if let Err(error) = cursors.save(module_hash, &cursor).await {
+            if let Err(error) = cursors.save(&network, module_hash, &cursor).await {
                 warn!(stream = %stream.name, %error, "failed to persist Substreams cursor");
             }
         }
@@ -279,7 +279,10 @@ async fn handle_substream_event(
                     "last_valid_block": last_valid_block,
                 }))
                 .await;
-            if let Err(error) = cursors.save(module_hash, &last_valid_cursor).await {
+            if let Err(error) = cursors
+                .save(&network, module_hash, &last_valid_cursor)
+                .await
+            {
                 warn!(stream = %stream.name, %error, "failed to persist last-valid cursor");
             }
         }
