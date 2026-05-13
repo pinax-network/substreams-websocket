@@ -296,7 +296,7 @@ struct FileStreamConfig {
     endpoint: String,
     manifest: String,
     module: String,
-    start_block: String,
+    start_block: Option<String>,
     stop_block: Option<String>,
     #[serde(default)]
     params: Vec<String>,
@@ -315,7 +315,7 @@ impl FileStreamConfig {
                 module: self.module,
                 endpoint: Some(self.endpoint),
                 network: Some(self.network),
-                start_block: Some(self.start_block),
+                start_block: Some(self.start_block.unwrap_or_else(|| "-1".to_owned())),
                 start_cursor: None,
                 stop_block: self.stop_block.unwrap_or_else(|| "0".to_owned()),
                 params: self.params,
