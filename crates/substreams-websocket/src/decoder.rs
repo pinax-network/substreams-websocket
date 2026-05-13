@@ -36,6 +36,7 @@ pub struct BlockContext {
     pub timestamp: String,
     pub network: String,
     pub cursor: String,
+    pub module_hash: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -50,16 +51,26 @@ pub enum DecodeError {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DatabaseChangesBlockMessage {
     /// Stream display name (the TOML `[[streams]].name`). Forms the
-    /// `(network, name)` identity that WebSocket subscribers register against.
-    pub name: String,
+    /// `(@stream, @network)` identity WebSocket subscribers register against.
+    #[serde(rename = "@stream")]
+    pub stream: String,
+    #[serde(rename = "@network")]
     pub network: String,
+    #[serde(rename = "@block_num")]
     pub block_num: u64,
+    #[serde(rename = "@block_hash")]
     pub block_hash: String,
+    #[serde(rename = "@timestamp")]
     pub timestamp: String,
     /// Opaque Substreams cursor for the block being delivered. Subscribers may
     /// persist this and reconnect to a Substreams endpoint directly using it
     /// to resume from this exact position. This server does not replay.
+    #[serde(rename = "@cursor")]
     pub cursor: String,
+    /// Canonical Substreams module hash of the configured output module.
+    /// Subscribers can use it to detect spkg upgrades.
+    #[serde(rename = "@module_hash")]
+    pub module_hash: String,
     pub events: Vec<serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -71,16 +82,16 @@ pub struct DatabaseChangesBlockMessage {
 /// that duplicate `block.*` (block_num, block_hash, timestamp, minute) are
 /// stripped from each row.
 pub fn decode_database_changes(
-    name: &str,
+    stream: &str,
     payload: &[u8],
     context: BlockContext,
 ) -> Result<DatabaseChangesBlockMessage, DecodeError> {
     let changes = DatabaseChanges::decode(payload).map_err(DecodeError::DatabaseChanges)?;
-    Ok(normalize_database_changes(name, changes, context))
+    Ok(normalize_database_changes(stream, changes, context))
 }
 
 pub fn normalize_database_changes(
-    name: &str,
+    stream: &str,
     changes: DatabaseChanges,
     context: BlockContext,
 ) -> DatabaseChangesBlockMessage {
@@ -89,7 +100,7 @@ pub fn normalize_database_changes(
         .into_iter()
         .map(|change| {
             let mut row = serde_json::Map::with_capacity(change.fields.len() + 1);
-            row.insert("table".to_owned(), serde_json::Value::String(change.table));
+            row.insert("@table".to_owned(), serde_json::Value::String(change.table));
             for field in change.fields {
                 if BLOCK_KEYS_TO_STRIP.contains(&field.name.as_str()) {
                     continue;
@@ -101,12 +112,13 @@ pub fn normalize_database_changes(
         .collect();
 
     DatabaseChangesBlockMessage {
-        name: name.to_owned(),
+        stream: stream.to_owned(),
         network: context.network,
         block_num: context.block_num,
         block_hash: context.block_hash,
         timestamp: context.timestamp,
         cursor: context.cursor,
+        module_hash: context.module_hash,
         events,
     }
 }
@@ -127,6 +139,7 @@ mod tests {
             timestamp: "2026-05-13 17:00:00".to_owned(),
             network: "solana-mainnet".to_owned(),
             cursor: "cur-xyz".to_owned(),
+            module_hash: "deadbeef".to_owned(),
         }
     }
 
@@ -173,16 +186,16 @@ mod tests {
         changes.encode(&mut payload).expect("encode");
 
         let message = decode_database_changes("swaps", &payload, context()).expect("decode ok");
-        assert_eq!(message.name, "swaps");
+        assert_eq!(message.stream, "swaps");
         assert_eq!(message.network, "solana-mainnet");
         assert_eq!(message.block_num, 350_000_000);
         assert_eq!(message.block_hash, "block-hash");
         assert_eq!(message.timestamp, "2026-05-13 17:00:00");
         assert_eq!(message.cursor, "cur-xyz");
         assert_eq!(message.events.len(), 3);
-        assert_eq!(message.events[0]["table"], "swaps");
-        assert_eq!(message.events[1]["table"], "swaps");
-        assert_eq!(message.events[2]["table"], "transfers");
+        assert_eq!(message.events[0]["@table"], "swaps");
+        assert_eq!(message.events[1]["@table"], "swaps");
+        assert_eq!(message.events[2]["@table"], "transfers");
         assert_eq!(message.events[0]["input_amount"], "1287000000");
         assert_eq!(message.events[1]["input_amount"], "999");
         assert_eq!(message.events[2]["amount"], "42");
@@ -225,7 +238,7 @@ mod tests {
         assert!(event.get("timestamp").is_none());
         assert!(event.get("minute").is_none());
         assert_eq!(event["input_amount"], "1287000000");
-        assert_eq!(event["table"], "swaps");
+        assert_eq!(event["@table"], "swaps");
     }
 
     #[test]
@@ -241,19 +254,33 @@ mod tests {
         };
         let message = normalize_database_changes("swaps", changes, context());
         let json = serde_json::to_value(message).expect("serialize");
-        assert_eq!(json["name"], "swaps");
-        assert_eq!(json["network"], "solana-mainnet");
-        assert_eq!(json["block_num"], 350_000_000);
-        assert_eq!(json["block_hash"], "block-hash");
-        assert_eq!(json["timestamp"], "2026-05-13 17:00:00");
-        assert_eq!(json["cursor"], "cur-xyz");
+        assert_eq!(json["@stream"], "swaps");
+        assert_eq!(json["@network"], "solana-mainnet");
+        assert_eq!(json["@block_num"], 350_000_000);
+        assert_eq!(json["@block_hash"], "block-hash");
+        assert_eq!(json["@timestamp"], "2026-05-13 17:00:00");
+        assert_eq!(json["@cursor"], "cur-xyz");
+        assert_eq!(json["@module_hash"], "deadbeef");
         assert!(json.get("block").is_none(), "no nested 'block' object");
+        assert!(
+            json.get("stream").is_none(),
+            "bare 'stream' must not appear"
+        );
+        assert!(
+            json.get("network").is_none(),
+            "bare 'network' must not appear"
+        );
         assert!(
             json.get("type").is_none(),
             "top-level 'type' must be removed"
         );
         assert!(json.get("changes").is_none(), "renamed to 'events'");
         assert!(json["events"].is_array());
+        assert!(
+            json["events"][0].get("table").is_none(),
+            "row-level 'table' must be '@table'"
+        );
+        assert_eq!(json["events"][0]["@table"], "swaps");
     }
 
     #[test]
