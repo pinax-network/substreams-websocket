@@ -25,6 +25,7 @@ prost-types = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha1 = "0.10"
 substreams-websocket = { path = "crates/substreams-websocket" }
 tempfile = "3"
 thiserror = "2"

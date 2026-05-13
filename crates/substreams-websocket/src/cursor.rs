@@ -16,13 +16,14 @@ impl CursorStore {
         Self { dir: dir.into() }
     }
 
-    pub fn path(&self, network: &str, name: &str) -> PathBuf {
+    /// Cursor file path for a given module hash hex string.
+    pub fn path(&self, module_hash_hex: &str) -> PathBuf {
         self.dir
-            .join(format!("{}-{}.cursor", sanitize(network), sanitize(name)))
+            .join(format!("{}.cursor", sanitize(module_hash_hex)))
     }
 
-    pub async fn load(&self, network: &str, name: &str) -> io::Result<Option<String>> {
-        match fs::read_to_string(self.path(network, name)).await {
+    pub async fn load(&self, module_hash_hex: &str) -> io::Result<Option<String>> {
+        match fs::read_to_string(self.path(module_hash_hex)).await {
             Ok(value) => {
                 let trimmed = value.trim().to_owned();
                 Ok(if trimmed.is_empty() {
@@ -37,12 +38,12 @@ impl CursorStore {
     }
 
     /// Persist atomically: write to `<path>.tmp` then rename.
-    pub async fn save(&self, network: &str, name: &str, cursor: &str) -> io::Result<()> {
+    pub async fn save(&self, module_hash_hex: &str, cursor: &str) -> io::Result<()> {
         if cursor.is_empty() {
             return Ok(());
         }
         fs::create_dir_all(&self.dir).await?;
-        let final_path = self.path(network, name);
+        let final_path = self.path(module_hash_hex);
         let tmp_path = final_path.with_extension("cursor.tmp");
         {
             let mut file = fs::File::create(&tmp_path).await?;
@@ -79,45 +80,28 @@ mod tests {
     async fn roundtrips_cursor() {
         let dir = tempdir().expect("tempdir");
         let store = CursorStore::new(dir.path());
-        assert_eq!(store.load("solana-mainnet", "swaps").await.unwrap(), None);
+        let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(store.load(hash).await.unwrap(), None);
 
-        store
-            .save("solana-mainnet", "swaps", "abc123")
-            .await
-            .expect("save");
-        assert_eq!(
-            store.load("solana-mainnet", "swaps").await.unwrap(),
-            Some("abc123".to_owned())
-        );
+        store.save(hash, "abc123").await.expect("save");
+        assert_eq!(store.load(hash).await.unwrap(), Some("abc123".to_owned()));
 
-        store
-            .save("solana-mainnet", "swaps", "def456")
-            .await
-            .expect("save");
-        assert_eq!(
-            store.load("solana-mainnet", "swaps").await.unwrap(),
-            Some("def456".to_owned())
-        );
+        store.save(hash, "def456").await.expect("save");
+        assert_eq!(store.load(hash).await.unwrap(), Some("def456".to_owned()));
     }
 
     #[tokio::test]
-    async fn isolates_streams() {
+    async fn isolates_streams_by_hash() {
         let dir = tempdir().expect("tempdir");
         let store = CursorStore::new(dir.path());
-        store.save("net-a", "swaps", "AAA").await.unwrap();
-        store.save("net-b", "swaps", "BBB").await.unwrap();
-        store.save("net-a", "transfers", "CCC").await.unwrap();
-        assert_eq!(
-            store.load("net-a", "swaps").await.unwrap().as_deref(),
-            Some("AAA")
-        );
-        assert_eq!(
-            store.load("net-b", "swaps").await.unwrap().as_deref(),
-            Some("BBB")
-        );
-        assert_eq!(
-            store.load("net-a", "transfers").await.unwrap().as_deref(),
-            Some("CCC")
-        );
+        let h1 = "1111111111111111111111111111111111111111";
+        let h2 = "2222222222222222222222222222222222222222";
+        let h3 = "3333333333333333333333333333333333333333";
+        store.save(h1, "AAA").await.unwrap();
+        store.save(h2, "BBB").await.unwrap();
+        store.save(h3, "CCC").await.unwrap();
+        assert_eq!(store.load(h1).await.unwrap().as_deref(), Some("AAA"));
+        assert_eq!(store.load(h2).await.unwrap().as_deref(), Some("BBB"));
+        assert_eq!(store.load(h3).await.unwrap().as_deref(), Some("CCC"));
     }
 }
