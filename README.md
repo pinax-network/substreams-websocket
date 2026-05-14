@@ -212,27 +212,110 @@ Connecting to bare `/ws` with no path streams is rejected with `HTTP 400`. The s
 
 ### Live SUBSCRIBE / UNSUBSCRIBE / LIST_SUBSCRIPTIONS
 
-The connected socket accepts JSON commands and replies with a matching `{"result", "id"}` object — same shape as Binance's market streams:
+Mirrors Binance's "Live Subscribing/Unsubscribing to streams" protocol. After the WebSocket upgrade, send JSON text frames to mutate or inspect the per-connection subscription set. Each command is one JSON object on the request side; the server replies with one JSON object per command on the same socket.
+
+#### Request envelope
 
 ```json
-// Add subscriptions (idempotent)
+{ "method": "<METHOD>", "params": [<string>, ...], "id": <any json value> }
+```
+
+| Field    | Required | Notes |
+|----------|----------|-------|
+| `method` | yes      | `SUBSCRIBE`, `UNSUBSCRIBE`, or `LIST_SUBSCRIPTIONS`. Case-sensitive. |
+| `params` | depends  | Array of `network@stream` selectors. Required for `SUBSCRIBE` / `UNSUBSCRIBE`, ignored for `LIST_SUBSCRIPTIONS`. `*` is allowed on either side. |
+| `id`     | optional | Echoed verbatim on the reply. Use a number or string to correlate. If omitted, the reply carries `"id": null`. |
+
+#### Reply envelope
+
+Success:
+```json
+{ "result": <null | array-of-strings>, "id": <echoed> }
+```
+
+Error:
+```json
+{ "error": "<message>", "id": <echoed-or-null> }
+```
+
+The socket continues normally after an error — invalid commands do **not** close the connection.
+
+#### `SUBSCRIBE` — add to the subscription set
+
+```json
+// request
 { "method": "SUBSCRIBE",
   "params": ["solana-mainnet@swaps", "ethereum-mainnet@transfers"],
   "id": 1 }
-// -> {"result": null, "id": 1}
 
-// Remove subscriptions
+// reply
+{ "result": null, "id": 1 }
+```
+
+- Idempotent: re-subscribing to an existing selector is a no-op.
+- Wildcards are accepted: `SUBSCRIBE ["*@swaps"]` subscribes to every `swaps` stream across all networks.
+- A single bad selector (missing `@`, empty string, etc.) rejects the whole command — the existing set is unchanged.
+
+#### `UNSUBSCRIBE` — remove from the subscription set
+
+```json
+// request
 { "method": "UNSUBSCRIBE",
   "params": ["ethereum-mainnet@transfers"],
   "id": 2 }
-// -> {"result": null, "id": 2}
 
-// Query current subscriptions
-{ "method": "LIST_SUBSCRIPTIONS", "id": 3 }
-// -> {"result": ["solana-mainnet@swaps"], "id": 3}
+// reply
+{ "result": null, "id": 2 }
 ```
 
-Wildcards are honored in `params` (e.g. `*@swaps`). Unknown methods, missing `:`/`@` separators, and malformed JSON return `{"error": "...", "id": <id-or-null>}`.
+- Unknown selectors are silently ignored — `result` is always `null`.
+- To remove a wildcard subscription, pass the same wildcard form (`*@swaps` matches the wildcard entry, not the individual streams it expanded to).
+
+#### `LIST_SUBSCRIPTIONS` — inspect the current set
+
+```json
+// request
+{ "method": "LIST_SUBSCRIPTIONS", "id": 3 }
+
+// reply
+{ "result": ["solana-mainnet@swaps", "ethereum-mainnet@transfers"], "id": 3 }
+```
+
+The array preserves insertion order. Wildcards are returned in their original `*` form, not expanded.
+
+#### Error responses
+
+| Cause | Example reply |
+|-------|---------------|
+| Not valid JSON | `{"error": "invalid command: expected value at line 1 column 1", "id": null}` |
+| Missing `@` separator in a param | `{"error": "stream selector \"foo\" must be \\`network@stream\\`", "id": 1}` |
+| Empty selector in a param | `{"error": "stream selector must not be empty", "id": 1}` |
+| Unknown method | `{"error": "unknown method \"DESTROY\"; expected SUBSCRIBE, UNSUBSCRIBE, or LIST_SUBSCRIPTIONS", "id": 99}` |
+
+#### Worked example
+
+```text
+client → { "method": "LIST_SUBSCRIPTIONS", "id": 1 }
+server ← { "result": ["solana-mainnet@swaps"], "id": 1 }
+
+client → { "method": "SUBSCRIBE", "params": ["ethereum-mainnet@*"], "id": 2 }
+server ← { "result": null, "id": 2 }
+
+client → { "method": "LIST_SUBSCRIPTIONS", "id": 3 }
+server ← { "result": ["solana-mainnet@swaps", "ethereum-mainnet@*"], "id": 3 }
+
+client → { "method": "UNSUBSCRIBE", "params": ["solana-mainnet@swaps"], "id": 4 }
+server ← { "result": null, "id": 4 }
+
+client → { "method": "LIST_SUBSCRIPTIONS", "id": 5 }
+server ← { "result": ["ethereum-mainnet@*"], "id": 5 }
+```
+
+#### Notes
+
+- The connection's `wrap_envelope` mode is fixed at upgrade time (`/stream` and multi-stream `/ws/<a>/<b>` always wrap; single-stream `/ws/<a>` never wraps). `SUBSCRIBE` / `UNSUBSCRIBE` mutate the subscription set but **not** the envelope mode — to change envelope behavior, reconnect with a different URL.
+- The server does not push a snapshot when `SUBSCRIBE` adds a new stream — only future blocks for that stream are delivered. Use `cursor` from your last received payload (or reconnect to the Substreams source directly) for backfill.
+- There is no batching limit, but `SUBSCRIBE` with many wildcards is effectively equivalent to `*@*` — prefer the explicit wildcard.
 
 ### Lifecycle messages and filtering
 
