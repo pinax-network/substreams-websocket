@@ -805,11 +805,18 @@
     return el ? { a: a, el: el } : null;
   }).filter(Boolean);
   function syncActive() {
-    var top = document.querySelector('main').scrollTop + 80;
+    var mainEl = document.querySelector('main');
+    var top = mainEl.scrollTop + 80;
     var current = sections[0];
     for (var i = 0; i < sections.length; i++) {
       if (sections[i].el.offsetTop <= top) current = sections[i];
     }
+    // If scrolled (near) to the bottom, the last section can't reach the
+    // 80px-from-top threshold when the doc is shorter than the viewport.
+    // Force-activate the last section so the trailing anchor (e.g. #list)
+    // still highlights when clicked.
+    var atBottom = mainEl.scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 4;
+    if (atBottom) current = sections[sections.length - 1];
     sections.forEach(function (s) { s.a.classList.toggle('active', s === current); });
   }
   document.querySelector('main').addEventListener('scroll', syncActive);
