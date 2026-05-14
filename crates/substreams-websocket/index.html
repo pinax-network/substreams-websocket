@@ -1,0 +1,1505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Streams — Pinax</title>
+<link rel="icon" type="image/png" sizes="192x192" href="/favicon.png">
+<link rel="apple-touch-icon" sizes="192x192" href="/favicon.png">
+<style>
+  :root {
+    color-scheme: light dark;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --bg: #fafafa;
+    --fg: #1c1c1e;
+    --muted: #6e6e73;
+    --border: #e5e5ea;
+    --code-bg: #f2f2f7;
+    --accent: #0a84ff;
+    --good: #34c759;
+    --bad: #ff3b30;
+    --sidebar-bg: #f5f5f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --fg: #f2f2f7;
+      --muted: #8e8e93;
+      --border: #38383a;
+      --code-bg: #2c2c2e;
+      --sidebar-bg: #2c2c2e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    grid-template-rows: 100vh;
+    overflow: hidden;
+  }
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    nav.side { display: none; }
+  }
+
+  /* --- sidebar --- */
+  nav.side {
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 20px 16px;
+  }
+  nav.side .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 18px;
+    text-decoration: none;
+    color: inherit;
+  }
+  nav.side .brand svg { flex-shrink: 0; }
+  nav.side .brand .title {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  nav.side .group { margin-bottom: 16px; }
+  nav.side .group-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 6px 6px;
+  }
+  nav.side a {
+    display: block;
+    padding: 5px 8px;
+    text-decoration: none;
+    color: var(--fg);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  nav.side a:hover { background: var(--border); }
+  nav.side a.active { background: var(--accent); color: #fff; }
+  nav.side a .chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #5e5ce6;
+    color: #fff;
+    margin-right: 8px;
+    vertical-align: 1px;
+  }
+  nav.side a.active .chip { background: rgba(255,255,255,0.25); }
+  nav.side a .chip.get { background: #34c759; }
+  nav.side .footer { color: var(--muted); font-size: 12px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
+  nav.side .footer a { display: inline; padding: 0; color: var(--accent); }
+
+  /* --- main docs --- */
+  main {
+    overflow-y: auto;
+    padding: 40px 48px 96px;
+  }
+  main > section,
+  main > .page-wrap {
+    max-width: 960px;
+    margin-inline: auto;
+  }
+  main h2 {
+    font-size: 22px;
+    margin: 32px 0 8px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+  }
+  main h2:first-child { margin-top: 0; }
+  main h3 { font-size: 16px; margin: 24px 0 6px; }
+  main p, main li { font-size: 14px; color: var(--fg); }
+  main p code, main li code, table code { font-family: var(--mono); font-size: 12.5px; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  main pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 10px 0 18px;
+  }
+  main .lead { color: var(--muted); font-size: 14px; max-width: 680px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 18px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+  .hero h2 { font-size: 28px; border: 0; padding: 0; margin-top: 0; letter-spacing: -0.02em; }
+  .hero p.tagline { font-size: 16px; color: var(--muted); max-width: 640px; line-height: 1.55; margin: 10px 0 28px; }
+  .features {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 0 0 20px;
+  }
+  .features .feature {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: var(--code-bg);
+  }
+  .features .feature h3 {
+    margin: 0 0 4px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .features .feature p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .streams-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 6px 0 18px;
+  }
+  .streams-list .stream-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    background: var(--code-bg);
+    cursor: pointer;
+    transition: border-color 120ms, transform 120ms;
+    position: relative;
+  }
+  .streams-list .stream-card:hover { border-color: var(--accent); }
+  .streams-list .stream-card.copied { border-color: var(--good); }
+  .streams-list .stream-id {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 4px;
+    word-break: break-all;
+  }
+  .streams-list .stream-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin: 0 0 6px;
+  }
+  .streams-list .stream-meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+  }
+  .streams-list .stream-meta span code { background: transparent; padding: 0; }
+  .streams-list .stream-copied {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    font-size: 11px;
+    color: var(--good);
+    opacity: 0;
+    transition: opacity 120ms;
+    font-family: var(--mono);
+  }
+  .streams-list .stream-card.copied .stream-copied { opacity: 1; }
+  .method {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--accent);
+    color: #fff;
+    margin-right: 6px;
+  }
+  .method.ws { background: #5e5ce6; }
+  .method.http { background: var(--good); }
+
+  /* --- Try it modal --- */
+  .tryit-fab {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 50;
+    padding: 12px 18px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    box-shadow: 0 6px 24px rgba(10,132,255,0.35), 0 2px 8px rgba(0,0,0,0.12);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 120ms, box-shadow 120ms;
+  }
+  .tryit-fab:hover { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(10,132,255,0.45), 0 3px 10px rgba(0,0,0,0.15); }
+  .tryit-fab svg { width: 16px; height: 16px; }
+
+  .tryit-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 28px;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .tryit-modal.open { display: flex; }
+  .tryit {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 1200px;
+    height: 100%;
+    max-height: calc(100vh - 56px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.35);
+  }
+  .tryit header {
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--border);
+    background: var(--sidebar-bg);
+  }
+  .tryit header h2 {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .tryit-close {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 22px;
+    line-height: 1;
+    padding: 0 4px;
+  }
+  .tryit-close:hover { color: var(--fg); }
+  .tryit .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .tryit input, .tryit button {
+    font: inherit;
+    padding: 7px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .tryit input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; }
+  .tryit select {
+    font: inherit;
+    padding: 7px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 13px;
+    min-width: 220px;
+    cursor: pointer;
+  }
+  .tryit button { cursor: pointer; }
+  .tryit button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .tryit .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--border); color: var(--muted); font-family: var(--mono); display: inline-block; }
+  .tryit .pill.ok  { background: rgba(52,199,89,0.15);  color: var(--good); }
+  .tryit .pill.err { background: rgba(255,59,48,0.15);  color: var(--bad); }
+  .tryit .pill.dim { background: var(--border); color: var(--muted); }
+  .tryit .tpl-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .tryit .tpl-row button { padding: 4px 10px; font-size: 12px; }
+  .tryit-filter { margin-left: auto; display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .tryit-filter button {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 0;
+    border-left: 1px solid var(--border);
+  }
+  .tryit-filter button:first-child { border-left: 0; }
+  .tryit-filter button:hover { color: var(--fg); }
+  .tryit-filter button.active { background: var(--accent); color: #fff; }
+  .tryit #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 22px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .msg {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    border-left: 3px solid transparent;
+    transition: background 120ms;
+  }
+  .msg:last-child { border-bottom: 0; }
+  .msg.is-in  { border-left-color: var(--accent); background: rgba(10,132,255,0.04); }
+  .msg.is-out { border-left-color: var(--good);   background: rgba(52,199,89,0.05); }
+  .msg.is-sys { border-left-color: transparent; background: transparent; }
+  /* WS protocol/control messages (session, stream lifecycle, command replies)
+     get a distinct purple tint so they don't blend with data payloads. */
+  .msg.is-ctrl { border-left-color: #5e5ce6; background: rgba(94,92,230,0.06); }
+  .msg.is-ctrl .meta .arrow { color: #5e5ce6; }
+  @media (prefers-color-scheme: dark) {
+    .msg.is-in   { background: rgba(10,132,255,0.07); }
+    .msg.is-out  { background: rgba(52,199,89,0.08); }
+    .msg.is-ctrl { background: rgba(94,92,230,0.10); }
+  }
+  /* Filter modes: hide the messages that don't match. */
+  #log.filter-in  .msg.is-out { display: none; }
+  #log.filter-out .msg.is-in  { display: none; }
+  /* Always show system rows in any filter mode. */
+  .msg .meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 4px;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    user-select: none;
+  }
+  .msg .meta .arrow { font-weight: 600; flex-shrink: 0; }
+  .msg .meta .ts { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .msg .meta .summary {
+    flex: 1;
+    min-width: 0;
+    color: var(--fg);
+    font-family: var(--mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .msg .meta .chev {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--muted);
+    transition: transform 120ms;
+  }
+  .msg.expanded .meta .chev { transform: rotate(90deg); }
+  .msg .meta .copy {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .msg .meta .copy:hover { color: var(--fg); border-color: var(--accent); }
+  .msg .meta .copy.copied { color: var(--good); border-color: var(--good); }
+  .msg .body { display: none; padding: 6px 0 4px; }
+  .msg.expanded .body { display: block; }
+  .msg.always-open .body { display: block; }
+  .msg.always-open .meta .chev { display: none; }
+  .msg.always-open .meta { cursor: default; }
+
+  /* Compact event list inside an expanded block payload. */
+  .msg .events-header {
+    color: var(--muted);
+    font-size: 11px;
+    margin: 6px 2px 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .msg .event-row {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-top: 4px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .msg .event-row .event-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 8px;
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--mono);
+    font-size: 11.5px;
+  }
+  .msg .event-row .event-meta:hover { background: var(--code-bg); }
+  .msg .event-row .event-meta .chev { font-size: 9px; color: var(--muted); transition: transform 120ms; flex-shrink: 0; }
+  .msg .event-row.open .event-meta .chev { transform: rotate(90deg); }
+  .msg .event-row .event-meta .table-tag {
+    color: #af52de;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  @media (prefers-color-scheme: dark) {
+    .msg .event-row .event-meta .table-tag { color: #bf5af2; }
+  }
+  .msg .event-row .event-meta .preview {
+    flex: 1;
+    min-width: 0;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .msg .event-row .event-body { display: none; padding: 6px 8px; border-top: 1px solid var(--border); }
+  .msg .event-row.open .event-body { display: block; }
+  .msg .event-row pre { margin: 0; background: var(--code-bg); padding: 8px 10px; border-radius: 4px; }
+  .msg pre {
+    margin: 0;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+  }
+  .msg.system pre {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--muted);
+  }
+  .in  { color: var(--accent); }
+  .out { color: var(--good); }
+  .sys { color: var(--muted); }
+  .err { color: var(--bad); }
+  /* JSON syntax tokens — GitHub Primer color tokens (Prism / Highlights JSON) */
+  .jkey  { color: #0550ae; }
+  .jstr  { color: #0a3069; }
+  .jnum  { color: #0550ae; }
+  .jbool { color: #cf222e; }
+  .jnull { color: #cf222e; }
+  .jcomment { color: #6e7781; font-style: italic; }
+
+  /* Copy-to-clipboard button on JSON examples. */
+  .code-block { position: relative; }
+  .code-block .copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    opacity: 0.4;
+    transition: opacity 120ms, background 120ms, color 120ms;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .code-block:hover .copy-btn { opacity: 0.85; }
+  .code-block .copy-btn:hover {
+    opacity: 1;
+    background: var(--border);
+    color: var(--fg);
+  }
+  .code-block .copy-btn.copied {
+    opacity: 1;
+    color: var(--good);
+  }
+  .code-block .copy-btn svg {
+    width: 16px;
+    height: 16px;
+    pointer-events: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    .jkey  { color: #79c0ff; }
+    .jstr  { color: #a5d6ff; }
+    .jnum  { color: #79c0ff; }
+    .jbool { color: #ff7b72; }
+    .jnull { color: #ff7b72; }
+    .jcomment { color: #8b949e; }
+  }
+</style>
+</head>
+
+<body>
+
+<nav class="side">
+  <a class="brand" href="/" aria-label="Streams">
+    <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M15.9994 15.9904L12.7002 13.0069V12.694L15.9994 9.74072L19.2984 12.6941L19.2985 13.0071L15.9994 15.9904Z" />
+      <path d="M22.5917 15.9904L19.2925 13.0069V12.694L22.5917 9.74072L25.8907 12.6941L25.8908 13.0071L22.5917 15.9904Z" />
+      <path d="M9.40836 15.9904L6.10913 13.0069L6.10914 12.694L9.40834 9.74072L12.7074 12.6941L12.7074 13.0071L9.40836 15.9904Z" />
+      <path d="M15.9994 28.5001L12.7002 25.5167V25.2038L15.9994 22.2505L19.2984 25.2039L19.2985 25.5168L15.9994 28.5001Z" />
+      <path d="M15.9994 9.74968L12.7002 6.76624V6.45327L15.9994 3.5L19.2984 6.45334L19.2985 6.76633L15.9994 9.74968Z" />
+      <path d="M22.5917 22.2452L19.2925 19.2619V18.9489L22.5917 15.9956L25.8907 18.9489L25.8908 19.2619L22.5917 22.2452Z" />
+      <path d="M22.5917 28.5001L19.2925 25.5167V25.2038L22.5917 22.2505L25.8907 25.2039L25.8908 25.5168L22.5917 28.5001Z" />
+      <path d="M9.40836 22.2111L6.10913 19.2277L6.10914 18.9147L9.40834 15.9614L12.7074 18.9148L12.7074 19.2277L9.40836 22.2111Z" />
+      <path d="M9.40836 28.5001L6.10913 25.5167L6.10914 25.2038L9.40834 22.2505L12.7074 25.2039L12.7074 25.5168L9.40836 28.5001Z" />
+    </svg>
+    <span class="title">Streams</span>
+  </a>
+
+  <div class="group">
+    <div class="group-title">Overview</div>
+    <a href="#intro">Introduction</a>
+    <a href="#streams">Streams</a>
+    <a href="#urls">URL modes</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">HTTP</div>
+    <a href="/streams" target="_blank"><span class="chip get">GET</span>/streams</a>
+    <a href="/healthz" target="_blank"><span class="chip get">GET</span>/healthz</a>
+    <a href="/SKILL.md" target="_blank"><span class="chip get">GET</span>/SKILL.md</a>
+    <a href="/llms.txt" target="_blank"><span class="chip get">GET</span>/llms.txt</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Messages</div>
+    <a href="#welcome"><span class="chip">WS</span>Connect</a>
+    <a href="#block"><span class="chip">WS</span>Block payload</a>
+    <a href="#lifecycle"><span class="chip">WS</span>Stream lifecycle</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Commands</div>
+    <a href="#subscribe"><span class="chip">WS</span>SUBSCRIBE</a>
+    <a href="#unsubscribe"><span class="chip">WS</span>UNSUBSCRIBE</a>
+    <a href="#list"><span class="chip">WS</span>LIST_SUBSCRIPTIONS</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Operating</div>
+    <a href="#cursors">Cursors</a>
+    <a href="#heartbeats">Heartbeats</a>
+    <a href="#limits">Limits</a>
+  </div>
+
+  <div class="footer">
+    <a href="/SKILL.md">SKILL.md</a> ·
+    <a href="/llms.txt">llms.txt</a> ·
+    <a href="https://github.com/pinax-network/substreams-websocket">GitHub</a>
+  </div>
+</nav>
+
+<main>
+  <section id="intro" class="hero">
+    <h2>Stream live blockchain data over WebSocket</h2>
+    <p class="tagline">
+      Decoded blocks, swaps, transfers, and any Substreams <code>DatabaseChanges</code>
+      output — delivered in seconds. Subscribe to one or many streams across SVM, EVM,
+      TVM, HyperLiquid, Polymarket, and any chain Pinax supports. Resume exactly where
+      you left off after a disconnect.
+    </p>
+
+    <div class="features">
+      <div class="feature">
+        <h3>Real-time, multi-chain</h3>
+        <p>One generic decoder for every <code>db_out</code>-style Substreams package. Solana, Ethereum, Base, Arbitrum, TVM, HyperLiquid, Polymarket — same URL pattern.</p>
+      </div>
+      <div class="feature">
+        <h3>Reorg-aware</h3>
+        <p>Every payload carries a Substreams <code>cursor</code> and <code>module_hash</code>. <code>undo</code> messages fire on chain reorganizations so subscribers can roll back deterministically.</p>
+      </div>
+    </div>
+
+    <p style="color: var(--muted); font-size: 13px;">
+      Use the <strong>Try it</strong> button in the bottom-right corner to open a full-screen WebSocket client — connect, subscribe, and watch blocks roll in without leaving this page.
+    </p>
+  </section>
+
+  <section id="streams">
+    <h2>Available streams</h2>
+    <p>Live snapshot of every stream this server is configured to broadcast. Click a tile to copy its <code>network@stream</code> selector. Data sourced from <a href="/streams" target="_blank"><code>GET /streams</code></a>.</p>
+    <div id="streams-list" class="streams-list">
+      <p class="streams-loading" style="color: var(--muted); font-size: 13px;">Loading from <code>/streams</code>…</p>
+    </div>
+  </section>
+
+  <section id="urls">
+    <h2>URL modes</h2>
+    <p>Stream selectors are <code>&lt;network&gt;@&lt;stream&gt;</code>. <code>*</code> is a wildcard on either side. Two ways to connect:</p>
+    <table>
+      <thead>
+        <tr><th>URL</th><th>Mode</th><th>Envelope</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="method ws">WS</span><code>/ws/&lt;a&gt;</code></td>
+          <td>Single, path</td>
+          <td>raw payload</td>
+        </tr>
+        <tr>
+          <td><span class="method ws">WS</span><code>/ws/&lt;a&gt;/&lt;b&gt;/...</code></td>
+          <td>Multi, path</td>
+          <td>wrapped</td>
+        </tr>
+        <tr>
+          <td><span class="method ws">WS</span><code>/stream?streams=&lt;a&gt;/&lt;b&gt;/...</code></td>
+          <td>Combined, query</td>
+          <td>wrapped</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>When wrapped, every payload is delivered as:</p>
+<pre>{ "stream": "&lt;network&gt;@&lt;stream&gt;", "data": &lt;raw payload&gt; }</pre>
+    <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly. See the <strong>HTTP</strong> group in the sidebar for non-WebSocket endpoints (<code>/streams</code>, <code>/healthz</code>, <code>/SKILL.md</code>, <code>/llms.txt</code>).</p>
+  </section>
+
+  <section id="welcome">
+    <h2>Connected message</h2>
+    <p>Sent once per connection. Lists every configured stream and echoes this connection's resolved subscriptions.</p>
+<pre>{
+  "type": "session",
+  "status": "connected",
+  "client_id": 1,
+  "streams": [
+    {
+      "stream": "swaps",
+      "network": "solana-mainnet",
+      "module": "db_out",
+      "manifest": "https://.../svm-dex-v0.5.1.spkg",
+      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797"
+    }
+  ],
+  "subscriptions": ["solana-mainnet@swaps"],
+  "wrap_envelope": false
+}</pre>
+  </section>
+
+  <section id="block">
+    <h2>Block payload</h2>
+    <p>One message per non-empty block. Empty blocks are skipped; their cursor is still persisted server-side.</p>
+<pre>{
+  "stream":      "swaps",
+  "network":     "solana-mainnet",
+  "block_num":   350000000,
+  "block_hash":  "Gsk6...",
+  "timestamp":   "2026-05-13 17:00:00",
+  "cursor":      "Mloz_-WpoBoZ...",
+  "module_hash": "bd388f2e...",
+  "events": [
+    {
+      "@table":        "swaps",
+      "input_amount":  "1287000000",
+      "input_mint":    "So11111111111111111111111111111111111111112",
+      "output_amount": "6848381008732",
+      "output_mint":   "13muFY...",
+      "protocol":      "raydium_cpmm",
+      "user":          "F2MUE..."
+    }
+  ]
+}</pre>
+    <p>Field rules:</p>
+    <ul>
+      <li><code>@table</code> identifies the source table per row. Prefixed so a real column literally named <code>table</code> can't shadow it.</li>
+      <li>Field values inside <code>events[*]</code> are <strong>strings</strong> on the wire (per DatabaseChanges proto). Numeric parsing is the consumer's job.</li>
+      <li>Row-level keys that duplicate top-level meta (<code>block_num</code>, <code>block_hash</code>, <code>timestamp</code>, <code>minute</code>) are stripped.</li>
+      <li>Upstream <code>ordinal</code>, <code>operation</code>, <code>pk</code>/<code>composite_pk</code>, <code>update_op</code> are dropped.</li>
+    </ul>
+  </section>
+
+  <section id="lifecycle">
+    <h2>Stream lifecycle</h2>
+    <p>Same connection, distinguished by <code>"type": "stream"</code>. Filtered by subscriptions just like block payloads.</p>
+<pre>{ "type": "stream", "status": "started",   ... }
+{ "type": "stream", "status": "completed", ... }
+{ "type": "stream", "status": "error",     ..., "message": "..." }
+{ "type": "stream", "status": "fatal",     ..., "message": "..." }
+{ "type": "stream", "status": "undo",      ..., "last_valid_block": 350000000 }</pre>
+    <p><code>undo</code> fires on chain reorganizations. Roll back any state materialized past <code>last_valid_block</code>.</p>
+  </section>
+
+  <section id="subscribe">
+    <h2>SUBSCRIBE</h2>
+    <p>Add to the per-connection subscription set. Idempotent.</p>
+<pre>// request
+{ "method": "SUBSCRIBE",
+  "params": ["solana-mainnet@swaps", "ethereum-mainnet@transfers"],
+  "id": 1 }
+
+// reply
+{ "result": null, "id": 1 }</pre>
+    <p>Wildcards accepted (<code>["*@swaps"]</code>). A single bad selector rejects the whole command — existing set unchanged. The <code>wrap_envelope</code> mode is fixed at upgrade time and is not affected by SUBSCRIBE.</p>
+  </section>
+
+  <section id="unsubscribe">
+    <h2>UNSUBSCRIBE</h2>
+    <p>Remove from the subscription set. Silent on unknown selectors.</p>
+<pre>// request
+{ "method": "UNSUBSCRIBE",
+  "params": ["ethereum-mainnet@transfers"],
+  "id": 2 }
+
+// reply
+{ "result": null, "id": 2 }</pre>
+    <p>To remove a wildcard subscription, pass the exact wildcard form (<code>*@swaps</code> removes the wildcard entry, not the individual streams it currently matches).</p>
+  </section>
+
+  <section id="list">
+    <h2>LIST_SUBSCRIPTIONS</h2>
+    <p>Inspect the current subscription set.</p>
+<pre>// request
+{ "method": "LIST_SUBSCRIPTIONS", "id": 3 }
+
+// reply
+{ "result": ["solana-mainnet@swaps", "ethereum-mainnet@*"], "id": 3 }</pre>
+    <p>Insertion order preserved. Wildcards returned verbatim, not expanded.</p>
+  </section>
+
+  <section id="cursors">
+    <h2>Cursors</h2>
+    <p>Every block payload includes <code>cursor</code>. To resume from an exact position across reconnects, persist the last cursor you processed and reconnect to a Substreams gRPC endpoint directly with it — this server has no replay buffer.</p>
+  </section>
+
+  <section id="heartbeats">
+    <h2>Heartbeats</h2>
+    <p>The server sends WebSocket ping frames every <code>SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS</code> seconds (default 180s). Standard WebSocket clients pong automatically. The server closes connections that do not pong within <code>SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS</code> seconds (default 600s).</p>
+  </section>
+
+  <section id="limits">
+    <h2>Limits</h2>
+    <ul>
+      <li><strong>No replay buffer.</strong> Disconnected clients miss broadcasts during the gap.</li>
+      <li><strong>One output type.</strong> Only <code>sf.substreams.sink.database.v1.DatabaseChanges</code>.</li>
+      <li><strong>Per-connection client buffer.</strong> Slow consumers are dropped per-message rather than blocking the ingest loop. Defaults to 1024 messages, configurable via <code>SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE</code>.</li>
+    </ul>
+  </section>
+</main>
+
+<button class="tryit-fab" id="tryit-open" type="button" aria-label="Open the Try it client">
+  <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+    <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm3.78 8.78-4.5 4.5a.75.75 0 0 1-1.06-1.06l3.97-3.97-3.97-3.97a.75.75 0 1 1 1.06-1.06l4.5 4.5a.75.75 0 0 1 0 1.06Z"/>
+  </svg>
+  Try it
+</button>
+
+<div class="tryit-modal" id="tryit-modal" role="dialog" aria-modal="true" aria-labelledby="tryit-title">
+  <div class="tryit">
+    <header>
+      <h2 id="tryit-title">
+        Try it
+        <button class="tryit-close" id="tryit-close" type="button" aria-label="Close">×</button>
+      </h2>
+      <div class="row">
+        <select id="stream-select" title="Pick a configured stream">
+          <option value="">— pick a stream —</option>
+        </select>
+        <input id="url" type="text" />
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <button id="clear">Clear log</button>
+        <span id="status" class="pill dim" style="align-self:center;">idle</span>
+      </div>
+      <div class="row">
+        <input id="cmd" type="text" placeholder='{"method":"LIST_SUBSCRIPTIONS","id":1}' />
+        <button id="send" disabled>Send</button>
+      </div>
+      <div class="tpl-row">
+        <button data-tpl="LIST_SUBSCRIPTIONS">LIST_SUBSCRIPTIONS</button>
+        <button data-tpl="SUBSCRIBE">SUBSCRIBE</button>
+        <button data-tpl="UNSUBSCRIBE">UNSUBSCRIBE</button>
+        <span class="tryit-filter" role="group" aria-label="Filter messages">
+          <button data-filter="all"  class="active" type="button">All</button>
+          <button data-filter="in"   type="button">Received</button>
+          <button data-filter="out"  type="button">Sent</button>
+        </span>
+      </div>
+    </header>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var urlEl = $('url');
+  var statusEl = $('status');
+  var logEl = $('log');
+  var connectBtn = $('connect');
+  var disconnectBtn = $('disconnect');
+  var sendBtn = $('send');
+  var cmdEl = $('cmd');
+  var ws = null;
+  var counter = 0;
+
+  var scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  urlEl.value = scheme + '://' + location.host + '/ws/*@*';
+
+  function setStatus(label, cls) {
+    statusEl.className = 'pill ' + cls;
+    statusEl.textContent = label;
+  }
+
+  function ts() {
+    var d = new Date();
+    return d.toISOString().slice(11, 23);
+  }
+
+  var COPY_SVG = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.75 1.5h4.5A1.75 1.75 0 0 1 12 3.25v1.5h1.25A1.75 1.75 0 0 1 15 6.5v7.75A1.75 1.75 0 0 1 13.25 16h-7.5A1.75 1.75 0 0 1 4 14.25v-1.5H2.75A1.75 1.75 0 0 1 1 11V3.25C1 2.284 1.784 1.5 2.75 1.5h3Zm5 4v-2.25a.25.25 0 0 0-.25-.25h-4.5a.25.25 0 0 0-.25.25V11c0 .138.112.25.25.25H10.5V6.5c0-.276-.06-.5-.25-.5Zm-5 5.75H2.75a.25.25 0 0 1-.25-.25V3.25a.25.25 0 0 1 .25-.25h.5v8c0 .138.112.25.25.25H5.75ZM5.5 6.5v7.75c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25V6.5a.25.25 0 0 0-.25-.25h-7.5a.25.25 0 0 0-.25.25Z"/></svg>';
+  var CHECK_SVG = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 1 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
+
+  function attachCopyButton(pre) {
+    if (pre.parentNode && pre.parentNode.classList.contains('code-block')) return;
+    var wrap = document.createElement('div');
+    wrap.className = 'code-block';
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn';
+    btn.title = 'Copy';
+    btn.setAttribute('aria-label', 'Copy to clipboard');
+    btn.innerHTML = COPY_SVG;
+    wrap.appendChild(btn);
+
+    btn.addEventListener('click', function () {
+      var text = pre.innerText;
+      var done = function () {
+        btn.classList.add('copied');
+        btn.innerHTML = CHECK_SVG;
+        btn.title = 'Copied';
+        setTimeout(function () {
+          btn.classList.remove('copied');
+          btn.innerHTML = COPY_SVG;
+          btn.title = 'Copy';
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        // Fallback for older browsers / non-secure contexts.
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (_) {}
+        document.body.removeChild(ta);
+        done();
+      }
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function highlightJson(value) {
+    // value is the already-stringified JSON (with indentation).
+    return escapeHtml(value).replace(
+      /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+      function (match) {
+        var cls = 'jnum';
+        if (/^"/.test(match)) {
+          cls = /:$/.test(match) ? 'jkey' : 'jstr';
+        } else if (/true|false/.test(match)) {
+          cls = 'jbool';
+        } else if (/null/.test(match)) {
+          cls = 'jnull';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      }
+    );
+  }
+
+  // Per-table preferred preview columns. First match wins for the event-row
+  // preview line. Falls back to PREVIEW_FIELDS_DEFAULT and then to the first
+  // non-@table keys on the event.
+  var PREVIEW_FIELDS_BY_TABLE = {
+    swaps:         ['protocol', 'user', 'program_id', 'amm'],
+    spl_transfer:  ['mint', 'amount', 'source', 'destination'],
+    transfers:     ['mint', 'amount', 'from', 'to'],
+  };
+  var PREVIEW_FIELDS_DEFAULT = ['signature', 'tx_hash', 'transaction_hash', 'amount', 'input_amount', 'output_amount', 'user', 'from', 'to', 'protocol', 'mint'];
+
+  function eventPreview(ev) {
+    if (!ev || typeof ev !== 'object') return '';
+    var prefer = PREVIEW_FIELDS_BY_TABLE[ev['@table']] || PREVIEW_FIELDS_DEFAULT;
+    var parts = [];
+    prefer.forEach(function (k) {
+      if (typeof ev[k] === 'string' && ev[k].length) {
+        var v = ev[k];
+        if (v.length > 24) v = v.slice(0, 12) + '…' + v.slice(-6);
+        parts.push(k + '=' + v);
+      }
+    });
+    if (parts.length === 0) {
+      var keys = Object.keys(ev).filter(function (k) { return k !== '@table'; });
+      keys.slice(0, 3).forEach(function (k) {
+        var v = String(ev[k]);
+        if (v.length > 18) v = v.slice(0, 10) + '…' + v.slice(-4);
+        parts.push(k + '=' + v);
+      });
+    }
+    return parts.slice(0, 4).join('  ');
+  }
+
+  function renderEventRow(ev) {
+    var row = document.createElement('div');
+    row.className = 'event-row';
+
+    var rmeta = document.createElement('div');
+    rmeta.className = 'event-meta';
+
+    var chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = '▶';
+    rmeta.appendChild(chev);
+
+    var tag = document.createElement('span');
+    tag.className = 'table-tag';
+    tag.textContent = '@' + (ev['@table'] || 'event');
+    rmeta.appendChild(tag);
+
+    var preview = document.createElement('span');
+    preview.className = 'preview';
+    preview.textContent = eventPreview(ev);
+    rmeta.appendChild(preview);
+
+    row.appendChild(rmeta);
+
+    var rbody = document.createElement('div');
+    rbody.className = 'event-body';
+    var pre = document.createElement('pre');
+    pre.innerHTML = highlightJson(JSON.stringify(ev, null, 2));
+    rbody.appendChild(pre);
+    row.appendChild(rbody);
+
+    rmeta.addEventListener('click', function () { row.classList.toggle('open'); });
+    attachCopyButton(pre);
+
+    return row;
+  }
+
+  function describeJson(parsed) {
+    // Build a one-line summary for the compact meta row.
+    // Block payloads (raw or wrapped) emit "block_num@time table=… (N events)".
+    var inner = parsed && parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+    if (inner && Array.isArray(inner.events)) {
+      var bn = inner.block_num != null ? inner.block_num : '?';
+      var ts = inner.timestamp || '';
+      var tables = {};
+      inner.events.forEach(function (e) { if (e && e['@table']) tables[e['@table']] = true; });
+      var tableList = Object.keys(tables).join(',') || '(none)';
+      return {
+        compact: true,
+        summary: 'block ' + bn + (ts ? '  ' + ts : '') + '  · ' + inner.events.length + ' event' + (inner.events.length === 1 ? '' : 's') + '  · ' + tableList,
+      };
+    }
+    if (parsed && parsed.type === 'session') {
+      return { compact: false, summary: '🔌 session ' + (parsed.status || 'connected') + ' · ' + (parsed.subscriptions ? parsed.subscriptions.join(', ') : '') };
+    }
+    if (parsed && parsed.type === 'stream') {
+      var icon = ({
+        started:      '▶️',
+        completed:    '✅',
+        error:        '⚠️',
+        decode_error: '⚠️',
+        fatal:        '🔥',
+        undo:         '↩️',
+      })[parsed.status] || '🛈';
+      return { compact: false, summary: icon + ' stream ' + (parsed.status || '?') + '  ' + (parsed.stream || '') + '@' + (parsed.network || '') };
+    }
+    if (parsed && parsed.method) {
+      return { compact: false, summary: '➡️ ' + parsed.method + (parsed.params ? '  [' + parsed.params.join(', ') + ']' : '') };
+    }
+    if (parsed && (parsed.result !== undefined || parsed.error !== undefined)) {
+      var replyIcon = parsed.error ? '⚠️' : '✅';
+      return { compact: false, summary: replyIcon + ' reply id=' + JSON.stringify(parsed.id) + (parsed.error ? '  · error: ' + parsed.error : '  · ok') };
+    }
+    return { compact: false, summary: '' };
+  }
+
+  function attachInlineCopy(button, getText) {
+    button.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var text = getText();
+      var done = function () {
+        button.classList.add('copied');
+        button.textContent = '✓ copied';
+        setTimeout(function () {
+          button.classList.remove('copied');
+          button.textContent = 'Copy';
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        done();
+      }
+    });
+  }
+
+  function append(kind, arrow, text) {
+    var div = document.createElement('div');
+    var kindClass = kind === 'sys' ? 'is-sys system always-open' : 'is-' + kind;
+    div.className = 'msg ' + kindClass;
+
+    // Try to pretty-print JSON; fall back to raw text.
+    var parsed = null;
+    var pretty = null;
+    if (typeof text === 'string') {
+      var trimmed = text.trim();
+      if (trimmed.length && (trimmed[0] === '{' || trimmed[0] === '[')) {
+        try {
+          parsed = JSON.parse(trimmed);
+          pretty = JSON.stringify(parsed, null, 2);
+        } catch (_) {}
+      }
+    }
+
+    var info = parsed !== null ? describeJson(parsed) : { compact: false, summary: '' };
+
+    // Tag WS protocol/control payloads (session, stream lifecycle, command
+    // request/reply) so they get a distinct visual tint from data payloads.
+    var isCtrl = parsed !== null && (
+      parsed.type === 'session' ||
+      parsed.type === 'stream'  ||
+      typeof parsed.method === 'string' ||
+      parsed.result !== undefined ||
+      parsed.error !== undefined
+    );
+    if (isCtrl) div.classList.add('is-ctrl');
+
+    // All JSON messages start collapsed; the user expands what they want.
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+
+    var a = document.createElement('span');
+    a.className = 'arrow ' + kind;
+    a.textContent = arrow;
+    meta.appendChild(a);
+
+    var t = document.createElement('span');
+    t.className = 'ts';
+    t.textContent = ts();
+    meta.appendChild(t);
+
+    if (info.summary) {
+      var sum = document.createElement('span');
+      sum.className = 'summary';
+      sum.textContent = info.summary;
+      meta.appendChild(sum);
+    } else if (pretty === null) {
+      var raw = document.createElement('span');
+      raw.className = 'summary';
+      raw.textContent = text;
+      meta.appendChild(raw);
+    }
+
+    if (pretty !== null) {
+      var copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'copy';
+      copy.textContent = 'Copy';
+      copy.title = 'Copy message';
+      attachInlineCopy(copy, function () { return pretty; });
+      meta.appendChild(copy);
+
+      var chev = document.createElement('span');
+      chev.className = 'chev';
+      chev.textContent = '▶';
+      meta.appendChild(chev);
+    }
+
+    div.appendChild(meta);
+
+    if (pretty !== null) {
+      var body = document.createElement('div');
+      body.className = 'body';
+
+      // Block payloads render as: header object (sans events) + compact
+      // event rows below. Other JSON renders as the full pretty payload.
+      var innerObj = parsed && parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+      if (info.compact && innerObj && Array.isArray(innerObj.events)) {
+        var headerOnly = {};
+        Object.keys(innerObj).forEach(function (k) {
+          if (k !== 'events') headerOnly[k] = innerObj[k];
+        });
+        var headerPre = document.createElement('pre');
+        headerPre.innerHTML = highlightJson(JSON.stringify(headerOnly, null, 2));
+        body.appendChild(headerPre);
+        attachCopyButton(headerPre);
+
+        var label = document.createElement('div');
+        label.className = 'events-header';
+        label.textContent = innerObj.events.length + ' event' + (innerObj.events.length === 1 ? '' : 's');
+        body.appendChild(label);
+
+        innerObj.events.forEach(function (ev) {
+          body.appendChild(renderEventRow(ev));
+        });
+      } else {
+        var bodyPre = document.createElement('pre');
+        bodyPre.innerHTML = highlightJson(pretty);
+        body.appendChild(bodyPre);
+        attachCopyButton(bodyPre);
+      }
+
+      div.appendChild(body);
+
+      meta.addEventListener('click', function (e) {
+        if (e.target.tagName === 'BUTTON') return;
+        div.classList.toggle('expanded');
+      });
+    }
+
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Browser auto-disconnect cap: connections in the in-page client are for
+  // exploring the API, not long-running ingest. A live block stream can fire
+  // hundreds of payloads per second; without this cap the browser runs out
+  // of memory rendering them. Server-to-server clients have no such cap.
+  var AUTO_DISCONNECT_MS = 5000;
+  var autoTimer = null;
+  var countdownTimer = null;
+  var autoDeadline = 0;
+
+  function connect() {
+    var url = urlEl.value.trim();
+    if (!url) return;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      append('sys', '!', 'WebSocket constructor failed: ' + e.message);
+      return;
+    }
+    setStatus('connecting', 'dim');
+    connectBtn.disabled = true;
+    disconnectBtn.disabled = false;
+    sendBtn.disabled = false;
+    ws.onopen = function () {
+      append('sys', '*', 'connected: ' + url + ' (auto-disconnect in ' + (AUTO_DISCONNECT_MS / 1000) + 's)');
+      if (autoTimer) clearTimeout(autoTimer);
+      if (countdownTimer) clearInterval(countdownTimer);
+      autoDeadline = Date.now() + AUTO_DISCONNECT_MS;
+      var tick = function () {
+        var remaining = autoDeadline - Date.now();
+        if (remaining <= 0) {
+          setStatus('closing…', 'err');
+          return;
+        }
+        var secs = (remaining / 1000).toFixed(1);
+        setStatus('open · ' + secs + 's left', 'ok');
+      };
+      tick();
+      countdownTimer = setInterval(tick, 100);
+      autoTimer = setTimeout(function () {
+        autoTimer = null;
+        // Stop the countdown immediately so the status pill doesn't keep
+        // re-asserting "open" while ws.close() works its way through.
+        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        if (ws && (ws.readyState === 0 || ws.readyState === 1)) {
+          append('sys', '*', 'auto-disconnecting after ' + (AUTO_DISCONNECT_MS / 1000) + 's to protect the browser');
+          setStatus('closed', 'err');
+          // Eagerly restore UI; ws.onclose will also fire and is idempotent.
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = true;
+          sendBtn.disabled = true;
+          try { ws.close(1000, 'browser auto-disconnect'); } catch (_) {}
+        }
+      }, AUTO_DISCONNECT_MS);
+    };
+    ws.onmessage = function (ev) {
+      append('in', '<', typeof ev.data === 'string' ? ev.data : '<binary ' + ev.data.byteLength + 'B>');
+    };
+    ws.onerror = function () {
+      append('sys', '!', 'socket error (see browser console)');
+    };
+    ws.onclose = function (ev) {
+      if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+      if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      setStatus('closed', 'err');
+      append('sys', '*', 'closed: code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
+      ws = null;
+      connectBtn.disabled = false;
+      disconnectBtn.disabled = true;
+      sendBtn.disabled = true;
+    };
+  }
+
+  connectBtn.onclick = connect;
+  disconnectBtn.onclick = function () { if (ws) ws.close(); };
+  $('clear').onclick = function () { logEl.innerHTML = ''; };
+
+  sendBtn.onclick = function () {
+    if (!ws || ws.readyState !== 1) return;
+    var text = cmdEl.value.trim();
+    if (!text) return;
+    ws.send(text);
+    append('out', '>', text);
+  };
+
+  cmdEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') sendBtn.click(); });
+  urlEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') connectBtn.click(); });
+
+  // Modal open/close.
+  var modalEl = document.getElementById('tryit-modal');
+  var openBtn = document.getElementById('tryit-open');
+  var closeBtn = document.getElementById('tryit-close');
+  function openModal() {
+    modalEl.classList.add('open');
+    setTimeout(function () { urlEl.focus(); }, 50);
+  }
+  function closeModal() {
+    modalEl.classList.remove('open');
+  }
+  openBtn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  modalEl.addEventListener('click', function (e) {
+    if (e.target === modalEl) closeModal();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && modalEl.classList.contains('open')) closeModal();
+  });
+
+  // Filter pills (All / Received / Sent).
+  Array.prototype.forEach.call(document.querySelectorAll('[data-filter]'), function (btn) {
+    btn.addEventListener('click', function () {
+      var mode = btn.getAttribute('data-filter');
+      Array.prototype.forEach.call(document.querySelectorAll('[data-filter]'), function (b) {
+        b.classList.toggle('active', b === btn);
+      });
+      logEl.classList.remove('filter-in', 'filter-out');
+      if (mode === 'in') logEl.classList.add('filter-in');
+      else if (mode === 'out') logEl.classList.add('filter-out');
+    });
+  });
+
+  // Populate the stream dropdown from /streams; default URL to the first
+  // configured stream (single, raw-payload mode).
+  (function loadTryItStreams() {
+    var sel = document.getElementById('stream-select');
+    if (!sel) return;
+    fetch('/streams')
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (streams) {
+        if (!Array.isArray(streams) || streams.length === 0) {
+          sel.innerHTML = '<option value="">(no streams configured)</option>';
+          sel.disabled = true;
+          return;
+        }
+        sel.innerHTML = '';
+        streams.forEach(function (s, i) {
+          var id = (s.network || '*') + '@' + (s.stream || '*');
+          var opt = document.createElement('option');
+          opt.value = id;
+          opt.textContent = id;
+          if (i === 0) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        // Add wildcard catch-all at the end.
+        var all = document.createElement('option');
+        all.value = '*@*';
+        all.textContent = '*@*  (every stream)';
+        sel.appendChild(all);
+
+        // Default URL to the first stream.
+        urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
+        sel.addEventListener('change', function () {
+          if (!sel.value) return;
+          urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
+        });
+      })
+      .catch(function () {
+        // Leave the URL field at its initial value.
+      });
+  })();
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-tpl]'), function (btn) {
+    btn.onclick = function () {
+      counter += 1;
+      var method = btn.getAttribute('data-tpl');
+      var body;
+      if (method === 'LIST_SUBSCRIPTIONS') {
+        body = { method: method, id: counter };
+      } else {
+        body = { method: method, params: ['*@swaps'], id: counter };
+      }
+      cmdEl.value = JSON.stringify(body);
+      cmdEl.focus();
+    };
+  });
+
+  // Populate the "Available streams" section by fetching /streams.
+  (function loadStreams() {
+    var host = document.getElementById('streams-list');
+    if (!host) return;
+    fetch('/streams')
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (streams) {
+        if (!Array.isArray(streams) || streams.length === 0) {
+          host.innerHTML = '<p style="color: var(--muted); font-size: 13px;">No streams configured.</p>';
+          return;
+        }
+        host.innerHTML = '';
+        streams.forEach(function (s) {
+          var id = (s.network || '*') + '@' + (s.stream || '*');
+          var card = document.createElement('div');
+          card.className = 'stream-card';
+          card.setAttribute('data-id', id);
+          card.title = 'Click to copy ' + id;
+
+          var idEl = document.createElement('div');
+          idEl.className = 'stream-id';
+          idEl.textContent = id;
+          card.appendChild(idEl);
+
+          if (s.description) {
+            var desc = document.createElement('p');
+            desc.className = 'stream-desc';
+            desc.textContent = s.description;
+            card.appendChild(desc);
+          }
+
+          var meta = document.createElement('div');
+          meta.className = 'stream-meta';
+          var parts = [];
+          if (s.package_name)    parts.push({ k: 'package', v: s.package_name + (s.package_version ? ' ' + s.package_version : '') });
+          if (s.module)          parts.push({ k: 'module',  v: s.module });
+          if (s.module_hash)     parts.push({ k: 'hash',    v: s.module_hash.slice(0, 12) + '…' });
+          parts.forEach(function (p) {
+            var span = document.createElement('span');
+            span.innerHTML = p.k + ' <code>' + escapeHtml(p.v) + '</code>';
+            meta.appendChild(span);
+          });
+          card.appendChild(meta);
+
+          var copied = document.createElement('span');
+          copied.className = 'stream-copied';
+          copied.textContent = '✓ copied';
+          card.appendChild(copied);
+
+          card.addEventListener('click', function () {
+            var text = id;
+            var done = function () {
+              card.classList.add('copied');
+              setTimeout(function () { card.classList.remove('copied'); }, 1200);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text).then(done, done);
+            } else {
+              done();
+            }
+          });
+          host.appendChild(card);
+        });
+      })
+      .catch(function (err) {
+        host.innerHTML = '<p style="color: var(--bad); font-size: 13px;">Failed to load /streams (' + err + ').</p>';
+      });
+  })();
+
+  // Syntax-highlight every JSON example in the docs <pre> blocks.
+  // Detected by content — blocks that begin with { or [ are parsed and
+  // re-rendered with highlightJson. Comment lines (`// ...`) are kept as-is
+  // and styled as muted comments.
+  Array.prototype.forEach.call(document.querySelectorAll('main pre'), function (pre) {
+    var raw = pre.textContent;
+    var trimmed = raw.replace(/^\s+/, '');
+    if (!(trimmed[0] === '{' || trimmed[0] === '[' || /^\/\//.test(trimmed))) return;
+
+    var html = raw
+      .split('\n')
+      .map(function (line) {
+        // Comment line: render as a muted comment, leave the rest of the line raw.
+        if (/^\s*\/\//.test(line)) {
+          return '<span class="jcomment">' + escapeHtml(line) + '</span>';
+        }
+        // Try to highlight the trimmed line as JSON tokens.
+        try {
+          return highlightJson(line);
+        } catch (_) {
+          return escapeHtml(line);
+        }
+      })
+      .join('\n');
+    pre.innerHTML = html;
+    attachCopyButton(pre);
+  });
+
+  // Highlight active sidebar link as user scrolls.
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.side a[href^="#"]'));
+  var sections = links.map(function (a) {
+    var id = a.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    return el ? { a: a, el: el } : null;
+  }).filter(Boolean);
+  var mainEl = document.querySelector('main');
+
+  function setActive(target) {
+    sections.forEach(function (s) { s.a.classList.toggle('active', s === target); });
+  }
+
+  // Pick the section whose top is closest to (but at or above) a small
+  // offset from the viewport's top of `main`. This works even for trailing
+  // sections short enough that they can't reach the very top — when the
+  // user is at the bottom of the scroll container, we just pick the last
+  // section that started above the offset.
+  function syncActive() {
+    var offset = 100; // px from top of `main`
+    var scrollTop = mainEl.scrollTop;
+    var atBottom = scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 4;
+    if (atBottom) {
+      setActive(sections[sections.length - 1]);
+      return;
+    }
+    var current = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].el.offsetTop <= scrollTop + offset) current = sections[i];
+    }
+    setActive(current);
+  }
+
+  mainEl.addEventListener('scroll', syncActive);
+
+  // Clicking a sidebar link snaps active immediately — the scroll may not
+  // travel far enough for syncActive() to land on the correct entry,
+  // especially for trailing anchors.
+  Array.prototype.forEach.call(document.querySelectorAll('nav.side a[href^="#"]'), function (a) {
+    a.addEventListener('click', function () {
+      var id = a.getAttribute('href').slice(1);
+      var match = sections.filter(function (s) { return s.el.id === id; })[0];
+      if (match) setActive(match);
+    });
+  });
+
+  syncActive();
+})();
+</script>
+</body>
+</html>
