@@ -256,21 +256,31 @@ async fn main() -> anyhow::Result<()> {
 
 impl ServeArgs {
     async fn load_config(self) -> anyhow::Result<Config> {
-        // Inline TOML wins when present (Railway/Heroku-style env-only deploys).
-        // Otherwise read the path on disk.
-        let (contents, source_label) = if let Some(inline) = self.streams_toml.as_deref() {
-            if inline.trim().is_empty() {
-                anyhow::bail!("SUBSTREAMS_WEBSOCKET_STREAMS_TOML is set but empty");
-            }
+        // Inline TOML wins when present and non-empty (Railway/Heroku-style
+        // env-only deploys). An empty SUBSTREAMS_WEBSOCKET_STREAMS_TOML is
+        // treated as unset so operators can keep both env vars declared (one
+        // for local dev, one for PaaS) without one tripping the other.
+        let inline = self
+            .streams_toml
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let (contents, source_label) = if let Some(inline) = inline {
             (
                 inline.to_owned(),
                 "SUBSTREAMS_WEBSOCKET_STREAMS_TOML".to_owned(),
             )
         } else {
             let path = self.streams.clone();
-            let contents = tokio::fs::read_to_string(&path)
-                .await
-                .with_context(|| format!("failed to read streams file {}", path.display()))?;
+            let contents = tokio::fs::read_to_string(&path).await.with_context(|| {
+                format!(
+                    "failed to read streams from {}. Set SUBSTREAMS_WEBSOCKET_STREAMS_TOML \
+                     to inject the stream list directly via env, or point \
+                     SUBSTREAMS_WEBSOCKET_STREAMS at a readable TOML file",
+                    path.display()
+                )
+            })?;
             (contents, path.display().to_string())
         };
 
