@@ -1210,9 +1210,18 @@
       tick();
       countdownTimer = setInterval(tick, 100);
       autoTimer = setTimeout(function () {
-        if (ws && ws.readyState === 1) {
+        autoTimer = null;
+        // Stop the countdown immediately so the status pill doesn't keep
+        // re-asserting "open" while ws.close() works its way through.
+        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        if (ws && (ws.readyState === 0 || ws.readyState === 1)) {
           append('sys', '*', 'auto-disconnecting after ' + (AUTO_DISCONNECT_MS / 1000) + 's to protect the browser');
-          ws.close(1000, 'browser auto-disconnect');
+          setStatus('closed', 'err');
+          // Eagerly restore UI; ws.onclose will also fire and is idempotent.
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = true;
+          sendBtn.disabled = true;
+          try { ws.close(1000, 'browser auto-disconnect'); } catch (_) {}
         }
       }, AUTO_DISCONNECT_MS);
     };
