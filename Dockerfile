@@ -35,9 +35,9 @@ COPY crates ./crates
 
 # Build the release binary. Use BuildKit cache mounts so repeat builds reuse
 # the registry, git, and target directories.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=s/4c51fc52-0454-4c54-a13b-50a767997aca-/usr/local/cargo/registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=s/4c51fc52-0454-4c54-a13b-50a767997aca-/usr/local/cargo/git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=s/4c51fc52-0454-4c54-a13b-50a767997aca-/src/target,target=/src/target \
     cargo build --release --bin substreams-websocket \
  && cp /src/target/release/substreams-websocket /usr/local/bin/substreams-websocket
 
