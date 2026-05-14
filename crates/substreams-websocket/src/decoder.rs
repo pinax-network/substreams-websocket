@@ -270,6 +270,73 @@ mod tests {
     }
 
     #[test]
+    fn order_preserved_through_to_value_roundtrip() {
+        // The server path goes struct -> Value -> String, so this asserts the
+        // feature flag actually preserves order through Value::Object too.
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![field("zeta", "1"), field("alpha", "2")],
+                primary_key: None,
+            }],
+        };
+        let message = normalize_database_changes("swaps", changes, context());
+        let value = serde_json::to_value(&message).expect("to_value");
+        let text = serde_json::to_string(&value).expect("to_string");
+        assert!(
+            text.find("\"stream\"").unwrap() < text.find("\"events\"").unwrap(),
+            "events must come after stream in {text}"
+        );
+        assert!(
+            text.find("\"@table\"").unwrap() < text.find("\"zeta\"").unwrap(),
+            "@table must come first in row: {text}"
+        );
+    }
+
+    #[test]
+    fn fields_serialize_in_struct_declaration_order() {
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![field("zeta", "1"), field("alpha", "2")],
+                primary_key: None,
+            }],
+        };
+        let message = normalize_database_changes("swaps", changes, context());
+        let text = serde_json::to_string(&message).expect("serialize");
+
+        // Top-level: stream, network, block_num, block_hash, timestamp,
+        // cursor, module_hash, events — in that exact order. `events` is last
+        // so subscribers see the metadata header before the payload array.
+        let order = [
+            "\"stream\"",
+            "\"network\"",
+            "\"block_num\"",
+            "\"block_hash\"",
+            "\"timestamp\"",
+            "\"cursor\"",
+            "\"module_hash\"",
+            "\"events\"",
+        ];
+        let mut last = 0;
+        for key in order {
+            let idx = text
+                .find(key)
+                .unwrap_or_else(|| panic!("missing key {key} in {text}"));
+            assert!(idx >= last, "key {key} appeared out of order in {text}");
+            last = idx;
+        }
+
+        // Per-row: `@table` first, then field-name insertion order.
+        assert!(text.find("\"@table\"").unwrap() < text.find("\"zeta\"").unwrap());
+        assert!(text.find("\"zeta\"").unwrap() < text.find("\"alpha\"").unwrap());
+    }
+
+    #[test]
     fn rejects_invalid_payload() {
         let error = decode_database_changes("x", &[0xff, 0xff], context()).expect_err("rejects");
         assert!(matches!(error, DecodeError::DatabaseChanges(_)));

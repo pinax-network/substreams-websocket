@@ -39,6 +39,10 @@ pub struct SubstreamsConfig {
 pub struct WebSocketConfig {
     pub listen: SocketAddr,
     pub ws_path: String,
+    /// Query-mode WebSocket route. Default `/stream`. Accepts
+    /// `?streams=<network@stream>/<...>` and always wraps payloads in
+    /// `{"stream":"...","data":...}`.
+    pub stream_path: String,
     pub health_path: String,
     pub heartbeat_interval: Duration,
     pub heartbeat_timeout: Duration,
@@ -134,6 +138,7 @@ impl Config {
         }
 
         validate_path("ws_path", &self.websocket.ws_path)?;
+        validate_path("stream_path", &self.websocket.stream_path)?;
         validate_path("health_path", &self.websocket.health_path)?;
 
         if self.websocket.heartbeat_timeout <= self.websocket.heartbeat_interval {
@@ -192,6 +197,7 @@ mod tests {
         WebSocketConfig {
             listen: "127.0.0.1:0".parse().expect("listen"),
             ws_path: "/ws".to_owned(),
+            stream_path: "/stream".to_owned(),
             health_path: "/healthz".to_owned(),
             heartbeat_interval: Duration::from_secs(60),
             heartbeat_timeout: Duration::from_secs(180),

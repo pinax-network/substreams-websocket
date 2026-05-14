@@ -116,9 +116,18 @@ pub async fn serve_with_shutdown(
 }
 
 fn build_app(state: AppState) -> Router {
+    // Routes match the Binance-style URL layout:
+    //   GET <ws_path>                       — connect with no streams (errors)
+    //   GET <ws_path>/{*streams}            — path mode: /ws/<a>/<b>/...
+    //   GET <stream_path>?streams=<a>/<b>   — query mode: always wrapped envelope
+    let ws_root = state.config.websocket.ws_path.clone();
+    let ws_wildcard = format!("{}/{{*streams}}", ws_root.trim_end_matches('/'));
+    let stream_path = state.config.websocket.stream_path.clone();
     Router::new()
         .route(&state.config.websocket.health_path, get(health))
-        .route(&state.config.websocket.ws_path, get(websocket))
+        .route(&ws_root, get(websocket_no_streams))
+        .route(&ws_wildcard, get(websocket_path))
+        .route(&stream_path, get(websocket_stream_query))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -243,6 +252,12 @@ fn spawn_streams(
         .collect()
 }
 
+/// Initial backoff after an error. Doubles each failure, capped at
+/// `RESTART_BACKOFF_MAX`. Resets to `RESTART_BACKOFF_MIN` whenever the
+/// stream gets past the first connect.
+const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
 async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: CursorStore) {
     let PreparedStream {
         mut config,
@@ -256,96 +271,150 @@ async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: C
     if let Some(error) = error {
         error!(stream = %config.name, error, "stream preparation failed");
         clients
-            .broadcast_json(stream_status(&config, &module_hash, "error", error))
+            .broadcast_matching(
+                &network,
+                &config.name,
+                stream_status(&config, &module_hash, "error", error),
+            )
             .await;
         return;
     }
     let package = package.expect("prepared stream without error must have package");
 
-    match cursors.load(&network, &module_hash).await {
-        Ok(Some(cursor)) => {
-            info!(
-                stream = %config.name,
-                network = %network,
-                module_hash = %module_hash,
-                cursor_len = cursor.len(),
-                "resuming Substreams read from persisted cursor"
-            );
-            config.substreams.start_cursor = Some(cursor);
-        }
-        Ok(None) => {}
-        Err(error) => {
-            warn!(stream = %config.name, network = %network, %error, "failed to load cursor; starting from configured block");
-        }
-    }
-
-    info!(
-        stream = %config.name,
-        network = %network,
-        module = %config.substreams.module,
-        module_hash = %module_hash,
-        manifest = %config.substreams.manifest,
-        start_block = ?config.substreams.start_block,
-        has_cursor = config.substreams.start_cursor.is_some(),
-        "starting Substreams read"
-    );
-
-    let client = SubstreamsClient::new(config.substreams.clone());
-    let mut substream = match client.stream_with_package(package).await {
-        Ok(substream) => substream,
-        Err(error) => {
-            error!(stream = %config.name, %error, "Substreams read failed to start");
-            clients
-                .broadcast_json(stream_status(
-                    &config,
-                    &module_hash,
-                    "error",
-                    error.to_string(),
-                ))
-                .await;
-            return;
-        }
-    };
-
-    clients
-        .broadcast_json(stream_status(
-            &config,
-            &module_hash,
-            "started",
-            String::new(),
-        ))
-        .await;
+    let mut backoff = RESTART_BACKOFF_MIN;
 
     loop {
-        let event = match substream.next_event().await {
-            Ok(Some(event)) => event,
+        // Reload cursor from disk on every retry so we resume from the latest
+        // persisted position, not whatever the previous run started with.
+        match cursors.load(&network, &module_hash).await {
+            Ok(Some(cursor)) => {
+                info!(
+                    stream = %config.name,
+                    network = %network,
+                    module_hash = %module_hash,
+                    cursor_len = cursor.len(),
+                    "resuming Substreams read from persisted cursor"
+                );
+                config.substreams.start_cursor = Some(cursor);
+            }
             Ok(None) => {
-                info!(stream = %config.name, "Substreams read completed");
-                clients
-                    .broadcast_json(stream_status(
-                        &config,
-                        &module_hash,
-                        "completed",
-                        String::new(),
-                    ))
-                    .await;
-                break;
+                config.substreams.start_cursor = None;
             }
             Err(error) => {
-                error!(stream = %config.name, %error, "Substreams read failed");
+                warn!(stream = %config.name, network = %network, %error, "failed to load cursor; starting from configured block");
+                config.substreams.start_cursor = None;
+            }
+        }
+
+        info!(
+            stream = %config.name,
+            network = %network,
+            module = %config.substreams.module,
+            module_hash = %module_hash,
+            manifest = %config.substreams.manifest,
+            start_block = ?config.substreams.start_block,
+            has_cursor = config.substreams.start_cursor.is_some(),
+            "starting Substreams read"
+        );
+
+        let client = SubstreamsClient::new(config.substreams.clone());
+        let mut substream = match client.stream_with_package(package.clone()).await {
+            Ok(substream) => substream,
+            Err(error) => {
+                let msg = error.to_string();
+                error!(stream = %config.name, %error, backoff_secs = backoff.as_secs(), "Substreams read failed to start; will retry");
                 clients
-                    .broadcast_json(stream_status(
-                        &config,
-                        &module_hash,
-                        "error",
-                        error.to_string(),
-                    ))
+                    .broadcast_matching(
+                        &network,
+                        &config.name,
+                        stream_status(&config, &module_hash, "error", msg),
+                    )
                     .await;
-                break;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+                continue;
             }
         };
 
-        handle_substream_event(&config, &clients, &cursors, &module_hash, event).await;
+        clients
+            .broadcast_matching(
+                &network,
+                &config.name,
+                stream_status(&config, &module_hash, "started", String::new()),
+            )
+            .await;
+
+        let outcome = read_loop(&config, &clients, &cursors, &module_hash, &mut substream).await;
+        match outcome {
+            ReadOutcome::Completed => {
+                info!(stream = %config.name, "Substreams read completed");
+                clients
+                    .broadcast_matching(
+                        &network,
+                        &config.name,
+                        stream_status(&config, &module_hash, "completed", String::new()),
+                    )
+                    .await;
+                return;
+            }
+            ReadOutcome::ProducedBlock => {
+                // We made progress this attempt: reset backoff before the next retry.
+                backoff = RESTART_BACKOFF_MIN;
+                error!(stream = %config.name, "Substreams read stream ended unexpectedly; will retry");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
+            ReadOutcome::Errored(err) => {
+                error!(stream = %config.name, error = %err, backoff_secs = backoff.as_secs(), "Substreams read failed; will retry");
+                clients
+                    .broadcast_matching(
+                        &network,
+                        &config.name,
+                        stream_status(&config, &module_hash, "error", err),
+                    )
+                    .await;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
+        }
+    }
+}
+
+enum ReadOutcome {
+    /// Server closed the stream cleanly (e.g. reached stop_block).
+    Completed,
+    /// Stream ended without an explicit error but we did produce at least one
+    /// block — treat as a retryable disconnect.
+    ProducedBlock,
+    /// Stream returned an error.
+    Errored(String),
+}
+
+async fn read_loop(
+    config: &StreamConfig,
+    clients: &ClientRegistry,
+    cursors: &CursorStore,
+    module_hash: &str,
+    substream: &mut crate::substreams::SubstreamsStream,
+) -> ReadOutcome {
+    let mut produced_any = false;
+    loop {
+        match substream.next_event().await {
+            Ok(Some(event)) => {
+                if matches!(event, StreamEvent::Block { .. }) {
+                    produced_any = true;
+                }
+                handle_substream_event(config, clients, cursors, module_hash, event).await;
+            }
+            Ok(None) => {
+                return if produced_any {
+                    ReadOutcome::ProducedBlock
+                } else {
+                    ReadOutcome::Completed
+                };
+            }
+            Err(error) => return ReadOutcome::Errored(error.to_string()),
+        }
     }
 }
 
@@ -381,12 +450,11 @@ async fn handle_substream_event(
                 Err(error) => {
                     warn!(stream = %config.name, %error, "failed to decode Substreams block output");
                     clients
-                        .broadcast_json(stream_status(
-                            config,
-                            module_hash,
-                            "decode_error",
-                            error.to_string(),
-                        ))
+                        .broadcast_matching(
+                            &network,
+                            &config.name,
+                            stream_status(config, module_hash, "decode_error", error.to_string()),
+                        )
                         .await;
                     return;
                 }
@@ -402,7 +470,9 @@ async fn handle_substream_event(
                         return;
                     }
                 };
-                clients.broadcast_json(json).await;
+                clients
+                    .broadcast_matching(&network, &config.name, json)
+                    .await;
             }
 
             if let Err(error) = cursors.save(&network, module_hash, &cursor).await {
@@ -411,7 +481,11 @@ async fn handle_substream_event(
         }
         StreamEvent::Fatal { message } => {
             clients
-                .broadcast_json(stream_status(config, module_hash, "fatal", message))
+                .broadcast_matching(
+                    &network,
+                    &config.name,
+                    stream_status(config, module_hash, "fatal", message),
+                )
                 .await;
         }
         StreamEvent::Undo {
@@ -419,14 +493,18 @@ async fn handle_substream_event(
             last_valid_cursor,
         } => {
             clients
-                .broadcast_json(serde_json::json!({
-                    "type": "stream",
-                    "status": "undo",
-                    "stream": stream_name,
-                    "network": network,
-                    "module_hash": module_hash,
-                    "last_valid_block": last_valid_block,
-                }))
+                .broadcast_matching(
+                    &network,
+                    &config.name,
+                    serde_json::json!({
+                        "type": "stream",
+                        "status": "undo",
+                        "stream": stream_name,
+                        "network": network,
+                        "module_hash": module_hash,
+                        "last_valid_block": last_valid_block,
+                    }),
+                )
                 .await;
             if let Err(error) = cursors
                 .save(&network, module_hash, &last_valid_cursor)
@@ -490,17 +568,77 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn websocket(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    if state.clients.active_count().await >= state.config.websocket.max_clients {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-
-    ws.on_upgrade(move |socket| handle_socket(state, socket))
+/// Bare `/ws` connect without any streams in the path. Rejected — clients
+/// must list streams either in the URL path or use `/stream?streams=`.
+async fn websocket_no_streams(State(_state): State<AppState>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        "at least one `network@stream` selector is required: either /ws/<network@stream> or /stream?streams=<network@stream>",
+    )
         .into_response()
 }
 
-async fn handle_socket(state: AppState, socket: WebSocket) {
-    let Some(client) = state.clients.register(&state.config).await else {
+/// Path mode: `/ws/<network@stream>` (single) or `/ws/<a>/<b>/...` (multi).
+/// Single-stream connections receive raw payloads; multi-stream wraps each
+/// outgoing message in `{"stream":"...","data":...}`.
+async fn websocket_path(
+    State(state): State<AppState>,
+    axum::extract::Path(streams_path): axum::extract::Path<String>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if state.clients.active_count().await >= state.config.websocket.max_clients {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let entries = match parse_stream_list(&streams_path) {
+        Ok(v) => v,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let wrap_envelope = entries.len() > 1;
+    let filter = StreamFilter {
+        entries,
+        wrap_envelope,
+    };
+    ws.on_upgrade(move |socket| handle_socket(state, filter, socket))
+        .into_response()
+}
+
+/// Query mode: `/stream?streams=<a>/<b>/...`. Always wraps payloads in the
+/// `{"stream":"...","data":...}` envelope, matching Binance combined streams.
+async fn websocket_stream_query(
+    State(state): State<AppState>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if state.clients.active_count().await >= state.config.websocket.max_clients {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let raw = raw_query.unwrap_or_default();
+    let streams_value = url_query_pairs(&raw)
+        .find(|(k, _)| k == "streams")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    if streams_value.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "missing `streams` query parameter; expected `?streams=<network@stream>[/<...>]`",
+        )
+            .into_response();
+    }
+    let entries = match parse_stream_list(&streams_value) {
+        Ok(v) => v,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let filter = StreamFilter {
+        entries,
+        wrap_envelope: true,
+    };
+    ws.on_upgrade(move |socket| handle_socket(state, filter, socket))
+        .into_response()
+}
+
+async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket) {
+    let Some((client, filter_handle)) = state.clients.register(&state.config, filter.clone()).await
+    else {
         warn!("rejecting WebSocket client because max client count was reached");
         return;
     };
@@ -534,11 +672,15 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         disconnect_tx,
     ));
 
+    let subscriptions: Vec<String> = filter.entries.iter().map(StreamId::to_wire).collect();
+
     let welcome = serde_json::json!({
         "type": "session",
         "status": "connected",
         "client_id": client_id,
         "streams": state.streams_meta.as_ref(),
+        "subscriptions": subscriptions,
+        "wrap_envelope": filter.wrap_envelope,
     });
 
     if outbound
@@ -562,6 +704,10 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
                 match message {
                     Ok(Message::Text(text)) => {
                         debug!(%text, "received WebSocket text message");
+                        let reply = handle_subscription_command(&filter_handle, text.as_str()).await;
+                        if outbound.send(Message::Text(reply.into())).await.is_err() {
+                            break;
+                        }
                     }
                     Ok(Message::Binary(_)) => {
                         debug!("received WebSocket binary message");
@@ -598,6 +744,161 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     info!(client_id, "WebSocket client disconnected");
 }
 
+/// A single `network@stream` selector. Either field may be `*` (`None`) for
+/// a wildcard match.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StreamId {
+    network: Option<String>,
+    stream: Option<String>,
+}
+
+impl StreamId {
+    /// Display in Binance-style `network@stream` form, with `*` for wildcards.
+    fn to_wire(&self) -> String {
+        format!(
+            "{}@{}",
+            self.network.as_deref().unwrap_or("*"),
+            self.stream.as_deref().unwrap_or("*"),
+        )
+    }
+
+    /// Parse a single `network@stream` string. `*` on either side is a
+    /// wildcard. Rejects empty input and any value missing the `@` separator.
+    fn parse(raw: &str) -> Result<Self, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("stream selector must not be empty".to_owned());
+        }
+        let (net, stream) = match trimmed.split_once('@') {
+            Some((n, s)) => (n, s),
+            None => {
+                return Err(format!(
+                    "stream selector {trimmed:?} must be `network@stream`"
+                ));
+            }
+        };
+        Ok(StreamId {
+            network: parse_wildcard(net),
+            stream: parse_wildcard(stream),
+        })
+    }
+
+    fn matches(&self, network: &str, stream: &str) -> bool {
+        self.network.as_deref().map_or(true, |n| n == network)
+            && self.stream.as_deref().map_or(true, |s| s == stream)
+    }
+}
+
+/// Per-client subscription set. Empty = match nothing.
+#[derive(Debug, Clone, Default)]
+struct StreamFilter {
+    entries: Vec<StreamId>,
+    /// When `true` every payload is wrapped in `{"stream":"...","data":...}`.
+    /// Set by the route (`/stream` always wraps; `/ws/<one>` does not; `/ws`
+    /// with multiple path segments does).
+    wrap_envelope: bool,
+}
+
+impl StreamFilter {
+    fn matches(&self, network: &str, stream: &str) -> bool {
+        self.entries.iter().any(|e| e.matches(network, stream))
+    }
+
+    fn list(&self) -> Vec<String> {
+        self.entries.iter().map(StreamId::to_wire).collect()
+    }
+
+    fn add(&mut self, id: StreamId) {
+        if !self.entries.contains(&id) {
+            self.entries.push(id);
+        }
+    }
+
+    fn remove(&mut self, id: &StreamId) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| e != id);
+        self.entries.len() != before
+    }
+}
+
+/// Parse a `/`-separated list of `network@stream` selectors (used by both the
+/// `/ws/<a>/<b>/...` path and the `/stream?streams=<a>/<b>` query).
+fn parse_stream_list(raw: &str) -> Result<Vec<StreamId>, String> {
+    let mut out = Vec::new();
+    for piece in raw.split('/') {
+        if piece.is_empty() {
+            continue;
+        }
+        out.push(StreamId::parse(piece)?);
+    }
+    if out.is_empty() {
+        return Err(
+            "at least one `network@stream` selector is required (use `*@*` for all streams)"
+                .to_owned(),
+        );
+    }
+    Ok(out)
+}
+
+fn parse_wildcard(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// Minimal `application/x-www-form-urlencoded` parser for our query strings.
+/// Avoids pulling in a full URL crate just for two query params.
+fn url_query_pairs(raw: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    raw.split('&').filter_map(|pair| {
+        if pair.is_empty() {
+            return None;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        Some((percent_decode(k), percent_decode(v)))
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'+' => out.push(' '),
+            b'%' => {
+                let hi = bytes.next();
+                let lo = bytes.next();
+                if let (Some(hi), Some(lo)) = (hi, lo)
+                    && let (Some(hi), Some(lo)) = (hex_digit(hi), hex_digit(lo))
+                {
+                    out.push(((hi << 4) | lo) as char);
+                } else {
+                    out.push('%');
+                    if let Some(hi) = hi {
+                        out.push(hi as char);
+                    }
+                    if let Some(lo) = lo {
+                        out.push(lo as char);
+                    }
+                }
+            }
+            other => out.push(other as char),
+        }
+    }
+    out
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Default)]
 struct ClientRegistry {
     next_id: Arc<AtomicU64>,
@@ -605,7 +906,11 @@ struct ClientRegistry {
 }
 
 impl ClientRegistry {
-    async fn register(&self, config: &Config) -> Option<RegisteredClient> {
+    async fn register(
+        &self,
+        config: &Config,
+        filter: StreamFilter,
+    ) -> Option<(RegisteredClient, Arc<RwLock<StreamFilter>>)> {
         let mut clients = self.clients.write().await;
         if clients.len() >= config.websocket.max_clients {
             return None;
@@ -613,9 +918,16 @@ impl ClientRegistry {
 
         let name = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel(config.websocket.client_buffer_size);
-        clients.insert(name, ClientHandle { tx: tx.clone() });
+        let filter = Arc::new(RwLock::new(filter));
+        clients.insert(
+            name,
+            ClientHandle {
+                tx: tx.clone(),
+                filter: Arc::clone(&filter),
+            },
+        );
 
-        Some(RegisteredClient { name, tx, rx })
+        Some((RegisteredClient { name, tx, rx }, filter))
     }
 
     async fn unregister(&self, name: ClientId) {
@@ -626,12 +938,29 @@ impl ClientRegistry {
         self.clients.read().await.len()
     }
 
-    async fn broadcast_json(&self, value: serde_json::Value) {
-        let message = Message::Text(value.to_string().into());
+    /// Send `value` to every client whose filter accepts `(network, stream)`.
+    /// Clients with `wrap_envelope = true` get the message wrapped in
+    /// `{"stream":"<network>@<stream>","data":<value>}`; otherwise the raw
+    /// value is sent.
+    async fn broadcast_matching(&self, network: &str, stream: &str, value: serde_json::Value) {
+        let raw_text = value.to_string();
+        let wrapped_text = format!(r#"{{"stream":"{network}@{stream}","data":{raw_text}}}"#);
+        let raw_message = Message::Text(raw_text.into());
+        let wrapped_message = Message::Text(wrapped_text.into());
         let clients = self.clients.read().await;
 
         for (client_id, client) in clients.iter() {
-            if client.tx.try_send(message.clone()).is_err() {
+            let filter = client.filter.read().await;
+            if !filter.matches(network, stream) {
+                continue;
+            }
+            let msg = if filter.wrap_envelope {
+                wrapped_message.clone()
+            } else {
+                raw_message.clone()
+            };
+            drop(filter);
+            if client.tx.try_send(msg).is_err() {
                 warn!(
                     client_id,
                     "dropping broadcast message for slow WebSocket client"
@@ -644,6 +973,7 @@ impl ClientRegistry {
 #[derive(Clone)]
 struct ClientHandle {
     tx: mpsc::Sender<Message>,
+    filter: Arc<RwLock<StreamFilter>>,
 }
 
 struct RegisteredClient {
@@ -666,6 +996,80 @@ impl std::fmt::Display for DisconnectReason {
             Self::ConnectionTtl => formatter.write_str("connection ttl reached"),
             Self::OutboundClosed => formatter.write_str("outbound channel closed"),
         }
+    }
+}
+
+/// Handle a Binance-style `{method, params, id}` text message on a connected
+/// socket. Returns the JSON reply the client should receive.
+///
+/// Supported methods:
+/// - `SUBSCRIBE`           — params: `["network@stream", ...]`
+/// - `UNSUBSCRIBE`         — params: `["network@stream", ...]`
+/// - `LIST_SUBSCRIPTIONS`  — no params, returns the current subscriptions
+async fn handle_subscription_command(filter: &Arc<RwLock<StreamFilter>>, text: &str) -> String {
+    #[derive(serde::Deserialize)]
+    struct Command {
+        method: String,
+        #[serde(default)]
+        params: Vec<String>,
+        id: Option<serde_json::Value>,
+    }
+
+    let cmd = match serde_json::from_str::<Command>(text) {
+        Ok(c) => c,
+        Err(error) => {
+            return serde_json::json!({
+                "error": format!("invalid command: {error}"),
+                "id": serde_json::Value::Null,
+            })
+            .to_string();
+        }
+    };
+
+    let id = cmd.id.unwrap_or(serde_json::Value::Null);
+
+    match cmd.method.as_str() {
+        "SUBSCRIBE" => {
+            let mut parsed = Vec::with_capacity(cmd.params.len());
+            for p in &cmd.params {
+                match StreamId::parse(p) {
+                    Ok(id) => parsed.push(id),
+                    Err(error) => {
+                        return serde_json::json!({ "error": error, "id": id }).to_string();
+                    }
+                }
+            }
+            let mut guard = filter.write().await;
+            for id in parsed {
+                guard.add(id);
+            }
+            serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
+        }
+        "UNSUBSCRIBE" => {
+            let mut parsed = Vec::with_capacity(cmd.params.len());
+            for p in &cmd.params {
+                match StreamId::parse(p) {
+                    Ok(id) => parsed.push(id),
+                    Err(error) => {
+                        return serde_json::json!({ "error": error, "id": id }).to_string();
+                    }
+                }
+            }
+            let mut guard = filter.write().await;
+            for id in &parsed {
+                guard.remove(id);
+            }
+            serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
+        }
+        "LIST_SUBSCRIPTIONS" => {
+            let guard = filter.read().await;
+            serde_json::json!({ "result": guard.list(), "id": id }).to_string()
+        }
+        other => serde_json::json!({
+            "error": format!("unknown method {other:?}; expected SUBSCRIBE, UNSUBSCRIBE, or LIST_SUBSCRIPTIONS"),
+            "id": id,
+        })
+        .to_string(),
     }
 }
 
@@ -707,6 +1111,217 @@ async fn run_heartbeat(
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         warn!(%error, "failed to listen for shutdown signal");
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::{StreamFilter, StreamId, parse_stream_list};
+
+    fn id(network: Option<&str>, stream: Option<&str>) -> StreamId {
+        StreamId {
+            network: network.map(str::to_owned),
+            stream: stream.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn empty_filter_matches_nothing() {
+        let f = StreamFilter::default();
+        assert!(!f.matches("solana-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn wildcard_star_star_matches_everything() {
+        let id = StreamId::parse("*@*").unwrap();
+        let f = StreamFilter {
+            entries: vec![id],
+            wrap_envelope: false,
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("anything", "anywhere"));
+    }
+
+    #[test]
+    fn exact_pair_matches_only_that_pair() {
+        let f = StreamFilter {
+            entries: vec![id(Some("solana-mainnet"), Some("swaps"))],
+            wrap_envelope: false,
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(!f.matches("solana-mainnet", "transfers"));
+        assert!(!f.matches("ethereum-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn wildcard_network_matches_stream_across_chains() {
+        let f = StreamFilter {
+            entries: vec![id(None, Some("swaps"))],
+            wrap_envelope: false,
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("ethereum-mainnet", "swaps"));
+        assert!(!f.matches("solana-mainnet", "transfers"));
+    }
+
+    #[test]
+    fn wildcard_stream_matches_all_streams_on_network() {
+        let f = StreamFilter {
+            entries: vec![id(Some("solana-mainnet"), None)],
+            wrap_envelope: false,
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("solana-mainnet", "transfers"));
+        assert!(!f.matches("ethereum-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn multiple_entries_are_or() {
+        let f = StreamFilter {
+            entries: vec![
+                id(Some("solana-mainnet"), Some("swaps")),
+                id(Some("ethereum-mainnet"), Some("transfers")),
+            ],
+            wrap_envelope: false,
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("ethereum-mainnet", "transfers"));
+        assert!(!f.matches("solana-mainnet", "transfers"));
+        assert!(!f.matches("ethereum-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn parses_single_path_stream() {
+        let list = parse_stream_list("solana-mainnet@swaps").unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].matches("solana-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn parses_multi_path_streams() {
+        let list = parse_stream_list("solana-mainnet@swaps/ethereum-mainnet@transfers").unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].to_wire(), "solana-mainnet@swaps");
+        assert_eq!(list[1].to_wire(), "ethereum-mainnet@transfers");
+    }
+
+    #[test]
+    fn parses_wildcards_via_at_separator() {
+        let list = parse_stream_list("*@swaps/solana-mainnet@*").unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[0].matches("ethereum-mainnet", "swaps"));
+        assert!(list[1].matches("solana-mainnet", "anything"));
+    }
+
+    #[test]
+    fn rejects_malformed_selector() {
+        let err = parse_stream_list("notvalid").unwrap_err();
+        assert!(err.contains("network@stream"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_empty_list() {
+        let err = parse_stream_list("").unwrap_err();
+        assert!(err.contains("at least one"), "got: {err}");
+    }
+
+    #[test]
+    fn stream_id_to_wire_roundtrips() {
+        let s = StreamId::parse("solana-mainnet@swaps").unwrap();
+        assert_eq!(s.to_wire(), "solana-mainnet@swaps");
+        let w = StreamId::parse("*@swaps").unwrap();
+        assert_eq!(w.to_wire(), "*@swaps");
+        let nw = StreamId::parse("solana-mainnet@*").unwrap();
+        assert_eq!(nw.to_wire(), "solana-mainnet@*");
+    }
+
+    #[test]
+    fn filter_add_and_remove() {
+        let mut f = StreamFilter::default();
+        f.add(StreamId::parse("solana-mainnet@swaps").unwrap());
+        f.add(StreamId::parse("ethereum-mainnet@swaps").unwrap());
+        assert_eq!(f.list().len(), 2);
+        // Adding the same entry is a no-op.
+        f.add(StreamId::parse("solana-mainnet@swaps").unwrap());
+        assert_eq!(f.list().len(), 2);
+        // Removing a known entry returns true.
+        assert!(f.remove(&StreamId::parse("solana-mainnet@swaps").unwrap()));
+        assert_eq!(f.list(), vec!["ethereum-mainnet@swaps".to_owned()]);
+        // Removing an unknown entry returns false.
+        assert!(!f.remove(&StreamId::parse("solana-mainnet@swaps").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn subscribe_command_adds_entries() {
+        let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
+        let reply = super::handle_subscription_command(
+            &filter,
+            r#"{"method":"SUBSCRIBE","params":["solana-mainnet@swaps","ethereum-mainnet@transfers"],"id":7}"#,
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(value["id"], 7);
+        assert!(value["result"].is_null());
+        let entries = filter.read().await.list();
+        assert_eq!(
+            entries,
+            vec![
+                "solana-mainnet@swaps".to_owned(),
+                "ethereum-mainnet@transfers".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_command_removes_entries() {
+        let mut start = StreamFilter::default();
+        start.add(StreamId::parse("solana-mainnet@swaps").unwrap());
+        start.add(StreamId::parse("ethereum-mainnet@transfers").unwrap());
+        let filter = std::sync::Arc::new(tokio::sync::RwLock::new(start));
+        let reply = super::handle_subscription_command(
+            &filter,
+            r#"{"method":"UNSUBSCRIBE","params":["solana-mainnet@swaps"],"id":12}"#,
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(value["id"], 12);
+        assert_eq!(
+            filter.read().await.list(),
+            vec!["ethereum-mainnet@transfers".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_subscriptions_returns_current_set() {
+        let mut start = StreamFilter::default();
+        start.add(StreamId::parse("solana-mainnet@swaps").unwrap());
+        let filter = std::sync::Arc::new(tokio::sync::RwLock::new(start));
+        let reply = super::handle_subscription_command(
+            &filter,
+            r#"{"method":"LIST_SUBSCRIPTIONS","id":3}"#,
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(value["id"], 3);
+        assert_eq!(value["result"], serde_json::json!(["solana-mainnet@swaps"]));
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_error() {
+        let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
+        let reply =
+            super::handle_subscription_command(&filter, r#"{"method":"DESTROY","id":99}"#).await;
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(value["id"], 99);
+        assert!(value["error"].as_str().unwrap().contains("unknown method"));
+    }
+
+    #[tokio::test]
+    async fn invalid_json_returns_error() {
+        let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
+        let reply = super::handle_subscription_command(&filter, "not json").await;
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert!(value["error"].as_str().unwrap().contains("invalid command"));
     }
 }
 
@@ -753,7 +1368,7 @@ mod tests {
     async fn websocket_connects_and_receives_welcome_message() {
         let server = TestServer::start(config()).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
             .await
             .expect("websocket connects");
 
@@ -775,6 +1390,8 @@ mod tests {
         assert_eq!(body["streams"][0]["network"], "solana-mainnet");
         assert_eq!(body["streams"][0]["manifest"], "./demo.spkg");
         assert!(body["client_id"].as_u64().is_some());
+        assert_eq!(body["subscriptions"], serde_json::json!(["*@*"]));
+        assert_eq!(body["wrap_envelope"], true);
 
         socket
             .close(None)
@@ -788,11 +1405,11 @@ mod tests {
         cfg.websocket.max_clients = 1;
         let server = TestServer::start(cfg).await;
 
-        let (_socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (_socket, _) = connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
             .await
             .expect("first websocket connects");
 
-        let second = connect_async(format!("ws://{}/ws", server.addr)).await;
+        let second = connect_async(format!("ws://{}/stream?streams=*@*", server.addr)).await;
         assert!(second.is_err(), "second websocket should be rejected");
     }
 
@@ -803,7 +1420,7 @@ mod tests {
         cfg.websocket.heartbeat_timeout = Duration::from_secs(1);
         let server = TestServer::start(cfg).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
             .await
             .expect("websocket connects");
 
@@ -829,9 +1446,10 @@ mod tests {
         cfg.websocket.heartbeat_timeout = Duration::from_millis(80);
         let server = TestServer::start(cfg).await;
 
-        let (mut stale_socket, _) = connect_async(format!("ws://{}/ws", server.addr))
-            .await
-            .expect("first websocket connects");
+        let (mut stale_socket, _) =
+            connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
+                .await
+                .expect("first websocket connects");
         let _welcome = stale_socket
             .next()
             .await
@@ -840,7 +1458,7 @@ mod tests {
 
         let mut connected_after_eviction = false;
         for _ in 0..40 {
-            if connect_async(format!("ws://{}/ws", server.addr))
+            if connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
                 .await
                 .is_ok()
             {
@@ -865,7 +1483,7 @@ mod tests {
         cfg.websocket.connection_ttl = Some(Duration::from_millis(80));
         let server = TestServer::start(cfg).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
             .await
             .expect("websocket connects");
         let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
@@ -895,7 +1513,7 @@ mod tests {
     async fn websocket_client_receives_decoded_database_changes_block() {
         let server = TestServer::start(config()).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
             .await
             .expect("websocket connects");
 
@@ -961,7 +1579,10 @@ mod tests {
             panic!("expected text decoded block, got {message:?}");
         };
 
-        let body: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
+        let envelope: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
+        // `/stream?streams=*@*` wraps in {"stream":"<network>@<stream>","data":...}
+        assert_eq!(envelope["stream"], "solana-mainnet@swaps");
+        let body = &envelope["data"];
         assert_eq!(body["stream"], "swaps");
         assert_eq!(body["network"], "solana-mainnet");
         assert_eq!(body["block_num"], 999);
@@ -973,7 +1594,7 @@ mod tests {
         assert!(body.get("changes").is_none());
         assert_eq!(body["events"][0]["@table"], "swaps");
         assert_eq!(body["events"][0]["input_amount"], "1287000000");
-        // block_num stripped because it duplicates top-level @block_num
+        // block_num stripped because it duplicates top-level block_num
         assert!(body["events"][0].get("block_num").is_none());
         assert!(
             body["events"][0].get("table").is_none(),
@@ -1085,6 +1706,7 @@ mod tests {
             websocket: WebSocketConfig {
                 listen: "127.0.0.1:0".parse().expect("listen address"),
                 ws_path: "/ws".to_owned(),
+                stream_path: "/stream".to_owned(),
                 health_path: "/healthz".to_owned(),
                 heartbeat_interval: Duration::from_secs(180),
                 heartbeat_timeout: Duration::from_secs(600),
