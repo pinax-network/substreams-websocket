@@ -411,11 +411,59 @@
   }
   .msg .meta .copy:hover { color: var(--fg); border-color: var(--accent); }
   .msg .meta .copy.copied { color: var(--good); border-color: var(--good); }
-  .msg .body { display: none; }
+  .msg .body { display: none; padding: 6px 0 4px; }
   .msg.expanded .body { display: block; }
   .msg.always-open .body { display: block; }
   .msg.always-open .meta .chev { display: none; }
   .msg.always-open .meta { cursor: default; }
+
+  /* Compact event list inside an expanded block payload. */
+  .msg .events-header {
+    color: var(--muted);
+    font-size: 11px;
+    margin: 6px 2px 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .msg .event-row {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-top: 4px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .msg .event-row .event-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 8px;
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--mono);
+    font-size: 11.5px;
+  }
+  .msg .event-row .event-meta:hover { background: var(--code-bg); }
+  .msg .event-row .event-meta .chev { font-size: 9px; color: var(--muted); transition: transform 120ms; flex-shrink: 0; }
+  .msg .event-row.open .event-meta .chev { transform: rotate(90deg); }
+  .msg .event-row .event-meta .table-tag {
+    color: #af52de;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  @media (prefers-color-scheme: dark) {
+    .msg .event-row .event-meta .table-tag { color: #bf5af2; }
+  }
+  .msg .event-row .event-meta .preview {
+    flex: 1;
+    min-width: 0;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .msg .event-row .event-body { display: none; padding: 6px 8px; border-top: 1px solid var(--border); }
+  .msg .event-row.open .event-body { display: block; }
+  .msg .event-row pre { margin: 0; background: var(--code-bg); padding: 8px 10px; border-radius: 4px; }
   .msg pre {
     margin: 0;
     padding: 8px 10px;
@@ -880,6 +928,68 @@
     );
   }
 
+  // A few common "identifying" columns by table. First match wins for the
+  // event-row preview line. Falls back to the first non-@table key.
+  var PREVIEW_FIELDS = ['signature', 'tx_hash', 'transaction_hash', 'amount', 'input_amount', 'output_amount', 'user', 'from', 'to', 'protocol', 'mint'];
+
+  function eventPreview(ev) {
+    if (!ev || typeof ev !== 'object') return '';
+    var parts = [];
+    PREVIEW_FIELDS.forEach(function (k) {
+      if (typeof ev[k] === 'string' && ev[k].length) {
+        var v = ev[k];
+        if (v.length > 24) v = v.slice(0, 12) + '…' + v.slice(-6);
+        parts.push(k + '=' + v);
+      }
+    });
+    if (parts.length === 0) {
+      var keys = Object.keys(ev).filter(function (k) { return k !== '@table'; });
+      keys.slice(0, 3).forEach(function (k) {
+        var v = String(ev[k]);
+        if (v.length > 18) v = v.slice(0, 10) + '…' + v.slice(-4);
+        parts.push(k + '=' + v);
+      });
+    }
+    return parts.slice(0, 4).join('  ');
+  }
+
+  function renderEventRow(ev) {
+    var row = document.createElement('div');
+    row.className = 'event-row';
+
+    var rmeta = document.createElement('div');
+    rmeta.className = 'event-meta';
+
+    var chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = '▶';
+    rmeta.appendChild(chev);
+
+    var tag = document.createElement('span');
+    tag.className = 'table-tag';
+    tag.textContent = '@' + (ev['@table'] || 'event');
+    rmeta.appendChild(tag);
+
+    var preview = document.createElement('span');
+    preview.className = 'preview';
+    preview.textContent = eventPreview(ev);
+    rmeta.appendChild(preview);
+
+    row.appendChild(rmeta);
+
+    var rbody = document.createElement('div');
+    rbody.className = 'event-body';
+    var pre = document.createElement('pre');
+    pre.innerHTML = highlightJson(JSON.stringify(ev, null, 2));
+    rbody.appendChild(pre);
+    row.appendChild(rbody);
+
+    rmeta.addEventListener('click', function () { row.classList.toggle('open'); });
+    attachCopyButton(pre);
+
+    return row;
+  }
+
   function describeJson(parsed) {
     // Build a one-line summary for the compact meta row.
     // Block payloads (raw or wrapped) emit "block_num@time table=… (N events)".
@@ -1002,10 +1112,35 @@
     if (pretty !== null) {
       var body = document.createElement('div');
       body.className = 'body';
-      var bodyPre = document.createElement('pre');
-      bodyPre.innerHTML = highlightJson(pretty);
-      body.appendChild(bodyPre);
-      attachCopyButton(bodyPre);
+
+      // Block payloads render as: header object (sans events) + compact
+      // event rows below. Other JSON renders as the full pretty payload.
+      var innerObj = parsed && parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+      if (info.compact && innerObj && Array.isArray(innerObj.events)) {
+        var headerOnly = {};
+        Object.keys(innerObj).forEach(function (k) {
+          if (k !== 'events') headerOnly[k] = innerObj[k];
+        });
+        var headerPre = document.createElement('pre');
+        headerPre.innerHTML = highlightJson(JSON.stringify(headerOnly, null, 2));
+        body.appendChild(headerPre);
+        attachCopyButton(headerPre);
+
+        var label = document.createElement('div');
+        label.className = 'events-header';
+        label.textContent = innerObj.events.length + ' event' + (innerObj.events.length === 1 ? '' : 's');
+        body.appendChild(label);
+
+        innerObj.events.forEach(function (ev) {
+          body.appendChild(renderEventRow(ev));
+        });
+      } else {
+        var bodyPre = document.createElement('pre');
+        bodyPre.innerHTML = highlightJson(pretty);
+        body.appendChild(bodyPre);
+        attachCopyButton(bodyPre);
+      }
+
       div.appendChild(body);
 
       if (info.compact) {
@@ -1019,6 +1154,13 @@
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
   }
+
+  // Browser auto-disconnect cap: connections in the in-page client are for
+  // exploring the API, not long-running ingest. A live block stream can fire
+  // hundreds of payloads per second; without this cap the browser runs out
+  // of memory rendering them. Server-to-server clients have no such cap.
+  var AUTO_DISCONNECT_MS = 10000;
+  var autoTimer = null;
 
   function connect() {
     var url = urlEl.value.trim();
@@ -1035,7 +1177,14 @@
     sendBtn.disabled = false;
     ws.onopen = function () {
       setStatus('open', 'ok');
-      append('sys', '*', 'connected: ' + url);
+      append('sys', '*', 'connected: ' + url + ' (auto-disconnect in ' + (AUTO_DISCONNECT_MS / 1000) + 's)');
+      if (autoTimer) clearTimeout(autoTimer);
+      autoTimer = setTimeout(function () {
+        if (ws && ws.readyState === 1) {
+          append('sys', '*', 'auto-disconnecting after ' + (AUTO_DISCONNECT_MS / 1000) + 's to protect the browser');
+          ws.close(1000, 'browser auto-disconnect');
+        }
+      }, AUTO_DISCONNECT_MS);
     };
     ws.onmessage = function (ev) {
       append('in', '<', typeof ev.data === 'string' ? ev.data : '<binary ' + ev.data.byteLength + 'B>');
@@ -1044,6 +1193,7 @@
       append('sys', '!', 'socket error (see browser console)');
     };
     ws.onclose = function (ev) {
+      if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
       setStatus('closed', 'err');
       append('sys', '*', 'closed: code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
       ws = null;
