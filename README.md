@@ -482,9 +482,7 @@ The test suite includes a functional test that injects a synthesized `DatabaseCh
 
 ### Docker
 
-A multi-stage `Dockerfile` is in the repo root. The runtime image is `debian:bookworm-slim` with CA roots installed, runs as non-root `uid 10001`, and exposes port `8080`.
-
-Pre-built images are published to GitHub Container Registry on every `v*` tag:
+A small multi-stage `Dockerfile` is in the repo root. Runtime image is `debian:bookworm-slim` with CA roots installed. Pre-built images are published to GHCR on every `v*` tag:
 
 ```bash
 docker pull ghcr.io/pinax-network/substreams-websocket:latest
@@ -494,22 +492,18 @@ docker pull ghcr.io/pinax-network/substreams-websocket:0.2.1
 
 Tags published per release: `{version}` (e.g. `0.2.1`), `{major}.{minor}` (`0.2`), `{major}` (`0`), and `latest`.
 
-Build locally:
+Run:
 
 ```bash
-docker build -t substreams-websocket .
-
 docker run --rm -p 8080:8080 \
   -e SUBSTREAMS_API_KEY="$YOUR_KEY" \
+  -e SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080 \
   -e SUBSTREAMS_WEBSOCKET_STREAMS_TOML="$(cat streams.toml)" \
-  -v $(pwd)/cursors:/data/cursors \
-  substreams-websocket
+  -v $(pwd)/cursors:/app/cursors \
+  ghcr.io/pinax-network/substreams-websocket:latest serve
 ```
 
-Defaults baked into the image:
-
-- `SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080` — bind on all interfaces.
-- `SUBSTREAMS_WEBSOCKET_CURSORS_DIR=/data/cursors` — mount a volume here in production.
+The image has no baked-in env defaults — set `SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080` so the server binds outside the container's loopback, and mount a volume for cursor persistence.
 
 ### Railway / Fly / Heroku — env-only deploys
 
@@ -540,17 +534,22 @@ PaaS environments with no writable filesystem accept streams as **inline TOML** 
 
    Railway's UI supports multiline values. Paste the TOML inline; do not wrap it in quotes from a shell here-doc.
 
-3. **Attach a volume** for cursors so progress survives redeploys:
-   - In Railway, **Settings → Volumes → Add volume**.
-   - Mount path: `/data/cursors`.
-   - The Dockerfile already exports `SUBSTREAMS_WEBSOCKET_CURSORS_DIR=/data/cursors`. No extra env var needed.
+3. **Bind to all interfaces.** Add this variable so the server is reachable from outside the container:
 
-4. **Expose the WebSocket port.** Railway auto-generates a public URL on port `8080` (the `EXPOSE` directive in the Dockerfile). Connect with:
+   ```
+   SUBSTREAMS_WEBSOCKET_LISTEN = 0.0.0.0:8080
+   ```
+
+4. **Attach a volume** for cursors so progress survives redeploys:
+   - In Railway, **Settings → Volumes → Add volume**.
+   - Mount path: `/app/cursors`. The default `SUBSTREAMS_WEBSOCKET_CURSORS_DIR=./cursors` resolves to `/app/cursors` inside the container.
+
+5. **Connect.** Railway auto-generates a public URL on port `8080`:
    ```
    wss://<your-service>.up.railway.app/ws/solana-mainnet@swaps
    ```
 
-5. **Optional tuning.** Override any of the defaults by adding env vars:
+6. **Optional tuning.** Override any of the defaults by adding env vars:
    ```
    SUBSTREAMS_WEBSOCKET_MAX_CLIENTS=4096
    SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS=180
