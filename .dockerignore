@@ -1,0 +1,13 @@
+target/
+cursors/
+.git/
+.github/
+.env
+*.cursor
+streams.toml
+config.toml
+README.md
+docs/
+sample.db_out.json
+.idea/
+.vscode/
