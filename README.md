@@ -484,6 +484,18 @@ The test suite includes a functional test that injects a synthesized `DatabaseCh
 
 A multi-stage `Dockerfile` is in the repo root. The runtime image is `debian:bookworm-slim` with CA roots installed, runs as non-root `uid 10001`, and exposes port `8080`.
 
+Pre-built images are published to GitHub Container Registry on every `v*` tag:
+
+```bash
+docker pull ghcr.io/pinax-network/substreams-websocket:latest
+# or pin a version:
+docker pull ghcr.io/pinax-network/substreams-websocket:0.2.1
+```
+
+Tags published per release: `{version}` (e.g. `0.2.1`), `{major}.{minor}` (`0.2`), `{major}` (`0`), and `latest`.
+
+Build locally:
+
 ```bash
 docker build -t substreams-websocket .
 
