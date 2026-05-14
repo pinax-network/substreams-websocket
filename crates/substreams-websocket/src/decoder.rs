@@ -91,7 +91,7 @@ pub fn normalize_database_changes(
     let events = changes
         .table_changes
         .into_iter()
-        .map(|change| {
+        .filter_map(|change| {
             let mut row = serde_json::Map::with_capacity(change.fields.len() + 1);
             row.insert("@table".to_owned(), serde_json::Value::String(change.table));
             for field in change.fields {
@@ -100,7 +100,14 @@ pub fn normalize_database_changes(
                 }
                 row.insert(field.name, serde_json::Value::String(field.value));
             }
-            row
+            // Drop rows that carry no payload after the block-header columns
+            // are stripped (e.g. a `blocks` table whose only fields are
+            // block_num / block_hash / timestamp / minute, which are already
+            // surfaced at the top level of the message).
+            if row.len() <= 1 {
+                return None;
+            }
+            Some(row)
         })
         .collect();
 
@@ -232,6 +239,45 @@ mod tests {
         assert!(event.get("minute").is_none());
         assert_eq!(event["input_amount"], "1287000000");
         assert_eq!(event["@table"], "swaps");
+    }
+
+    #[test]
+    fn drops_rows_that_only_carry_block_header_columns() {
+        let changes = DatabaseChanges {
+            table_changes: vec![
+                // A `blocks` row whose only columns duplicate top-level meta.
+                TableChange {
+                    table: "blocks".to_owned(),
+                    ordinal: 0,
+                    operation: 1,
+                    fields: vec![
+                        field("block_num", "350000000"),
+                        field("block_hash", "GsK6..."),
+                        field("timestamp", "1751210681"),
+                        field("minute", "29186844"),
+                    ],
+                    primary_key: None,
+                },
+                // A real row that should still survive.
+                TableChange {
+                    table: "swaps".to_owned(),
+                    ordinal: 1,
+                    operation: 1,
+                    fields: vec![field("input_amount", "100")],
+                    primary_key: None,
+                },
+            ],
+        };
+        let mut payload = Vec::new();
+        changes.encode(&mut payload).expect("encode");
+
+        let message = decode_database_changes("swaps", &payload, context()).expect("decode");
+        assert_eq!(
+            message.events.len(),
+            1,
+            "the empty `blocks` row must be dropped"
+        );
+        assert_eq!(message.events[0]["@table"], "swaps");
     }
 
     #[test]
