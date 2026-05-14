@@ -303,25 +303,18 @@
     <p class="tagline">
       Decoded blocks, swaps, transfers, and any Substreams <code>DatabaseChanges</code>
       output — delivered in seconds. Subscribe to one or many streams across SVM, EVM,
-      and any chain Pinax supports. Resume exactly where you left off after a disconnect.
+      TVM, HyperLiquid, Polymarket, and any chain Pinax supports. Resume exactly where
+      you left off after a disconnect.
     </p>
 
     <div class="features">
       <div class="feature">
         <h3>Real-time, multi-chain</h3>
-        <p>One generic decoder for every <code>db_out</code>-style Substreams package. Solana, Ethereum, Base, Arbitrum, and any future chain Pinax adds — same URL pattern.</p>
-      </div>
-      <div class="feature">
-        <h3>Binance-style URLs</h3>
-        <p><code>&lt;network&gt;@&lt;stream&gt;</code> selectors with <code>*</code> wildcards. <code>/ws/&lt;a&gt;</code> for single, <code>/ws/&lt;a&gt;/&lt;b&gt;</code> for combined, <code>/stream?streams=…</code> for query mode.</p>
+        <p>One generic decoder for every <code>db_out</code>-style Substreams package. Solana, Ethereum, Base, Arbitrum, TVM, HyperLiquid, Polymarket — same URL pattern.</p>
       </div>
       <div class="feature">
         <h3>Reorg-aware</h3>
         <p>Every payload carries a Substreams <code>cursor</code> and <code>module_hash</code>. <code>undo</code> messages fire on chain reorganizations so subscribers can roll back deterministically.</p>
-      </div>
-      <div class="feature">
-        <h3>Live subscribe protocol</h3>
-        <p>Binance-style <code>SUBSCRIBE</code> / <code>UNSUBSCRIBE</code> / <code>LIST_SUBSCRIPTIONS</code> over the connected socket. Narrow your stream after connect without reconnecting.</p>
       </div>
     </div>
 
