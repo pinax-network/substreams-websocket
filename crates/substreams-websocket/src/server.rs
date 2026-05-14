@@ -243,6 +243,12 @@ fn spawn_streams(
         .collect()
 }
 
+/// Initial backoff after an error. Doubles each failure, capped at
+/// `RESTART_BACKOFF_MAX`. Resets to `RESTART_BACKOFF_MIN` whenever the
+/// stream gets past the first connect.
+const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
 async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: CursorStore) {
     let PreparedStream {
         mut config,
@@ -256,96 +262,150 @@ async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: C
     if let Some(error) = error {
         error!(stream = %config.name, error, "stream preparation failed");
         clients
-            .broadcast_json(stream_status(&config, &module_hash, "error", error))
+            .broadcast_matching(
+                &network,
+                &config.name,
+                stream_status(&config, &module_hash, "error", error),
+            )
             .await;
         return;
     }
     let package = package.expect("prepared stream without error must have package");
 
-    match cursors.load(&network, &module_hash).await {
-        Ok(Some(cursor)) => {
-            info!(
-                stream = %config.name,
-                network = %network,
-                module_hash = %module_hash,
-                cursor_len = cursor.len(),
-                "resuming Substreams read from persisted cursor"
-            );
-            config.substreams.start_cursor = Some(cursor);
-        }
-        Ok(None) => {}
-        Err(error) => {
-            warn!(stream = %config.name, network = %network, %error, "failed to load cursor; starting from configured block");
-        }
-    }
-
-    info!(
-        stream = %config.name,
-        network = %network,
-        module = %config.substreams.module,
-        module_hash = %module_hash,
-        manifest = %config.substreams.manifest,
-        start_block = ?config.substreams.start_block,
-        has_cursor = config.substreams.start_cursor.is_some(),
-        "starting Substreams read"
-    );
-
-    let client = SubstreamsClient::new(config.substreams.clone());
-    let mut substream = match client.stream_with_package(package).await {
-        Ok(substream) => substream,
-        Err(error) => {
-            error!(stream = %config.name, %error, "Substreams read failed to start");
-            clients
-                .broadcast_json(stream_status(
-                    &config,
-                    &module_hash,
-                    "error",
-                    error.to_string(),
-                ))
-                .await;
-            return;
-        }
-    };
-
-    clients
-        .broadcast_json(stream_status(
-            &config,
-            &module_hash,
-            "started",
-            String::new(),
-        ))
-        .await;
+    let mut backoff = RESTART_BACKOFF_MIN;
 
     loop {
-        let event = match substream.next_event().await {
-            Ok(Some(event)) => event,
+        // Reload cursor from disk on every retry so we resume from the latest
+        // persisted position, not whatever the previous run started with.
+        match cursors.load(&network, &module_hash).await {
+            Ok(Some(cursor)) => {
+                info!(
+                    stream = %config.name,
+                    network = %network,
+                    module_hash = %module_hash,
+                    cursor_len = cursor.len(),
+                    "resuming Substreams read from persisted cursor"
+                );
+                config.substreams.start_cursor = Some(cursor);
+            }
             Ok(None) => {
-                info!(stream = %config.name, "Substreams read completed");
-                clients
-                    .broadcast_json(stream_status(
-                        &config,
-                        &module_hash,
-                        "completed",
-                        String::new(),
-                    ))
-                    .await;
-                break;
+                config.substreams.start_cursor = None;
             }
             Err(error) => {
-                error!(stream = %config.name, %error, "Substreams read failed");
+                warn!(stream = %config.name, network = %network, %error, "failed to load cursor; starting from configured block");
+                config.substreams.start_cursor = None;
+            }
+        }
+
+        info!(
+            stream = %config.name,
+            network = %network,
+            module = %config.substreams.module,
+            module_hash = %module_hash,
+            manifest = %config.substreams.manifest,
+            start_block = ?config.substreams.start_block,
+            has_cursor = config.substreams.start_cursor.is_some(),
+            "starting Substreams read"
+        );
+
+        let client = SubstreamsClient::new(config.substreams.clone());
+        let mut substream = match client.stream_with_package(package.clone()).await {
+            Ok(substream) => substream,
+            Err(error) => {
+                let msg = error.to_string();
+                error!(stream = %config.name, %error, backoff_secs = backoff.as_secs(), "Substreams read failed to start; will retry");
                 clients
-                    .broadcast_json(stream_status(
-                        &config,
-                        &module_hash,
-                        "error",
-                        error.to_string(),
-                    ))
+                    .broadcast_matching(
+                        &network,
+                        &config.name,
+                        stream_status(&config, &module_hash, "error", msg),
+                    )
                     .await;
-                break;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+                continue;
             }
         };
 
-        handle_substream_event(&config, &clients, &cursors, &module_hash, event).await;
+        clients
+            .broadcast_matching(
+                &network,
+                &config.name,
+                stream_status(&config, &module_hash, "started", String::new()),
+            )
+            .await;
+
+        let outcome = read_loop(&config, &clients, &cursors, &module_hash, &mut substream).await;
+        match outcome {
+            ReadOutcome::Completed => {
+                info!(stream = %config.name, "Substreams read completed");
+                clients
+                    .broadcast_matching(
+                        &network,
+                        &config.name,
+                        stream_status(&config, &module_hash, "completed", String::new()),
+                    )
+                    .await;
+                return;
+            }
+            ReadOutcome::ProducedBlock => {
+                // We made progress this attempt: reset backoff before the next retry.
+                backoff = RESTART_BACKOFF_MIN;
+                error!(stream = %config.name, "Substreams read stream ended unexpectedly; will retry");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
+            ReadOutcome::Errored(err) => {
+                error!(stream = %config.name, error = %err, backoff_secs = backoff.as_secs(), "Substreams read failed; will retry");
+                clients
+                    .broadcast_matching(
+                        &network,
+                        &config.name,
+                        stream_status(&config, &module_hash, "error", err),
+                    )
+                    .await;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
+        }
+    }
+}
+
+enum ReadOutcome {
+    /// Server closed the stream cleanly (e.g. reached stop_block).
+    Completed,
+    /// Stream ended without an explicit error but we did produce at least one
+    /// block — treat as a retryable disconnect.
+    ProducedBlock,
+    /// Stream returned an error.
+    Errored(String),
+}
+
+async fn read_loop(
+    config: &StreamConfig,
+    clients: &ClientRegistry,
+    cursors: &CursorStore,
+    module_hash: &str,
+    substream: &mut crate::substreams::SubstreamsStream,
+) -> ReadOutcome {
+    let mut produced_any = false;
+    loop {
+        match substream.next_event().await {
+            Ok(Some(event)) => {
+                if matches!(event, StreamEvent::Block { .. }) {
+                    produced_any = true;
+                }
+                handle_substream_event(config, clients, cursors, module_hash, event).await;
+            }
+            Ok(None) => {
+                return if produced_any {
+                    ReadOutcome::ProducedBlock
+                } else {
+                    ReadOutcome::Completed
+                };
+            }
+            Err(error) => return ReadOutcome::Errored(error.to_string()),
+        }
     }
 }
 
@@ -381,12 +441,11 @@ async fn handle_substream_event(
                 Err(error) => {
                     warn!(stream = %config.name, %error, "failed to decode Substreams block output");
                     clients
-                        .broadcast_json(stream_status(
-                            config,
-                            module_hash,
-                            "decode_error",
-                            error.to_string(),
-                        ))
+                        .broadcast_matching(
+                            &network,
+                            &config.name,
+                            stream_status(config, module_hash, "decode_error", error.to_string()),
+                        )
                         .await;
                     return;
                 }
@@ -402,7 +461,9 @@ async fn handle_substream_event(
                         return;
                     }
                 };
-                clients.broadcast_json(json).await;
+                clients
+                    .broadcast_matching(&network, &config.name, json)
+                    .await;
             }
 
             if let Err(error) = cursors.save(&network, module_hash, &cursor).await {
@@ -411,7 +472,11 @@ async fn handle_substream_event(
         }
         StreamEvent::Fatal { message } => {
             clients
-                .broadcast_json(stream_status(config, module_hash, "fatal", message))
+                .broadcast_matching(
+                    &network,
+                    &config.name,
+                    stream_status(config, module_hash, "fatal", message),
+                )
                 .await;
         }
         StreamEvent::Undo {
@@ -419,14 +484,18 @@ async fn handle_substream_event(
             last_valid_cursor,
         } => {
             clients
-                .broadcast_json(serde_json::json!({
-                    "type": "stream",
-                    "status": "undo",
-                    "stream": stream_name,
-                    "network": network,
-                    "module_hash": module_hash,
-                    "last_valid_block": last_valid_block,
-                }))
+                .broadcast_matching(
+                    &network,
+                    &config.name,
+                    serde_json::json!({
+                        "type": "stream",
+                        "status": "undo",
+                        "stream": stream_name,
+                        "network": network,
+                        "module_hash": module_hash,
+                        "last_valid_block": last_valid_block,
+                    }),
+                )
                 .await;
             if let Err(error) = cursors
                 .save(&network, module_hash, &last_valid_cursor)
@@ -490,17 +559,29 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn websocket(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+async fn websocket(
+    State(state): State<AppState>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    ws: WebSocketUpgrade,
+) -> Response {
     if state.clients.active_count().await >= state.config.websocket.max_clients {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_socket(state, socket))
+    let raw = raw_query.unwrap_or_default();
+    let filter = match StreamFilter::from_query(&raw) {
+        Ok(filter) => filter,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, error).into_response();
+        }
+    };
+
+    ws.on_upgrade(move |socket| handle_socket(state, filter, socket))
         .into_response()
 }
 
-async fn handle_socket(state: AppState, socket: WebSocket) {
-    let Some(client) = state.clients.register(&state.config).await else {
+async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket) {
+    let Some(client) = state.clients.register(&state.config, filter.clone()).await else {
         warn!("rejecting WebSocket client because max client count was reached");
         return;
     };
@@ -534,11 +615,23 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         disconnect_tx,
     ));
 
+    let filter_json: Vec<serde_json::Value> = filter
+        .entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "network": e.network.as_deref().unwrap_or("*"),
+                "stream": e.stream.as_deref().unwrap_or("*"),
+            })
+        })
+        .collect();
+
     let welcome = serde_json::json!({
         "type": "session",
         "status": "connected",
         "client_id": client_id,
         "streams": state.streams_meta.as_ref(),
+        "filter": filter_json,
     });
 
     if outbound
@@ -598,6 +691,123 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     info!(client_id, "WebSocket client disconnected");
 }
 
+/// A `(network, stream)` filter entry. Either field may be `*` (None) for a
+/// wildcard. An empty `StreamFilter` (no entries) matches everything.
+#[derive(Debug, Clone, Default)]
+struct StreamFilter {
+    entries: Vec<FilterEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct FilterEntry {
+    network: Option<String>,
+    stream: Option<String>,
+}
+
+impl StreamFilter {
+    fn matches(&self, network: &str, stream: &str) -> bool {
+        if self.entries.is_empty() {
+            return true;
+        }
+        self.entries.iter().any(|entry| {
+            entry.network.as_deref().map_or(true, |n| n == network)
+                && entry.stream.as_deref().map_or(true, |s| s == stream)
+        })
+    }
+
+    /// Parse from a `?subscribe=net:stream&subscribe=...` query string. Each
+    /// `subscribe` value may itself be comma-separated. `*` means wildcard.
+    /// An entry without a colon is treated as `*:value` (stream-only match)
+    /// when it looks like a bare stream name; the canonical form is
+    /// `network:stream`.
+    fn from_query(raw: &str) -> Result<Self, String> {
+        let mut entries = Vec::new();
+        for (key, value) in url_query_pairs(raw) {
+            if key != "subscribe" {
+                continue;
+            }
+            for piece in value.split(',') {
+                let piece = piece.trim();
+                if piece.is_empty() {
+                    continue;
+                }
+                let (net_raw, stream_raw) = match piece.split_once(':') {
+                    Some((n, s)) => (n, s),
+                    None => {
+                        return Err(format!(
+                            "subscribe entry {piece:?} must be `network:stream`"
+                        ));
+                    }
+                };
+                entries.push(FilterEntry {
+                    network: parse_wildcard(net_raw),
+                    stream: parse_wildcard(stream_raw),
+                });
+            }
+        }
+        Ok(Self { entries })
+    }
+}
+
+fn parse_wildcard(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// Minimal `application/x-www-form-urlencoded` parser for our query strings.
+/// Avoids pulling in a full URL crate just for two query params.
+fn url_query_pairs(raw: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    raw.split('&').filter_map(|pair| {
+        if pair.is_empty() {
+            return None;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        Some((percent_decode(k), percent_decode(v)))
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'+' => out.push(' '),
+            b'%' => {
+                let hi = bytes.next();
+                let lo = bytes.next();
+                if let (Some(hi), Some(lo)) = (hi, lo)
+                    && let (Some(hi), Some(lo)) = (hex_digit(hi), hex_digit(lo))
+                {
+                    out.push(((hi << 4) | lo) as char);
+                } else {
+                    out.push('%');
+                    if let Some(hi) = hi {
+                        out.push(hi as char);
+                    }
+                    if let Some(lo) = lo {
+                        out.push(lo as char);
+                    }
+                }
+            }
+            other => out.push(other as char),
+        }
+    }
+    out
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Default)]
 struct ClientRegistry {
     next_id: Arc<AtomicU64>,
@@ -605,7 +815,7 @@ struct ClientRegistry {
 }
 
 impl ClientRegistry {
-    async fn register(&self, config: &Config) -> Option<RegisteredClient> {
+    async fn register(&self, config: &Config, filter: StreamFilter) -> Option<RegisteredClient> {
         let mut clients = self.clients.write().await;
         if clients.len() >= config.websocket.max_clients {
             return None;
@@ -613,7 +823,13 @@ impl ClientRegistry {
 
         let name = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel(config.websocket.client_buffer_size);
-        clients.insert(name, ClientHandle { tx: tx.clone() });
+        clients.insert(
+            name,
+            ClientHandle {
+                tx: tx.clone(),
+                filter: filter.clone(),
+            },
+        );
 
         Some(RegisteredClient { name, tx, rx })
     }
@@ -626,11 +842,17 @@ impl ClientRegistry {
         self.clients.read().await.len()
     }
 
-    async fn broadcast_json(&self, value: serde_json::Value) {
+    /// Send a fully-formed envelope to every client whose filter accepts the
+    /// given `(network, stream)`. An empty network/stream pair (e.g. for the
+    /// welcome message) bypasses filtering — call `broadcast_to_all` instead.
+    async fn broadcast_matching(&self, network: &str, stream: &str, value: serde_json::Value) {
         let message = Message::Text(value.to_string().into());
         let clients = self.clients.read().await;
 
         for (client_id, client) in clients.iter() {
+            if !client.filter.matches(network, stream) {
+                continue;
+            }
             if client.tx.try_send(message.clone()).is_err() {
                 warn!(
                     client_id,
@@ -644,6 +866,7 @@ impl ClientRegistry {
 #[derive(Clone)]
 struct ClientHandle {
     tx: mpsc::Sender<Message>,
+    filter: StreamFilter,
 }
 
 struct RegisteredClient {
@@ -707,6 +930,127 @@ async fn run_heartbeat(
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         warn!(%error, "failed to listen for shutdown signal");
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::{FilterEntry, StreamFilter};
+
+    fn entry(network: Option<&str>, stream: Option<&str>) -> FilterEntry {
+        FilterEntry {
+            network: network.map(str::to_owned),
+            stream: stream.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        let f = StreamFilter::default();
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("ethereum-mainnet", "transfers"));
+    }
+
+    #[test]
+    fn exact_pair_matches_only_that_pair() {
+        let f = StreamFilter {
+            entries: vec![entry(Some("solana-mainnet"), Some("swaps"))],
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(!f.matches("solana-mainnet", "transfers"));
+        assert!(!f.matches("ethereum-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn wildcard_network_matches_stream_across_chains() {
+        let f = StreamFilter {
+            entries: vec![entry(None, Some("swaps"))],
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("ethereum-mainnet", "swaps"));
+        assert!(!f.matches("solana-mainnet", "transfers"));
+    }
+
+    #[test]
+    fn wildcard_stream_matches_all_streams_on_network() {
+        let f = StreamFilter {
+            entries: vec![entry(Some("solana-mainnet"), None)],
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("solana-mainnet", "transfers"));
+        assert!(!f.matches("ethereum-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn multiple_entries_are_or() {
+        let f = StreamFilter {
+            entries: vec![
+                entry(Some("solana-mainnet"), Some("swaps")),
+                entry(Some("ethereum-mainnet"), Some("transfers")),
+            ],
+        };
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("ethereum-mainnet", "transfers"));
+        assert!(!f.matches("solana-mainnet", "transfers"));
+        assert!(!f.matches("ethereum-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn parses_single_subscribe() {
+        let f = StreamFilter::from_query("subscribe=solana-mainnet:swaps").unwrap();
+        assert_eq!(f.entries.len(), 1);
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(!f.matches("ethereum-mainnet", "swaps"));
+    }
+
+    #[test]
+    fn parses_repeated_subscribe() {
+        let f = StreamFilter::from_query(
+            "subscribe=solana-mainnet:swaps&subscribe=ethereum-mainnet:transfers",
+        )
+        .unwrap();
+        assert_eq!(f.entries.len(), 2);
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("ethereum-mainnet", "transfers"));
+        assert!(!f.matches("solana-mainnet", "transfers"));
+    }
+
+    #[test]
+    fn parses_comma_separated_subscribe() {
+        let f =
+            StreamFilter::from_query("subscribe=solana-mainnet:swaps,ethereum-mainnet:transfers")
+                .unwrap();
+        assert_eq!(f.entries.len(), 2);
+        assert!(f.matches("solana-mainnet", "swaps"));
+        assert!(f.matches("ethereum-mainnet", "transfers"));
+    }
+
+    #[test]
+    fn parses_wildcards() {
+        let f = StreamFilter::from_query("subscribe=*:swaps&subscribe=solana-mainnet:*").unwrap();
+        assert!(f.matches("ethereum-mainnet", "swaps"));
+        assert!(f.matches("solana-mainnet", "anything"));
+        assert!(!f.matches("ethereum-mainnet", "transfers"));
+    }
+
+    #[test]
+    fn rejects_malformed_entries() {
+        let err = StreamFilter::from_query("subscribe=notvalid").unwrap_err();
+        assert!(err.contains("network:stream"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_query_returns_match_all() {
+        let f = StreamFilter::from_query("").unwrap();
+        assert!(f.entries.is_empty());
+        assert!(f.matches("any-network", "any-stream"));
+    }
+
+    #[test]
+    fn ignores_unknown_query_params() {
+        let f = StreamFilter::from_query("foo=bar&subscribe=solana-mainnet:swaps&baz=qux").unwrap();
+        assert_eq!(f.entries.len(), 1);
+        assert!(f.matches("solana-mainnet", "swaps"));
     }
 }
 

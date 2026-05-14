@@ -179,7 +179,11 @@ impl SubstreamsClient {
         ensure_module_exists(&package, &self.config.module)?;
         let request = build_blocks_request(&self.config, package)?;
         let channel = connect_channel(&self.config).await?;
+        // 64 MiB decoded message cap. Substreams DatabaseChanges payloads for
+        // chains with many transactions per block (e.g. Solana SPL transfers)
+        // routinely exceed tonic's 4 MiB default after gzip decompression.
         let mut client = StreamClient::new(channel)
+            .max_decoding_message_size(64 * 1024 * 1024)
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd);

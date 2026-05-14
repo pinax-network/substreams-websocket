@@ -180,6 +180,33 @@ only proto:sf.substreams.sink.database.v1.DatabaseChanges is accepted
 
 Connect to `ws://<host>:<port>/ws`. The server speaks four message types.
 
+### Subscribing to specific streams
+
+By default a connection receives **every** event from **every** configured stream. To narrow the firehose, pass one or more `subscribe=<network>:<stream>` query parameters when connecting. The server pushes a payload only when the entry's `(network, stream)` matches at least one filter.
+
+```
+# only Solana swaps
+ws://host:8080/ws?subscribe=solana-mainnet:swaps
+
+# Solana swaps AND Ethereum transfers
+ws://host:8080/ws?subscribe=solana-mainnet:swaps&subscribe=ethereum-mainnet:transfers
+
+# comma-separated form (equivalent to above)
+ws://host:8080/ws?subscribe=solana-mainnet:swaps,ethereum-mainnet:transfers
+
+# every "swaps" stream regardless of chain
+ws://host:8080/ws?subscribe=*:swaps
+
+# every Solana stream
+ws://host:8080/ws?subscribe=solana-mainnet:*
+```
+
+- `*` is the wildcard for either field.
+- Multiple filters are **OR**-combined.
+- An entry without a `:` is rejected with HTTP 400.
+- The session welcome message echoes the parsed filter (see below) so clients can confirm what was applied. The welcome itself is always sent.
+- Stream lifecycle (`started`, `error`, `undo`, ...) messages are filtered the same way — a client subscribed to `solana-mainnet:swaps` does not see lifecycle events from other streams.
+
 ### 1. `session` -- sent once on connect
 
 ```json
@@ -202,9 +229,14 @@ Connect to `ws://<host>:<port>/ws`. The server speaks four message types.
       "manifest": "https://.../svm-transfers-v0.3.0.spkg",
       "module_hash": "673da4a738be4a99d6dc3c421f2b5744d4c7a2b9"
     }
+  ],
+  "filter": [
+    { "network": "solana-mainnet", "stream": "swaps" }
   ]
 }
 ```
+
+`filter` echoes whatever `subscribe=` entries the client passed on the URL. An empty array means "no filter — match every stream". `*` is preserved verbatim for wildcards.
 
 The `module_hash` is the canonical Substreams SHA-1 of the configured output module. Compare it to `substreams info <spkg>` to detect spkg upgrades.
 
@@ -344,8 +376,7 @@ There is no Dockerfile or unit file in-tree yet. The binary is a single static-i
 ## Known limitations
 
 - **No replay buffer.** Disconnected clients miss broadcasts during the gap.
-- **No server-side filtering.** Every connected client receives every event from every configured stream. Filter on the client.
-- **No subscribe protocol.** The connection delivers the full union of configured streams.
+- **No subscribe protocol after connect.** The filter is fixed at connection time via the URL `subscribe=` query parameter. Reconnect with a different filter to change subscriptions.
 - **One output type.** Only `sf.substreams.sink.database.v1.DatabaseChanges` is supported.
 
 ---
