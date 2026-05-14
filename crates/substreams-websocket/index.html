@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>substreams-websocket — API reference</title>
+<title>Streams — Pinax</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -55,12 +55,20 @@
     overflow-y: auto;
     padding: 20px 16px;
   }
-  nav.side h1 {
-    font-size: 14px;
-    margin: 0 0 14px;
-    font-weight: 600;
+  nav.side .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 18px;
+    text-decoration: none;
+    color: inherit;
   }
-  nav.side h1 small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  nav.side .brand svg { flex-shrink: 0; }
+  nav.side .brand .title {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
   nav.side .group { margin-bottom: 16px; }
   nav.side .group-title {
     font-size: 11px;
@@ -112,6 +120,32 @@
   table { width: 100%; border-collapse: collapse; margin: 8px 0 18px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
   th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+  .hero h2 { font-size: 28px; border: 0; padding: 0; margin-top: 0; letter-spacing: -0.02em; }
+  .hero p.tagline { font-size: 16px; color: var(--muted); max-width: 640px; line-height: 1.55; margin: 10px 0 28px; }
+  .features {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 0 0 20px;
+  }
+  .features .feature {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: var(--code-bg);
+  }
+  .features .feature h3 {
+    margin: 0 0 4px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .features .feature p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
   .method {
     display: inline-block;
     font-family: var(--mono);
@@ -179,9 +213,20 @@
 <body>
 
 <nav class="side">
-  <h1>substreams-websocket
-    <small>real-time DatabaseChanges fan-out</small>
-  </h1>
+  <a class="brand" href="/" aria-label="Streams">
+    <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M15.9994 15.9904L12.7002 13.0069V12.694L15.9994 9.74072L19.2984 12.6941L19.2985 13.0071L15.9994 15.9904Z" />
+      <path d="M22.5917 15.9904L19.2925 13.0069V12.694L22.5917 9.74072L25.8907 12.6941L25.8908 13.0071L22.5917 15.9904Z" />
+      <path d="M9.40836 15.9904L6.10913 13.0069L6.10914 12.694L9.40834 9.74072L12.7074 12.6941L12.7074 13.0071L9.40836 15.9904Z" />
+      <path d="M15.9994 28.5001L12.7002 25.5167V25.2038L15.9994 22.2505L19.2984 25.2039L19.2985 25.5168L15.9994 28.5001Z" />
+      <path d="M15.9994 9.74968L12.7002 6.76624V6.45327L15.9994 3.5L19.2984 6.45334L19.2985 6.76633L15.9994 9.74968Z" />
+      <path d="M22.5917 22.2452L19.2925 19.2619V18.9489L22.5917 15.9956L25.8907 18.9489L25.8908 19.2619L22.5917 22.2452Z" />
+      <path d="M22.5917 28.5001L19.2925 25.5167V25.2038L22.5917 22.2505L25.8907 25.2039L25.8908 25.5168L22.5917 28.5001Z" />
+      <path d="M9.40836 22.2111L6.10913 19.2277L6.10914 18.9147L9.40834 15.9614L12.7074 18.9148L12.7074 19.2277L9.40836 22.2111Z" />
+      <path d="M9.40836 28.5001L6.10913 25.5167L6.10914 25.2038L9.40834 22.2505L12.7074 25.2039L12.7074 25.5168L9.40836 28.5001Z" />
+    </svg>
+    <span class="title">Streams</span>
+  </a>
 
   <div class="group">
     <div class="group-title">Overview</div>
@@ -191,7 +236,7 @@
 
   <div class="group">
     <div class="group-title">Messages</div>
-    <a href="#welcome">Welcome</a>
+    <a href="#welcome">Connect</a>
     <a href="#block">Block payload</a>
     <a href="#lifecycle">Stream lifecycle</a>
   </div>
@@ -218,18 +263,35 @@
 </nav>
 
 <main>
-  <section id="intro">
-    <h2>Introduction</h2>
-    <p class="lead">
-      substreams-websocket fans out decoded Substreams <code>DatabaseChanges</code> blocks
-      to any number of WebSocket subscribers. Stream identifiers follow the
-      Binance-style <code>&lt;network&gt;@&lt;stream&gt;</code> convention; <code>*</code> is a wildcard
-      on either side.
+  <section id="intro" class="hero">
+    <h2>Stream live blockchain data over WebSocket</h2>
+    <p class="tagline">
+      Decoded blocks, swaps, transfers, and any Substreams <code>DatabaseChanges</code>
+      output — delivered in seconds. Subscribe to one or many streams across SVM, EVM,
+      and any chain Pinax supports. Resume exactly where you left off after a disconnect.
     </p>
-    <p>
-      Connect to this server with any WebSocket client. The right panel
-      <span class="pill dim" style="font-size: 11px;">live try-it</span> lets you exercise the
-      API in-browser without leaving this page.
+
+    <div class="features">
+      <div class="feature">
+        <h3>Real-time, multi-chain</h3>
+        <p>One generic decoder for every <code>db_out</code>-style Substreams package. Solana, Ethereum, Base, Arbitrum, and any future chain Pinax adds — same URL pattern.</p>
+      </div>
+      <div class="feature">
+        <h3>Binance-style URLs</h3>
+        <p><code>&lt;network&gt;@&lt;stream&gt;</code> selectors with <code>*</code> wildcards. <code>/ws/&lt;a&gt;</code> for single, <code>/ws/&lt;a&gt;/&lt;b&gt;</code> for combined, <code>/stream?streams=…</code> for query mode.</p>
+      </div>
+      <div class="feature">
+        <h3>Reorg-aware</h3>
+        <p>Every payload carries a Substreams <code>cursor</code> and <code>module_hash</code>. <code>undo</code> messages fire on chain reorganizations so subscribers can roll back deterministically.</p>
+      </div>
+      <div class="feature">
+        <h3>Live subscribe protocol</h3>
+        <p>Binance-style <code>SUBSCRIBE</code> / <code>UNSUBSCRIBE</code> / <code>LIST_SUBSCRIPTIONS</code> over the connected socket. Narrow your stream after connect without reconnecting.</p>
+      </div>
+    </div>
+
+    <p style="color: var(--muted); font-size: 13px;">
+      Try it live in the <span class="pill dim" style="font-size: 11px;">right panel</span> — connect, subscribe, and watch blocks roll in without leaving this page.
     </p>
   </section>
 
@@ -279,7 +341,7 @@
   </section>
 
   <section id="welcome">
-    <h2>Welcome message</h2>
+    <h2>Connected message</h2>
     <p>Sent once per connection. Lists every configured stream and echoes this connection's resolved subscriptions.</p>
 <pre>{
   "type": "session",
