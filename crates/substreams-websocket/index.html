@@ -804,22 +804,45 @@
     var el = document.getElementById(id);
     return el ? { a: a, el: el } : null;
   }).filter(Boolean);
+  var mainEl = document.querySelector('main');
+
+  function setActive(target) {
+    sections.forEach(function (s) { s.a.classList.toggle('active', s === target); });
+  }
+
+  // Pick the section whose top is closest to (but at or above) a small
+  // offset from the viewport's top of `main`. This works even for trailing
+  // sections short enough that they can't reach the very top — when the
+  // user is at the bottom of the scroll container, we just pick the last
+  // section that started above the offset.
   function syncActive() {
-    var mainEl = document.querySelector('main');
-    var top = mainEl.scrollTop + 80;
+    var offset = 100; // px from top of `main`
+    var scrollTop = mainEl.scrollTop;
+    var atBottom = scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 4;
+    if (atBottom) {
+      setActive(sections[sections.length - 1]);
+      return;
+    }
     var current = sections[0];
     for (var i = 0; i < sections.length; i++) {
-      if (sections[i].el.offsetTop <= top) current = sections[i];
+      if (sections[i].el.offsetTop <= scrollTop + offset) current = sections[i];
     }
-    // If scrolled (near) to the bottom, the last section can't reach the
-    // 80px-from-top threshold when the doc is shorter than the viewport.
-    // Force-activate the last section so the trailing anchor (e.g. #list)
-    // still highlights when clicked.
-    var atBottom = mainEl.scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 4;
-    if (atBottom) current = sections[sections.length - 1];
-    sections.forEach(function (s) { s.a.classList.toggle('active', s === current); });
+    setActive(current);
   }
-  document.querySelector('main').addEventListener('scroll', syncActive);
+
+  mainEl.addEventListener('scroll', syncActive);
+
+  // Clicking a sidebar link snaps active immediately — the scroll may not
+  // travel far enough for syncActive() to land on the correct entry,
+  // especially for trailing anchors.
+  Array.prototype.forEach.call(document.querySelectorAll('nav.side a[href^="#"]'), function (a) {
+    a.addEventListener('click', function () {
+      var id = a.getAttribute('href').slice(1);
+      var match = sections.filter(function (s) { return s.el.id === id; })[0];
+      if (match) setActive(match);
+    });
+  });
+
   syncActive();
 })();
 </script>
