@@ -928,14 +928,21 @@
     );
   }
 
-  // A few common "identifying" columns by table. First match wins for the
-  // event-row preview line. Falls back to the first non-@table key.
-  var PREVIEW_FIELDS = ['signature', 'tx_hash', 'transaction_hash', 'amount', 'input_amount', 'output_amount', 'user', 'from', 'to', 'protocol', 'mint'];
+  // Per-table preferred preview columns. First match wins for the event-row
+  // preview line. Falls back to PREVIEW_FIELDS_DEFAULT and then to the first
+  // non-@table keys on the event.
+  var PREVIEW_FIELDS_BY_TABLE = {
+    swaps:         ['protocol', 'user', 'program_id', 'amm'],
+    spl_transfer:  ['mint', 'amount', 'source', 'destination'],
+    transfers:     ['mint', 'amount', 'from', 'to'],
+  };
+  var PREVIEW_FIELDS_DEFAULT = ['signature', 'tx_hash', 'transaction_hash', 'amount', 'input_amount', 'output_amount', 'user', 'from', 'to', 'protocol', 'mint'];
 
   function eventPreview(ev) {
     if (!ev || typeof ev !== 'object') return '';
+    var prefer = PREVIEW_FIELDS_BY_TABLE[ev['@table']] || PREVIEW_FIELDS_DEFAULT;
     var parts = [];
-    PREVIEW_FIELDS.forEach(function (k) {
+    prefer.forEach(function (k) {
       if (typeof ev[k] === 'string' && ev[k].length) {
         var v = ev[k];
         if (v.length > 24) v = v.slice(0, 12) + '…' + v.slice(-6);
