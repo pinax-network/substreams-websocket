@@ -311,14 +311,39 @@
     color: var(--fg);
   }
   .tryit input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; }
+  .tryit select {
+    font: inherit;
+    padding: 7px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 13px;
+    min-width: 220px;
+    cursor: pointer;
+  }
   .tryit button { cursor: pointer; }
   .tryit button:disabled { opacity: 0.5; cursor: not-allowed; }
   .tryit .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--border); color: var(--muted); font-family: var(--mono); display: inline-block; }
   .tryit .pill.ok  { background: rgba(52,199,89,0.15);  color: var(--good); }
   .tryit .pill.err { background: rgba(255,59,48,0.15);  color: var(--bad); }
   .tryit .pill.dim { background: var(--border); color: var(--muted); }
-  .tryit .tpl-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .tryit .tpl-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
   .tryit .tpl-row button { padding: 4px 10px; font-size: 12px; }
+  .tryit-filter { margin-left: auto; display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .tryit-filter button {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 0;
+    border-left: 1px solid var(--border);
+  }
+  .tryit-filter button:first-child { border-left: 0; }
+  .tryit-filter button:hover { color: var(--fg); }
+  .tryit-filter button.active { background: var(--accent); color: #fff; }
   .tryit #log {
     flex: 1;
     overflow-y: auto;
@@ -327,15 +352,70 @@
     font-size: 12px;
     line-height: 1.55;
   }
-  .msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
-  .msg:last-child { border-bottom: 0; }
-  .msg .meta {
-    color: var(--muted);
-    font-size: 10px;
-    margin-bottom: 4px;
-    letter-spacing: 0.04em;
+  .msg {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    border-left: 3px solid transparent;
+    transition: background 120ms;
   }
-  .msg .meta .arrow { font-weight: 600; margin-right: 6px; }
+  .msg:last-child { border-bottom: 0; }
+  .msg.is-in  { border-left-color: var(--accent); background: rgba(10,132,255,0.04); }
+  .msg.is-out { border-left-color: var(--good);   background: rgba(52,199,89,0.05); }
+  .msg.is-sys { border-left-color: transparent; background: transparent; }
+  @media (prefers-color-scheme: dark) {
+    .msg.is-in  { background: rgba(10,132,255,0.07); }
+    .msg.is-out { background: rgba(52,199,89,0.08); }
+  }
+  /* Filter modes: hide the messages that don't match. */
+  #log.filter-in  .msg.is-out { display: none; }
+  #log.filter-out .msg.is-in  { display: none; }
+  /* Always show system rows in any filter mode. */
+  .msg .meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 4px;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    user-select: none;
+  }
+  .msg .meta .arrow { font-weight: 600; flex-shrink: 0; }
+  .msg .meta .ts { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .msg .meta .summary {
+    flex: 1;
+    min-width: 0;
+    color: var(--fg);
+    font-family: var(--mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .msg .meta .chev {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--muted);
+    transition: transform 120ms;
+  }
+  .msg.expanded .meta .chev { transform: rotate(90deg); }
+  .msg .meta .copy {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .msg .meta .copy:hover { color: var(--fg); border-color: var(--accent); }
+  .msg .meta .copy.copied { color: var(--good); border-color: var(--good); }
+  .msg .body { display: none; }
+  .msg.expanded .body { display: block; }
+  .msg.always-open .body { display: block; }
+  .msg.always-open .meta .chev { display: none; }
+  .msg.always-open .meta { cursor: default; }
   .msg pre {
     margin: 0;
     padding: 8px 10px;
@@ -674,6 +754,9 @@
         <button class="tryit-close" id="tryit-close" type="button" aria-label="Close">×</button>
       </h2>
       <div class="row">
+        <select id="stream-select" title="Pick a configured stream">
+          <option value="">— pick a stream —</option>
+        </select>
         <input id="url" type="text" />
         <button id="connect">Connect</button>
         <button id="disconnect" disabled>Disconnect</button>
@@ -688,6 +771,11 @@
         <button data-tpl="LIST_SUBSCRIPTIONS">LIST_SUBSCRIPTIONS</button>
         <button data-tpl="SUBSCRIBE">SUBSCRIBE</button>
         <button data-tpl="UNSUBSCRIBE">UNSUBSCRIBE</button>
+        <span class="tryit-filter" role="group" aria-label="Filter messages">
+          <button data-filter="all"  class="active" type="button">All</button>
+          <button data-filter="in"   type="button">Received</button>
+          <button data-filter="out"  type="button">Sent</button>
+        </span>
       </div>
     </header>
     <div id="log"></div>
@@ -792,42 +880,143 @@
     );
   }
 
+  function describeJson(parsed) {
+    // Build a one-line summary for the compact meta row.
+    // Block payloads (raw or wrapped) emit "block_num@time table=… (N events)".
+    var inner = parsed && parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
+    if (inner && Array.isArray(inner.events)) {
+      var bn = inner.block_num != null ? inner.block_num : '?';
+      var ts = inner.timestamp || '';
+      var tables = {};
+      inner.events.forEach(function (e) { if (e && e['@table']) tables[e['@table']] = true; });
+      var tableList = Object.keys(tables).join(',') || '(none)';
+      return {
+        compact: true,
+        summary: 'block ' + bn + (ts ? '  ' + ts : '') + '  · ' + inner.events.length + ' event' + (inner.events.length === 1 ? '' : 's') + '  · ' + tableList,
+      };
+    }
+    if (parsed && parsed.type === 'session') {
+      return { compact: false, summary: 'session connected · ' + (parsed.subscriptions ? parsed.subscriptions.join(', ') : '') };
+    }
+    if (parsed && parsed.type === 'stream') {
+      return { compact: false, summary: 'stream ' + (parsed.status || '?') + '  ' + (parsed.stream || '') + '@' + (parsed.network || '') };
+    }
+    if (parsed && parsed.method) {
+      return { compact: false, summary: parsed.method + (parsed.params ? '  [' + parsed.params.join(', ') + ']' : '') };
+    }
+    if (parsed && (parsed.result !== undefined || parsed.error !== undefined)) {
+      return { compact: false, summary: 'reply id=' + JSON.stringify(parsed.id) + (parsed.error ? '  · error: ' + parsed.error : '  · ok') };
+    }
+    return { compact: false, summary: '' };
+  }
+
+  function attachInlineCopy(button, getText) {
+    button.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var text = getText();
+      var done = function () {
+        button.classList.add('copied');
+        button.textContent = '✓ copied';
+        setTimeout(function () {
+          button.classList.remove('copied');
+          button.textContent = 'Copy';
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        done();
+      }
+    });
+  }
+
   function append(kind, arrow, text) {
     var div = document.createElement('div');
-    div.className = 'msg' + (kind === 'sys' ? ' system' : '');
+    var kindClass = kind === 'sys' ? 'is-sys system always-open' : 'is-' + kind;
+    div.className = 'msg ' + kindClass;
 
-    var meta = document.createElement('div');
-    meta.className = 'meta';
-    var a = document.createElement('span');
-    a.className = 'arrow ' + kind;
-    a.textContent = arrow;
-    var t = document.createElement('span');
-    t.textContent = ts();
-    meta.appendChild(a);
-    meta.appendChild(t);
-
-    var body = document.createElement('pre');
     // Try to pretty-print JSON; fall back to raw text.
+    var parsed = null;
     var pretty = null;
     if (typeof text === 'string') {
       var trimmed = text.trim();
       if (trimmed.length && (trimmed[0] === '{' || trimmed[0] === '[')) {
         try {
-          pretty = JSON.stringify(JSON.parse(trimmed), null, 2);
+          parsed = JSON.parse(trimmed);
+          pretty = JSON.stringify(parsed, null, 2);
         } catch (_) {}
       }
     }
+
+    var info = parsed !== null ? describeJson(parsed) : { compact: false, summary: '' };
+
+    // Non-compact (welcome, lifecycle, command, reply) stay expanded by default.
+    if (parsed !== null && !info.compact) {
+      div.classList.add('always-open');
+    }
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+
+    var a = document.createElement('span');
+    a.className = 'arrow ' + kind;
+    a.textContent = arrow;
+    meta.appendChild(a);
+
+    var t = document.createElement('span');
+    t.className = 'ts';
+    t.textContent = ts();
+    meta.appendChild(t);
+
+    if (info.summary) {
+      var sum = document.createElement('span');
+      sum.className = 'summary';
+      sum.textContent = info.summary;
+      meta.appendChild(sum);
+    } else if (pretty === null) {
+      var raw = document.createElement('span');
+      raw.className = 'summary';
+      raw.textContent = text;
+      meta.appendChild(raw);
+    }
+
     if (pretty !== null) {
-      body.innerHTML = highlightJson(pretty);
-    } else {
-      body.textContent = text;
+      var copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'copy';
+      copy.textContent = 'Copy';
+      copy.title = 'Copy message';
+      attachInlineCopy(copy, function () { return pretty; });
+      meta.appendChild(copy);
+
+      if (info.compact) {
+        var chev = document.createElement('span');
+        chev.className = 'chev';
+        chev.textContent = '▶';
+        meta.appendChild(chev);
+      }
     }
 
     div.appendChild(meta);
-    div.appendChild(body);
+
+    if (pretty !== null) {
+      var body = document.createElement('div');
+      body.className = 'body';
+      var bodyPre = document.createElement('pre');
+      bodyPre.innerHTML = highlightJson(pretty);
+      body.appendChild(bodyPre);
+      attachCopyButton(bodyPre);
+      div.appendChild(body);
+
+      if (info.compact) {
+        meta.addEventListener('click', function (e) {
+          if (e.target.tagName === 'BUTTON') return;
+          div.classList.toggle('expanded');
+        });
+      }
+    }
+
     logEl.appendChild(div);
-    // Only attach copy on JSON payloads; system notices don't need it.
-    if (pretty !== null) attachCopyButton(body);
     logEl.scrollTop = logEl.scrollHeight;
   }
 
@@ -898,6 +1087,59 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && modalEl.classList.contains('open')) closeModal();
   });
+
+  // Filter pills (All / Received / Sent).
+  Array.prototype.forEach.call(document.querySelectorAll('[data-filter]'), function (btn) {
+    btn.addEventListener('click', function () {
+      var mode = btn.getAttribute('data-filter');
+      Array.prototype.forEach.call(document.querySelectorAll('[data-filter]'), function (b) {
+        b.classList.toggle('active', b === btn);
+      });
+      logEl.classList.remove('filter-in', 'filter-out');
+      if (mode === 'in') logEl.classList.add('filter-in');
+      else if (mode === 'out') logEl.classList.add('filter-out');
+    });
+  });
+
+  // Populate the stream dropdown from /streams; default URL to the first
+  // configured stream (single, raw-payload mode).
+  (function loadTryItStreams() {
+    var sel = document.getElementById('stream-select');
+    if (!sel) return;
+    fetch('/streams')
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (streams) {
+        if (!Array.isArray(streams) || streams.length === 0) {
+          sel.innerHTML = '<option value="">(no streams configured)</option>';
+          sel.disabled = true;
+          return;
+        }
+        sel.innerHTML = '';
+        streams.forEach(function (s, i) {
+          var id = (s.network || '*') + '@' + (s.stream || '*');
+          var opt = document.createElement('option');
+          opt.value = id;
+          opt.textContent = id;
+          if (i === 0) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        // Add wildcard catch-all at the end.
+        var all = document.createElement('option');
+        all.value = '*@*';
+        all.textContent = '*@*  (every stream)';
+        sel.appendChild(all);
+
+        // Default URL to the first stream.
+        urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
+        sel.addEventListener('change', function () {
+          if (!sel.value) return;
+          urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
+        });
+      })
+      .catch(function () {
+        // Leave the URL field at its initial value.
+      });
+  })();
 
   Array.prototype.forEach.call(document.querySelectorAll('[data-tpl]'), function (btn) {
     btn.onclick = function () {
