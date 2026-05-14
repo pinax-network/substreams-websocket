@@ -37,6 +37,12 @@ struct ServeArgs {
     )]
     streams: PathBuf,
 
+    /// Inline streams TOML content. When set, takes precedence over `--streams`
+    /// — useful for environments without a writable filesystem (e.g. Railway,
+    /// Fly.io, Heroku) where you can only inject configuration through env.
+    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAMS_TOML")]
+    streams_toml: Option<String>,
+
     #[command(flatten)]
     websocket: WebSocketArgs,
 
@@ -250,11 +256,26 @@ async fn main() -> anyhow::Result<()> {
 
 impl ServeArgs {
     async fn load_config(self) -> anyhow::Result<Config> {
-        let contents = tokio::fs::read_to_string(&self.streams)
-            .await
-            .with_context(|| format!("failed to read streams file {}", self.streams.display()))?;
+        // Inline TOML wins when present (Railway/Heroku-style env-only deploys).
+        // Otherwise read the path on disk.
+        let (contents, source_label) = if let Some(inline) = self.streams_toml.as_deref() {
+            if inline.trim().is_empty() {
+                anyhow::bail!("SUBSTREAMS_WEBSOCKET_STREAMS_TOML is set but empty");
+            }
+            (
+                inline.to_owned(),
+                "SUBSTREAMS_WEBSOCKET_STREAMS_TOML".to_owned(),
+            )
+        } else {
+            let path = self.streams.clone();
+            let contents = tokio::fs::read_to_string(&path)
+                .await
+                .with_context(|| format!("failed to read streams file {}", path.display()))?;
+            (contents, path.display().to_string())
+        };
+
         let file = toml::from_str::<FileConfig>(&contents)
-            .with_context(|| format!("failed to parse streams file {}", self.streams.display()))?;
+            .with_context(|| format!("failed to parse streams from {source_label}"))?;
 
         Ok(Config {
             streams: file

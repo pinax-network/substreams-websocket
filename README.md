@@ -480,9 +480,72 @@ cargo test --workspace
 
 The test suite includes a functional test that injects a synthesized `DatabaseChanges` block through the broadcast pipeline and verifies a connected WebSocket client receives the expected JSON -- no live endpoint required.
 
-### Docker / systemd
+### Docker
 
-There is no Dockerfile or unit file in-tree yet. The binary is a single static-ish executable, so any minimal container or `systemd` unit pointing at the release tarball is sufficient. PRs welcome.
+A multi-stage `Dockerfile` is in the repo root. The runtime image is `debian:bookworm-slim` with CA roots installed, runs as non-root `uid 10001`, and exposes port `8080`.
+
+```bash
+docker build -t substreams-websocket .
+
+docker run --rm -p 8080:8080 \
+  -e SUBSTREAMS_API_KEY="$YOUR_KEY" \
+  -e SUBSTREAMS_WEBSOCKET_STREAMS_TOML="$(cat streams.toml)" \
+  -v $(pwd)/cursors:/data/cursors \
+  substreams-websocket
+```
+
+Defaults baked into the image:
+
+- `SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080` — bind on all interfaces.
+- `SUBSTREAMS_WEBSOCKET_CURSORS_DIR=/data/cursors` — mount a volume here in production.
+
+### Railway / Fly / Heroku — env-only deploys
+
+PaaS environments with no writable filesystem accept streams as **inline TOML** via env. Set `SUBSTREAMS_WEBSOCKET_STREAMS_TOML` to the full TOML content; the server parses it directly and skips the `--streams` file lookup.
+
+**Railway recipe:**
+
+1. **Create the service.** Connect this repo to a Railway project. Railway detects the `Dockerfile` and builds it. (If you prefer a Nixpacks build, remove the `Dockerfile` from `.railwayignore`; the Dockerfile path is simpler.)
+
+2. **Set env vars** in the Railway "Variables" tab:
+
+   ```
+   SUBSTREAMS_API_KEY              = <your Pinax key>
+   SUBSTREAMS_WEBSOCKET_STREAMS_TOML = """
+     [[streams]]
+     name = "swaps"
+     network = "solana-mainnet"
+     endpoint = "https://solana.substreams.pinax.network:443"
+     manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg"
+
+     [[streams]]
+     name = "transfers"
+     network = "solana-mainnet"
+     endpoint = "https://solana.substreams.pinax.network:443"
+     manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/svm-transfers-v0.3.0.spkg"
+   """
+   ```
+
+   Railway's UI supports multiline values. Paste the TOML inline; do not wrap it in quotes from a shell here-doc.
+
+3. **Attach a volume** for cursors so progress survives redeploys:
+   - In Railway, **Settings → Volumes → Add volume**.
+   - Mount path: `/data/cursors`.
+   - The Dockerfile already exports `SUBSTREAMS_WEBSOCKET_CURSORS_DIR=/data/cursors`. No extra env var needed.
+
+4. **Expose the WebSocket port.** Railway auto-generates a public URL on port `8080` (the `EXPOSE` directive in the Dockerfile). Connect with:
+   ```
+   wss://<your-service>.up.railway.app/ws/solana-mainnet@swaps
+   ```
+
+5. **Optional tuning.** Override any of the defaults by adding env vars:
+   ```
+   SUBSTREAMS_WEBSOCKET_MAX_CLIENTS=4096
+   SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS=180
+   SUBSTREAMS_PRODUCTION_MODE=true
+   ```
+
+The same recipe works for any other env-only PaaS — only the volume-mount step changes per provider.
 
 ---
 
