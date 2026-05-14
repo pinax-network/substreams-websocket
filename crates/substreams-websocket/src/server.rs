@@ -131,6 +131,8 @@ fn build_app(state: AppState) -> Router {
         .route("/", get(landing_html))
         .route("/SKILL.md", get(skill_md))
         .route("/llms.txt", get(llms_txt))
+        .route("/favicon.ico", get(favicon_png))
+        .route("/favicon.png", get(favicon_png))
         .route(&state.config.websocket.health_path, get(health))
         .route(&ws_root, get(websocket_no_streams))
         .route(&ws_wildcard, get(websocket_path))
@@ -142,6 +144,7 @@ fn build_app(state: AppState) -> Router {
 const LANDING_HTML: &str = include_str!("../index.html");
 const SKILL_MD: &str = include_str!("../SKILL.md");
 const LLMS_TXT: &str = include_str!("../llms.txt");
+const FAVICON_PNG: &[u8] = include_bytes!("../favicon.png");
 
 async fn landing_html() -> impl IntoResponse {
     ([("content-type", "text/html; charset=utf-8")], LANDING_HTML)
@@ -153,6 +156,16 @@ async fn skill_md() -> impl IntoResponse {
 
 async fn llms_txt() -> impl IntoResponse {
     ([("content-type", "text/plain; charset=utf-8")], LLMS_TXT)
+}
+
+async fn favicon_png() -> impl IntoResponse {
+    (
+        [
+            ("content-type", "image/png"),
+            ("cache-control", "public, max-age=86400"),
+        ],
+        FAVICON_PNG,
+    )
 }
 
 /// Outcome of pre-loading a single stream's package and computing its module

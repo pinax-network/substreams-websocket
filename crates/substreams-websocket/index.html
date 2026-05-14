@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Streams — Pinax</title>
+<link rel="icon" type="image/png" sizes="192x192" href="/favicon.png">
+<link rel="apple-touch-icon" sizes="192x192" href="/favicon.png">
 <style>
   :root {
     color-scheme: light dark;
@@ -87,6 +89,20 @@
   }
   nav.side a:hover { background: var(--border); }
   nav.side a.active { background: var(--accent); color: #fff; }
+  nav.side a .chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #5e5ce6;
+    color: #fff;
+    margin-right: 8px;
+    vertical-align: 1px;
+  }
+  nav.side a.active .chip { background: rgba(255,255,255,0.25); }
   nav.side .footer { color: var(--muted); font-size: 12px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
   nav.side .footer a { display: inline; padding: 0; color: var(--accent); }
 
@@ -237,6 +253,42 @@
   .jbool { color: #cf222e; }
   .jnull { color: #cf222e; }
   .jcomment { color: #6e7781; font-style: italic; }
+
+  /* Copy-to-clipboard button on JSON examples. */
+  .code-block { position: relative; }
+  .code-block .copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    opacity: 0.4;
+    transition: opacity 120ms, background 120ms, color 120ms;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .code-block:hover .copy-btn { opacity: 0.85; }
+  .code-block .copy-btn:hover {
+    opacity: 1;
+    background: var(--border);
+    color: var(--fg);
+  }
+  .code-block .copy-btn.copied {
+    opacity: 1;
+    color: var(--good);
+  }
+  .code-block .copy-btn svg {
+    width: 16px;
+    height: 16px;
+    pointer-events: none;
+  }
   @media (prefers-color-scheme: dark) {
     .jkey  { color: #79c0ff; }
     .jstr  { color: #a5d6ff; }
@@ -274,16 +326,16 @@
 
   <div class="group">
     <div class="group-title">Messages</div>
-    <a href="#welcome">Connect</a>
-    <a href="#block">Block payload</a>
-    <a href="#lifecycle">Stream lifecycle</a>
+    <a href="#welcome"><span class="chip">WS</span>Connect</a>
+    <a href="#block"><span class="chip">WS</span>Block payload</a>
+    <a href="#lifecycle"><span class="chip">WS</span>Stream lifecycle</a>
   </div>
 
   <div class="group">
     <div class="group-title">Commands</div>
-    <a href="#subscribe">SUBSCRIBE</a>
-    <a href="#unsubscribe">UNSUBSCRIBE</a>
-    <a href="#list">LIST_SUBSCRIPTIONS</a>
+    <a href="#subscribe"><span class="chip">WS</span>SUBSCRIBE</a>
+    <a href="#unsubscribe"><span class="chip">WS</span>UNSUBSCRIBE</a>
+    <a href="#list"><span class="chip">WS</span>LIST_SUBSCRIPTIONS</a>
   </div>
 
   <div class="group">
@@ -543,6 +595,53 @@
     return d.toISOString().slice(11, 23);
   }
 
+  var COPY_SVG = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5.75 1.5h4.5A1.75 1.75 0 0 1 12 3.25v1.5h1.25A1.75 1.75 0 0 1 15 6.5v7.75A1.75 1.75 0 0 1 13.25 16h-7.5A1.75 1.75 0 0 1 4 14.25v-1.5H2.75A1.75 1.75 0 0 1 1 11V3.25C1 2.284 1.784 1.5 2.75 1.5h3Zm5 4v-2.25a.25.25 0 0 0-.25-.25h-4.5a.25.25 0 0 0-.25.25V11c0 .138.112.25.25.25H10.5V6.5c0-.276-.06-.5-.25-.5Zm-5 5.75H2.75a.25.25 0 0 1-.25-.25V3.25a.25.25 0 0 1 .25-.25h.5v8c0 .138.112.25.25.25H5.75ZM5.5 6.5v7.75c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25V6.5a.25.25 0 0 0-.25-.25h-7.5a.25.25 0 0 0-.25.25Z"/></svg>';
+  var CHECK_SVG = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 1 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
+
+  function attachCopyButton(pre) {
+    if (pre.parentNode && pre.parentNode.classList.contains('code-block')) return;
+    var wrap = document.createElement('div');
+    wrap.className = 'code-block';
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn';
+    btn.title = 'Copy';
+    btn.setAttribute('aria-label', 'Copy to clipboard');
+    btn.innerHTML = COPY_SVG;
+    wrap.appendChild(btn);
+
+    btn.addEventListener('click', function () {
+      var text = pre.innerText;
+      var done = function () {
+        btn.classList.add('copied');
+        btn.innerHTML = CHECK_SVG;
+        btn.title = 'Copied';
+        setTimeout(function () {
+          btn.classList.remove('copied');
+          btn.innerHTML = COPY_SVG;
+          btn.title = 'Copy';
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        // Fallback for older browsers / non-secure contexts.
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (_) {}
+        document.body.removeChild(ta);
+        done();
+      }
+    });
+  }
+
   function escapeHtml(s) {
     return String(s)
       .replace(/&/g, '&amp;')
@@ -602,6 +701,8 @@
     div.appendChild(meta);
     div.appendChild(body);
     logEl.appendChild(div);
+    // Only attach copy on JSON payloads; system notices don't need it.
+    if (pretty !== null) attachCopyButton(body);
     logEl.scrollTop = logEl.scrollHeight;
   }
 
@@ -693,6 +794,7 @@
       })
       .join('\n');
     pre.innerHTML = html;
+    attachCopyButton(pre);
   });
 
   // Highlight active sidebar link as user scrolls.
