@@ -692,7 +692,8 @@ async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket)
 }
 
 /// A `(network, stream)` filter entry. Either field may be `*` (None) for a
-/// wildcard. An empty `StreamFilter` (no entries) matches everything.
+/// wildcard. An empty `StreamFilter` matches nothing — connections without
+/// a `subscribe=` query parameter are rejected at the HTTP layer.
 #[derive(Debug, Clone, Default)]
 struct StreamFilter {
     entries: Vec<FilterEntry>,
@@ -706,9 +707,6 @@ struct FilterEntry {
 
 impl StreamFilter {
     fn matches(&self, network: &str, stream: &str) -> bool {
-        if self.entries.is_empty() {
-            return true;
-        }
         self.entries.iter().any(|entry| {
             entry.network.as_deref().map_or(true, |n| n == network)
                 && entry.stream.as_deref().map_or(true, |s| s == stream)
@@ -717,9 +715,9 @@ impl StreamFilter {
 
     /// Parse from a `?subscribe=net:stream&subscribe=...` query string. Each
     /// `subscribe` value may itself be comma-separated. `*` means wildcard.
-    /// An entry without a colon is treated as `*:value` (stream-only match)
-    /// when it looks like a bare stream name; the canonical form is
-    /// `network:stream`.
+    /// Returns an error if **no** `subscribe` entries were found — clients
+    /// must explicitly opt into the streams they want. Pass `subscribe=*:*`
+    /// to receive every stream.
     fn from_query(raw: &str) -> Result<Self, String> {
         let mut entries = Vec::new();
         for (key, value) in url_query_pairs(raw) {
@@ -744,6 +742,12 @@ impl StreamFilter {
                     stream: parse_wildcard(stream_raw),
                 });
             }
+        }
+        if entries.is_empty() {
+            return Err(
+                "at least one `subscribe=network:stream` query parameter is required (use `subscribe=*:*` to receive every stream)"
+                    .to_owned(),
+            );
         }
         Ok(Self { entries })
     }
@@ -945,10 +949,17 @@ mod filter_tests {
     }
 
     #[test]
-    fn empty_filter_matches_everything() {
+    fn empty_filter_matches_nothing() {
         let f = StreamFilter::default();
+        assert!(!f.matches("solana-mainnet", "swaps"));
+        assert!(!f.matches("ethereum-mainnet", "transfers"));
+    }
+
+    #[test]
+    fn wildcard_star_star_matches_everything() {
+        let f = StreamFilter::from_query("subscribe=*:*").unwrap();
         assert!(f.matches("solana-mainnet", "swaps"));
-        assert!(f.matches("ethereum-mainnet", "transfers"));
+        assert!(f.matches("anything", "anywhere"));
     }
 
     #[test]
@@ -1040,10 +1051,15 @@ mod filter_tests {
     }
 
     #[test]
-    fn empty_query_returns_match_all() {
-        let f = StreamFilter::from_query("").unwrap();
-        assert!(f.entries.is_empty());
-        assert!(f.matches("any-network", "any-stream"));
+    fn empty_query_is_rejected() {
+        let err = StreamFilter::from_query("").unwrap_err();
+        assert!(err.contains("subscribe=network:stream"), "got: {err}");
+    }
+
+    #[test]
+    fn only_unknown_params_is_rejected() {
+        let err = StreamFilter::from_query("foo=bar&baz=qux").unwrap_err();
+        assert!(err.contains("subscribe=network:stream"), "got: {err}");
     }
 
     #[test]
@@ -1097,7 +1113,7 @@ mod tests {
     async fn websocket_connects_and_receives_welcome_message() {
         let server = TestServer::start(config()).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr))
             .await
             .expect("websocket connects");
 
@@ -1132,11 +1148,11 @@ mod tests {
         cfg.websocket.max_clients = 1;
         let server = TestServer::start(cfg).await;
 
-        let (_socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (_socket, _) = connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr))
             .await
             .expect("first websocket connects");
 
-        let second = connect_async(format!("ws://{}/ws", server.addr)).await;
+        let second = connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr)).await;
         assert!(second.is_err(), "second websocket should be rejected");
     }
 
@@ -1147,7 +1163,7 @@ mod tests {
         cfg.websocket.heartbeat_timeout = Duration::from_secs(1);
         let server = TestServer::start(cfg).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr))
             .await
             .expect("websocket connects");
 
@@ -1173,7 +1189,7 @@ mod tests {
         cfg.websocket.heartbeat_timeout = Duration::from_millis(80);
         let server = TestServer::start(cfg).await;
 
-        let (mut stale_socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut stale_socket, _) = connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr))
             .await
             .expect("first websocket connects");
         let _welcome = stale_socket
@@ -1184,7 +1200,7 @@ mod tests {
 
         let mut connected_after_eviction = false;
         for _ in 0..40 {
-            if connect_async(format!("ws://{}/ws", server.addr))
+            if connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr))
                 .await
                 .is_ok()
             {
@@ -1209,7 +1225,7 @@ mod tests {
         cfg.websocket.connection_ttl = Some(Duration::from_millis(80));
         let server = TestServer::start(cfg).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr))
             .await
             .expect("websocket connects");
         let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
@@ -1239,7 +1255,7 @@ mod tests {
     async fn websocket_client_receives_decoded_database_changes_block() {
         let server = TestServer::start(config()).await;
 
-        let (mut socket, _) = connect_async(format!("ws://{}/ws", server.addr))
+        let (mut socket, _) = connect_async(format!("ws://{}/ws?subscribe=*:*", server.addr))
             .await
             .expect("websocket connects");
 

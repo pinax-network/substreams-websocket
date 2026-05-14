@@ -54,7 +54,7 @@ curl http://127.0.0.1:8080/healthz
 # -> ok
 
 # 5. Open a WebSocket and watch blocks roll in
-npx wscat -c ws://127.0.0.1:8080/ws
+npx wscat -c 'ws://127.0.0.1:8080/ws?subscribe=*:*'
 ```
 
 You don't pass `--streams` because the server picks up `./streams.toml` by default.
@@ -182,7 +182,7 @@ Connect to `ws://<host>:<port>/ws`. The server speaks four message types.
 
 ### Subscribing to specific streams
 
-By default a connection receives **every** event from **every** configured stream. To narrow the firehose, pass one or more `subscribe=<network>:<stream>` query parameters when connecting. The server pushes a payload only when the entry's `(network, stream)` matches at least one filter.
+Connections **must** declare what they want to receive. Pass one or more `subscribe=<network>:<stream>` query parameters at upgrade time. A connection with no `subscribe=` parameter is rejected with `HTTP 400`. The server pushes a payload only when the entry's `(network, stream)` matches at least one filter.
 
 ```
 # only Solana swaps
@@ -199,10 +199,14 @@ ws://host:8080/ws?subscribe=*:swaps
 
 # every Solana stream
 ws://host:8080/ws?subscribe=solana-mainnet:*
+
+# explicit "give me everything" — required if you actually want all streams
+ws://host:8080/ws?subscribe=*:*
 ```
 
 - `*` is the wildcard for either field.
 - Multiple filters are **OR**-combined.
+- A missing or empty `subscribe=` parameter is rejected with `HTTP 400`. Pass `subscribe=*:*` to opt into all streams explicitly.
 - An entry without a `:` is rejected with HTTP 400.
 - The session welcome message echoes the parsed filter (see below) so clients can confirm what was applied. The welcome itself is always sent.
 - Stream lifecycle (`started`, `error`, `undo`, ...) messages are filtered the same way — a client subscribed to `solana-mainnet:swaps` does not see lifecycle events from other streams.
@@ -236,7 +240,7 @@ ws://host:8080/ws?subscribe=solana-mainnet:*
 }
 ```
 
-`filter` echoes whatever `subscribe=` entries the client passed on the URL. An empty array means "no filter — match every stream". `*` is preserved verbatim for wildcards.
+`filter` echoes whatever `subscribe=` entries the client passed on the URL. The array always has at least one entry — connecting without a filter is rejected at the HTTP layer. `*` is preserved verbatim for wildcards.
 
 The `module_hash` is the canonical Substreams SHA-1 of the configured output module. Compare it to `substreams info <spkg>` to detect spkg upgrades.
 
