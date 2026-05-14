@@ -1060,10 +1060,7 @@
 
     var info = parsed !== null ? describeJson(parsed) : { compact: false, summary: '' };
 
-    // Non-compact (welcome, lifecycle, command, reply) stay expanded by default.
-    if (parsed !== null && !info.compact) {
-      div.classList.add('always-open');
-    }
+    // All JSON messages start collapsed; the user expands what they want.
 
     var meta = document.createElement('div');
     meta.className = 'meta';
@@ -1099,12 +1096,10 @@
       attachInlineCopy(copy, function () { return pretty; });
       meta.appendChild(copy);
 
-      if (info.compact) {
-        var chev = document.createElement('span');
-        chev.className = 'chev';
-        chev.textContent = '▶';
-        meta.appendChild(chev);
-      }
+      var chev = document.createElement('span');
+      chev.className = 'chev';
+      chev.textContent = '▶';
+      meta.appendChild(chev);
     }
 
     div.appendChild(meta);
@@ -1143,12 +1138,10 @@
 
       div.appendChild(body);
 
-      if (info.compact) {
-        meta.addEventListener('click', function (e) {
-          if (e.target.tagName === 'BUTTON') return;
-          div.classList.toggle('expanded');
-        });
-      }
+      meta.addEventListener('click', function (e) {
+        if (e.target.tagName === 'BUTTON') return;
+        div.classList.toggle('expanded');
+      });
     }
 
     logEl.appendChild(div);
