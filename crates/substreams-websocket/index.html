@@ -196,17 +196,52 @@
     padding: 10px 16px;
     font-family: var(--mono);
     font-size: 11.5px;
-    line-height: 1.45;
-    white-space: pre-wrap;
-    word-break: break-all;
+    line-height: 1.5;
   }
-  .msg { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
   .msg:last-child { border-bottom: 0; }
-  .msg .t { color: var(--muted); font-size: 10px; display: block; }
-  .arrow { font-weight: 600; margin-right: 4px; }
+  .msg .meta {
+    color: var(--muted);
+    font-size: 10px;
+    margin-bottom: 4px;
+    letter-spacing: 0.04em;
+  }
+  .msg .meta .arrow { font-weight: 600; margin-right: 6px; }
+  .msg pre {
+    margin: 0;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+  }
+  .msg.system pre {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--muted);
+  }
   .in  { color: var(--accent); }
   .out { color: var(--good); }
   .sys { color: var(--muted); }
+  .err { color: var(--bad); }
+  /* JSON syntax tokens */
+  .jkey  { color: #af52de; }
+  .jstr  { color: #34c759; }
+  .jnum  { color: #ff9500; }
+  .jbool { color: #ff9500; }
+  .jnull { color: var(--muted); }
+  @media (prefers-color-scheme: dark) {
+    .jkey  { color: #bf5af2; }
+    .jstr  { color: #30d158; }
+    .jnum  { color: #ff9f0a; }
+    .jbool { color: #ff9f0a; }
+  }
 </style>
 </head>
 
@@ -512,19 +547,63 @@
     return d.toISOString().slice(11, 23);
   }
 
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function highlightJson(value) {
+    // value is the already-stringified JSON (with indentation).
+    return escapeHtml(value).replace(
+      /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+      function (match) {
+        var cls = 'jnum';
+        if (/^"/.test(match)) {
+          cls = /:$/.test(match) ? 'jkey' : 'jstr';
+        } else if (/true|false/.test(match)) {
+          cls = 'jbool';
+        } else if (/null/.test(match)) {
+          cls = 'jnull';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      }
+    );
+  }
+
   function append(kind, arrow, text) {
     var div = document.createElement('div');
-    div.className = 'msg';
-    var t = document.createElement('span');
-    t.className = 't';
-    t.textContent = ts();
+    div.className = 'msg' + (kind === 'sys' ? ' system' : '');
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
     var a = document.createElement('span');
     a.className = 'arrow ' + kind;
     a.textContent = arrow;
-    var body = document.createElement('span');
-    body.textContent = text;
-    div.appendChild(t);
-    div.appendChild(a);
+    var t = document.createElement('span');
+    t.textContent = ts();
+    meta.appendChild(a);
+    meta.appendChild(t);
+
+    var body = document.createElement('pre');
+    // Try to pretty-print JSON; fall back to raw text.
+    var pretty = null;
+    if (typeof text === 'string') {
+      var trimmed = text.trim();
+      if (trimmed.length && (trimmed[0] === '{' || trimmed[0] === '[')) {
+        try {
+          pretty = JSON.stringify(JSON.parse(trimmed), null, 2);
+        } catch (_) {}
+      }
+    }
+    if (pretty !== null) {
+      body.innerHTML = highlightJson(pretty);
+    } else {
+      body.textContent = text;
+    }
+
+    div.appendChild(meta);
     div.appendChild(body);
     logEl.appendChild(div);
     logEl.scrollTop = logEl.scrollHeight;
