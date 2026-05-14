@@ -1018,16 +1018,25 @@
       };
     }
     if (parsed && parsed.type === 'session') {
-      return { compact: false, summary: 'session connected · ' + (parsed.subscriptions ? parsed.subscriptions.join(', ') : '') };
+      return { compact: false, summary: '🔌 session ' + (parsed.status || 'connected') + ' · ' + (parsed.subscriptions ? parsed.subscriptions.join(', ') : '') };
     }
     if (parsed && parsed.type === 'stream') {
-      return { compact: false, summary: 'stream ' + (parsed.status || '?') + '  ' + (parsed.stream || '') + '@' + (parsed.network || '') };
+      var icon = ({
+        started:      '▶️',
+        completed:    '✅',
+        error:        '⚠️',
+        decode_error: '⚠️',
+        fatal:        '🔥',
+        undo:         '↩️',
+      })[parsed.status] || '🛈';
+      return { compact: false, summary: icon + ' stream ' + (parsed.status || '?') + '  ' + (parsed.stream || '') + '@' + (parsed.network || '') };
     }
     if (parsed && parsed.method) {
-      return { compact: false, summary: parsed.method + (parsed.params ? '  [' + parsed.params.join(', ') + ']' : '') };
+      return { compact: false, summary: '➡️ ' + parsed.method + (parsed.params ? '  [' + parsed.params.join(', ') + ']' : '') };
     }
     if (parsed && (parsed.result !== undefined || parsed.error !== undefined)) {
-      return { compact: false, summary: 'reply id=' + JSON.stringify(parsed.id) + (parsed.error ? '  · error: ' + parsed.error : '  · ok') };
+      var replyIcon = parsed.error ? '⚠️' : '✅';
+      return { compact: false, summary: replyIcon + ' reply id=' + JSON.stringify(parsed.id) + (parsed.error ? '  · error: ' + parsed.error : '  · ok') };
     }
     return { compact: false, summary: '' };
   }
