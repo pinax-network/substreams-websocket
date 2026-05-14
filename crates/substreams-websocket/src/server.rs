@@ -117,6 +117,10 @@ pub async fn serve_with_shutdown(
 
 fn build_app(state: AppState) -> Router {
     // Routes match the Binance-style URL layout:
+    //   GET /                               — Scalar-style API reference (in-browser try-it client)
+    //   GET /SKILL.md                       — agent-oriented reference (markdown)
+    //   GET /llms.txt                       — short llms.txt for AI crawlers
+    //   GET <health_path>                   — health check
     //   GET <ws_path>                       — connect with no streams (errors)
     //   GET <ws_path>/{*streams}            — path mode: /ws/<a>/<b>/...
     //   GET <stream_path>?streams=<a>/<b>   — query mode: always wrapped envelope
@@ -124,12 +128,31 @@ fn build_app(state: AppState) -> Router {
     let ws_wildcard = format!("{}/{{*streams}}", ws_root.trim_end_matches('/'));
     let stream_path = state.config.websocket.stream_path.clone();
     Router::new()
+        .route("/", get(landing_html))
+        .route("/SKILL.md", get(skill_md))
+        .route("/llms.txt", get(llms_txt))
         .route(&state.config.websocket.health_path, get(health))
         .route(&ws_root, get(websocket_no_streams))
         .route(&ws_wildcard, get(websocket_path))
         .route(&stream_path, get(websocket_stream_query))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+const LANDING_HTML: &str = include_str!("../index.html");
+const SKILL_MD: &str = include_str!("../SKILL.md");
+const LLMS_TXT: &str = include_str!("../llms.txt");
+
+async fn landing_html() -> impl IntoResponse {
+    ([("content-type", "text/html; charset=utf-8")], LANDING_HTML)
+}
+
+async fn skill_md() -> impl IntoResponse {
+    ([("content-type", "text/markdown; charset=utf-8")], SKILL_MD)
+}
+
+async fn llms_txt() -> impl IntoResponse {
+    ([("content-type", "text/plain; charset=utf-8")], LLMS_TXT)
 }
 
 /// Outcome of pre-loading a single stream's package and computing its module

@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>substreams-websocket — API reference</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --bg: #fafafa;
+    --fg: #1c1c1e;
+    --muted: #6e6e73;
+    --border: #e5e5ea;
+    --code-bg: #f2f2f7;
+    --accent: #0a84ff;
+    --good: #34c759;
+    --bad: #ff3b30;
+    --sidebar-bg: #f5f5f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e;
+      --fg: #f2f2f7;
+      --muted: #8e8e93;
+      --border: #38383a;
+      --code-bg: #2c2c2e;
+      --sidebar-bg: #2c2c2e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    display: grid;
+    grid-template-columns: 240px 1fr 420px;
+    grid-template-rows: 100vh;
+    overflow: hidden;
+  }
+  @media (max-width: 1100px) {
+    body { grid-template-columns: 200px 1fr; }
+    aside.try { display: none; }
+  }
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    nav.side { display: none; }
+  }
+
+  /* --- sidebar --- */
+  nav.side {
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 20px 16px;
+  }
+  nav.side h1 {
+    font-size: 14px;
+    margin: 0 0 14px;
+    font-weight: 600;
+  }
+  nav.side h1 small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 2px; }
+  nav.side .group { margin-bottom: 16px; }
+  nav.side .group-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 6px 6px;
+  }
+  nav.side a {
+    display: block;
+    padding: 5px 8px;
+    text-decoration: none;
+    color: var(--fg);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  nav.side a:hover { background: var(--border); }
+  nav.side a.active { background: var(--accent); color: #fff; }
+  nav.side .footer { color: var(--muted); font-size: 12px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
+  nav.side .footer a { display: inline; padding: 0; color: var(--accent); }
+
+  /* --- main docs --- */
+  main {
+    overflow-y: auto;
+    padding: 32px 40px 80px;
+    max-width: 820px;
+  }
+  main h2 {
+    font-size: 22px;
+    margin: 32px 0 8px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+  }
+  main h2:first-child { margin-top: 0; }
+  main h3 { font-size: 16px; margin: 24px 0 6px; }
+  main p, main li { font-size: 14px; color: var(--fg); }
+  main p code, main li code, table code { font-family: var(--mono); font-size: 12.5px; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  main pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 10px 0 18px;
+  }
+  main .lead { color: var(--muted); font-size: 14px; max-width: 680px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 18px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .method {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--accent);
+    color: #fff;
+    margin-right: 6px;
+  }
+  .method.ws { background: #5e5ce6; }
+  .method.http { background: var(--good); }
+
+  /* --- try-it sidebar --- */
+  aside.try {
+    background: var(--sidebar-bg);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  aside.try header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  aside.try header h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+  aside.try .row { display: flex; gap: 6px; margin-bottom: 6px; }
+  aside.try input, aside.try button {
+    font: inherit;
+    padding: 5px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+  }
+  aside.try input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; }
+  aside.try button { cursor: pointer; }
+  aside.try button:disabled { opacity: 0.5; cursor: not-allowed; }
+  aside.try .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--border); color: var(--muted); font-family: var(--mono); display: inline-block; }
+  aside.try .pill.ok  { background: rgba(52,199,89,0.15);  color: var(--good); }
+  aside.try .pill.err { background: rgba(255,59,48,0.15);  color: var(--bad); }
+  aside.try .pill.dim { background: var(--border); color: var(--muted); }
+  aside.try .tpl-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  aside.try .tpl-row button { padding: 3px 8px; font-size: 11px; }
+  aside.try #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 16px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .msg { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .msg:last-child { border-bottom: 0; }
+  .msg .t { color: var(--muted); font-size: 10px; display: block; }
+  .arrow { font-weight: 600; margin-right: 4px; }
+  .in  { color: var(--accent); }
+  .out { color: var(--good); }
+  .sys { color: var(--muted); }
+</style>
+</head>
+
+<body>
+
+<nav class="side">
+  <h1>substreams-websocket
+    <small>real-time DatabaseChanges fan-out</small>
+  </h1>
+
+  <div class="group">
+    <div class="group-title">Overview</div>
+    <a href="#intro">Introduction</a>
+    <a href="#urls">URL modes</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Messages</div>
+    <a href="#welcome">Welcome</a>
+    <a href="#block">Block payload</a>
+    <a href="#lifecycle">Stream lifecycle</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Commands</div>
+    <a href="#subscribe">SUBSCRIBE</a>
+    <a href="#unsubscribe">UNSUBSCRIBE</a>
+    <a href="#list">LIST_SUBSCRIPTIONS</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Operating</div>
+    <a href="#cursors">Cursors</a>
+    <a href="#heartbeats">Heartbeats</a>
+    <a href="#limits">Limits</a>
+  </div>
+
+  <div class="footer">
+    <a href="/SKILL.md">SKILL.md</a> ·
+    <a href="/llms.txt">llms.txt</a> ·
+    <a href="https://github.com/pinax-network/substreams-websocket">GitHub</a>
+  </div>
+</nav>
+
+<main>
+  <section id="intro">
+    <h2>Introduction</h2>
+    <p class="lead">
+      substreams-websocket fans out decoded Substreams <code>DatabaseChanges</code> blocks
+      to any number of WebSocket subscribers. Stream identifiers follow the
+      Binance-style <code>&lt;network&gt;@&lt;stream&gt;</code> convention; <code>*</code> is a wildcard
+      on either side.
+    </p>
+    <p>
+      Connect to this server with any WebSocket client. The right panel
+      <span class="pill dim" style="font-size: 11px;">live try-it</span> lets you exercise the
+      API in-browser without leaving this page.
+    </p>
+  </section>
+
+  <section id="urls">
+    <h2>URL modes</h2>
+    <p>Two ways to connect, plus a wildcard star for either field.</p>
+    <table>
+      <thead>
+        <tr><th>URL</th><th>Mode</th><th>Envelope</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="method ws">WS</span><code>/ws/&lt;a&gt;</code></td>
+          <td>Single, path</td>
+          <td>raw payload</td>
+        </tr>
+        <tr>
+          <td><span class="method ws">WS</span><code>/ws/&lt;a&gt;/&lt;b&gt;/...</code></td>
+          <td>Multi, path</td>
+          <td>wrapped</td>
+        </tr>
+        <tr>
+          <td><span class="method ws">WS</span><code>/stream?streams=&lt;a&gt;/&lt;b&gt;/...</code></td>
+          <td>Combined, query</td>
+          <td>wrapped</td>
+        </tr>
+        <tr>
+          <td><span class="method http">GET</span><code>/healthz</code></td>
+          <td>Health check</td>
+          <td><code>200 ok</code></td>
+        </tr>
+      </tbody>
+    </table>
+    <p>When wrapped, every payload is delivered as:</p>
+<pre>{ "stream": "&lt;network&gt;@&lt;stream&gt;", "data": &lt;raw payload&gt; }</pre>
+    <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly.</p>
+  </section>
+
+  <section id="welcome">
+    <h2>Welcome message</h2>
+    <p>Sent once per connection. Lists every configured stream and echoes this connection's resolved subscriptions.</p>
+<pre>{
+  "type": "session",
+  "status": "connected",
+  "client_id": 1,
+  "streams": [
+    {
+      "stream": "swaps",
+      "network": "solana-mainnet",
+      "module": "db_out",
+      "manifest": "https://.../svm-dex-v0.5.1.spkg",
+      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797"
+    }
+  ],
+  "subscriptions": ["solana-mainnet@swaps"],
+  "wrap_envelope": false
+}</pre>
+  </section>
+
+  <section id="block">
+    <h2>Block payload</h2>
+    <p>One message per non-empty block. Empty blocks are skipped; their cursor is still persisted server-side.</p>
+<pre>{
+  "stream":      "swaps",
+  "network":     "solana-mainnet",
+  "block_num":   350000000,
+  "block_hash":  "Gsk6...",
+  "timestamp":   "2026-05-13 17:00:00",
+  "cursor":      "Mloz_-WpoBoZ...",
+  "module_hash": "bd388f2e...",
+  "events": [
+    {
+      "@table":        "swaps",
+      "input_amount":  "1287000000",
+      "input_mint":    "So11111111111111111111111111111111111111112",
+      "output_amount": "6848381008732",
+      "output_mint":   "13muFY...",
+      "protocol":      "raydium_cpmm",
+      "user":          "F2MUE..."
+    }
+  ]
+}</pre>
+    <p>Field rules:</p>
+    <ul>
+      <li><code>@table</code> identifies the source table per row. Prefixed so a real column literally named <code>table</code> can't shadow it.</li>
+      <li>Field values inside <code>events[*]</code> are <strong>strings</strong> on the wire (per DatabaseChanges proto). Numeric parsing is the consumer's job.</li>
+      <li>Row-level keys that duplicate top-level meta (<code>block_num</code>, <code>block_hash</code>, <code>timestamp</code>, <code>minute</code>) are stripped.</li>
+      <li>Upstream <code>ordinal</code>, <code>operation</code>, <code>pk</code>/<code>composite_pk</code>, <code>update_op</code> are dropped.</li>
+    </ul>
+  </section>
+
+  <section id="lifecycle">
+    <h2>Stream lifecycle</h2>
+    <p>Same connection, distinguished by <code>"type": "stream"</code>. Filtered by subscriptions just like block payloads.</p>
+<pre>{ "type": "stream", "status": "started",   ... }
+{ "type": "stream", "status": "completed", ... }
+{ "type": "stream", "status": "error",     ..., "message": "..." }
+{ "type": "stream", "status": "fatal",     ..., "message": "..." }
+{ "type": "stream", "status": "undo",      ..., "last_valid_block": 350000000 }</pre>
+    <p><code>undo</code> fires on chain reorganizations. Roll back any state materialized past <code>last_valid_block</code>.</p>
+  </section>
+
+  <section id="subscribe">
+    <h2>SUBSCRIBE</h2>
+    <p>Add to the per-connection subscription set. Idempotent.</p>
+<pre>// request
+{ "method": "SUBSCRIBE",
+  "params": ["solana-mainnet@swaps", "ethereum-mainnet@transfers"],
+  "id": 1 }
+
+// reply
+{ "result": null, "id": 1 }</pre>
+    <p>Wildcards accepted (<code>["*@swaps"]</code>). A single bad selector rejects the whole command — existing set unchanged. The <code>wrap_envelope</code> mode is fixed at upgrade time and is not affected by SUBSCRIBE.</p>
+  </section>
+
+  <section id="unsubscribe">
+    <h2>UNSUBSCRIBE</h2>
+    <p>Remove from the subscription set. Silent on unknown selectors.</p>
+<pre>// request
+{ "method": "UNSUBSCRIBE",
+  "params": ["ethereum-mainnet@transfers"],
+  "id": 2 }
+
+// reply
+{ "result": null, "id": 2 }</pre>
+    <p>To remove a wildcard subscription, pass the exact wildcard form (<code>*@swaps</code> removes the wildcard entry, not the individual streams it currently matches).</p>
+  </section>
+
+  <section id="list">
+    <h2>LIST_SUBSCRIPTIONS</h2>
+    <p>Inspect the current subscription set.</p>
+<pre>// request
+{ "method": "LIST_SUBSCRIPTIONS", "id": 3 }
+
+// reply
+{ "result": ["solana-mainnet@swaps", "ethereum-mainnet@*"], "id": 3 }</pre>
+    <p>Insertion order preserved. Wildcards returned verbatim, not expanded.</p>
+  </section>
+
+  <section id="cursors">
+    <h2>Cursors</h2>
+    <p>Every block payload includes <code>cursor</code>. To resume from an exact position across reconnects, persist the last cursor you processed and reconnect to a Substreams gRPC endpoint directly with it — this server has no replay buffer.</p>
+  </section>
+
+  <section id="heartbeats">
+    <h2>Heartbeats</h2>
+    <p>The server sends WebSocket ping frames every <code>SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS</code> seconds (default 180s). Standard WebSocket clients pong automatically. The server closes connections that do not pong within <code>SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS</code> seconds (default 600s).</p>
+  </section>
+
+  <section id="limits">
+    <h2>Limits</h2>
+    <ul>
+      <li><strong>No replay buffer.</strong> Disconnected clients miss broadcasts during the gap.</li>
+      <li><strong>One output type.</strong> Only <code>sf.substreams.sink.database.v1.DatabaseChanges</code>.</li>
+      <li><strong>Per-connection client buffer.</strong> Slow consumers are dropped per-message rather than blocking the ingest loop. Defaults to 1024 messages, configurable via <code>SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE</code>.</li>
+    </ul>
+  </section>
+</main>
+
+<aside class="try">
+  <header>
+    <h2>Try it</h2>
+    <div class="row">
+      <input id="url" type="text" />
+      <button id="connect">Connect</button>
+    </div>
+    <div class="row">
+      <button id="disconnect" disabled style="flex:1;">Disconnect</button>
+      <button id="clear" style="flex:1;">Clear log</button>
+      <span id="status" class="pill dim" style="align-self:center;">idle</span>
+    </div>
+    <div class="row">
+      <input id="cmd" type="text" placeholder='{"method":"LIST_SUBSCRIPTIONS","id":1}' />
+      <button id="send" disabled>Send</button>
+    </div>
+    <div class="tpl-row">
+      <button data-tpl="LIST_SUBSCRIPTIONS">LIST</button>
+      <button data-tpl="SUBSCRIBE">SUBSCRIBE</button>
+      <button data-tpl="UNSUBSCRIBE">UNSUBSCRIBE</button>
+    </div>
+  </header>
+  <div id="log"></div>
+</aside>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var urlEl = $('url');
+  var statusEl = $('status');
+  var logEl = $('log');
+  var connectBtn = $('connect');
+  var disconnectBtn = $('disconnect');
+  var sendBtn = $('send');
+  var cmdEl = $('cmd');
+  var ws = null;
+  var counter = 0;
+
+  var scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  urlEl.value = scheme + '://' + location.host + '/ws/*@*';
+
+  function setStatus(label, cls) {
+    statusEl.className = 'pill ' + cls;
+    statusEl.textContent = label;
+  }
+
+  function ts() {
+    var d = new Date();
+    return d.toISOString().slice(11, 23);
+  }
+
+  function append(kind, arrow, text) {
+    var div = document.createElement('div');
+    div.className = 'msg';
+    var t = document.createElement('span');
+    t.className = 't';
+    t.textContent = ts();
+    var a = document.createElement('span');
+    a.className = 'arrow ' + kind;
+    a.textContent = arrow;
+    var body = document.createElement('span');
+    body.textContent = text;
+    div.appendChild(t);
+    div.appendChild(a);
+    div.appendChild(body);
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function connect() {
+    var url = urlEl.value.trim();
+    if (!url) return;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      append('sys', '!', 'WebSocket constructor failed: ' + e.message);
+      return;
+    }
+    setStatus('connecting', 'dim');
+    connectBtn.disabled = true;
+    disconnectBtn.disabled = false;
+    sendBtn.disabled = false;
+    ws.onopen = function () {
+      setStatus('open', 'ok');
+      append('sys', '*', 'connected: ' + url);
+    };
+    ws.onmessage = function (ev) {
+      append('in', '<', typeof ev.data === 'string' ? ev.data : '<binary ' + ev.data.byteLength + 'B>');
+    };
+    ws.onerror = function () {
+      append('sys', '!', 'socket error (see browser console)');
+    };
+    ws.onclose = function (ev) {
+      setStatus('closed', 'err');
+      append('sys', '*', 'closed: code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
+      ws = null;
+      connectBtn.disabled = false;
+      disconnectBtn.disabled = true;
+      sendBtn.disabled = true;
+    };
+  }
+
+  connectBtn.onclick = connect;
+  disconnectBtn.onclick = function () { if (ws) ws.close(); };
+  $('clear').onclick = function () { logEl.innerHTML = ''; };
+
+  sendBtn.onclick = function () {
+    if (!ws || ws.readyState !== 1) return;
+    var text = cmdEl.value.trim();
+    if (!text) return;
+    ws.send(text);
+    append('out', '>', text);
+  };
+
+  cmdEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') sendBtn.click(); });
+  urlEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') connectBtn.click(); });
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-tpl]'), function (btn) {
+    btn.onclick = function () {
+      counter += 1;
+      var method = btn.getAttribute('data-tpl');
+      var body;
+      if (method === 'LIST_SUBSCRIPTIONS') {
+        body = { method: method, id: counter };
+      } else {
+        body = { method: method, params: ['*@swaps'], id: counter };
+      }
+      cmdEl.value = JSON.stringify(body);
+      cmdEl.focus();
+    };
+  });
+
+  // Highlight active sidebar link as user scrolls.
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.side a[href^="#"]'));
+  var sections = links.map(function (a) {
+    var id = a.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    return el ? { a: a, el: el } : null;
+  }).filter(Boolean);
+  function syncActive() {
+    var top = document.querySelector('main').scrollTop + 80;
+    var current = sections[0];
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].el.offsetTop <= top) current = sections[i];
+    }
+    sections.forEach(function (s) { s.a.classList.toggle('active', s === current); });
+  }
+  document.querySelector('main').addEventListener('scroll', syncActive);
+  syncActive();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+# substreams-websocket
+
+> Real-time WebSocket fan-out server for Substreams `DatabaseChanges`. Decodes
+> blocks from any `db_out`-style Substreams package and broadcasts them as JSON
+> to connected WebSocket subscribers. URL conventions mirror Binance market
+> streams: stream selectors are `<network>@<stream>` with `*` wildcards on
+> either side.
+
+## Connecting
+
+- `wss://<host>/ws/<network>@<stream>` — single stream, raw payloads.
+- `wss://<host>/ws/<a>/<b>/...` — multi stream, payloads wrapped as `{"stream":"<id>","data":<raw>}`.
+- `wss://<host>/stream?streams=<a>/<b>/...` — query mode, always wrapped.
+- Bare `/ws` returns HTTP 400; use `/ws/*@*` to subscribe to every stream.
+
+## Block payload
+
+```
+{
+  "stream":      "swaps",
+  "network":     "solana-mainnet",
+  "block_num":   350000000,
+  "block_hash":  "Gsk6...",
+  "timestamp":   "2026-05-13 17:00:00",
+  "cursor":      "Mloz_-WpoBoZ...",
+  "module_hash": "bd388f2e...",
+  "events": [
+    { "@table": "swaps", "input_amount": "1287000000", ... }
+  ]
+}
+```
+
+All event field values are strings on the wire. `@table` identifies the source DB table per row. `cursor` is opaque and can be used to backfill from a Substreams gRPC endpoint directly — this server has no replay buffer.
+
+## Live commands
+
+Send a JSON text frame on the connected socket:
+
+```
+{ "method": "SUBSCRIBE",         "params": ["solana-mainnet@swaps"], "id": 1 }
+{ "method": "UNSUBSCRIBE",       "params": ["solana-mainnet@swaps"], "id": 2 }
+{ "method": "LIST_SUBSCRIPTIONS", "id": 3 }
+```
+
+Replies are `{"result": null | [...], "id": <echoed>}`. Errors are `{"error": "...", "id": <echoed>}` and do not close the socket.
+
+## Resources
+
+- [SKILL.md](/SKILL.md): full agent-oriented reference.
+- [GitHub](https://github.com/pinax-network/substreams-websocket): source, releases, Docker image, Railway recipe.
+- `/`: interactive in-browser client (Scalar-style API reference + try-it panel).
