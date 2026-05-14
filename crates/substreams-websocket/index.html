@@ -362,9 +362,14 @@
   .msg.is-in  { border-left-color: var(--accent); background: rgba(10,132,255,0.04); }
   .msg.is-out { border-left-color: var(--good);   background: rgba(52,199,89,0.05); }
   .msg.is-sys { border-left-color: transparent; background: transparent; }
+  /* WS protocol/control messages (session, stream lifecycle, command replies)
+     get a distinct purple tint so they don't blend with data payloads. */
+  .msg.is-ctrl { border-left-color: #5e5ce6; background: rgba(94,92,230,0.06); }
+  .msg.is-ctrl .meta .arrow { color: #5e5ce6; }
   @media (prefers-color-scheme: dark) {
-    .msg.is-in  { background: rgba(10,132,255,0.07); }
-    .msg.is-out { background: rgba(52,199,89,0.08); }
+    .msg.is-in   { background: rgba(10,132,255,0.07); }
+    .msg.is-out  { background: rgba(52,199,89,0.08); }
+    .msg.is-ctrl { background: rgba(94,92,230,0.10); }
   }
   /* Filter modes: hide the messages that don't match. */
   #log.filter-in  .msg.is-out { display: none; }
@@ -1067,6 +1072,17 @@
 
     var info = parsed !== null ? describeJson(parsed) : { compact: false, summary: '' };
 
+    // Tag WS protocol/control payloads (session, stream lifecycle, command
+    // request/reply) so they get a distinct visual tint from data payloads.
+    var isCtrl = parsed !== null && (
+      parsed.type === 'session' ||
+      parsed.type === 'stream'  ||
+      typeof parsed.method === 'string' ||
+      parsed.result !== undefined ||
+      parsed.error !== undefined
+    );
+    if (isCtrl) div.classList.add('is-ctrl');
+
     // All JSON messages start collapsed; the user expands what they want.
 
     var meta = document.createElement('div');
@@ -1161,6 +1177,8 @@
   // of memory rendering them. Server-to-server clients have no such cap.
   var AUTO_DISCONNECT_MS = 5000;
   var autoTimer = null;
+  var countdownTimer = null;
+  var autoDeadline = 0;
 
   function connect() {
     var url = urlEl.value.trim();
@@ -1176,9 +1194,21 @@
     disconnectBtn.disabled = false;
     sendBtn.disabled = false;
     ws.onopen = function () {
-      setStatus('open', 'ok');
       append('sys', '*', 'connected: ' + url + ' (auto-disconnect in ' + (AUTO_DISCONNECT_MS / 1000) + 's)');
       if (autoTimer) clearTimeout(autoTimer);
+      if (countdownTimer) clearInterval(countdownTimer);
+      autoDeadline = Date.now() + AUTO_DISCONNECT_MS;
+      var tick = function () {
+        var remaining = autoDeadline - Date.now();
+        if (remaining <= 0) {
+          setStatus('closing…', 'err');
+          return;
+        }
+        var secs = (remaining / 1000).toFixed(1);
+        setStatus('open · ' + secs + 's left', 'ok');
+      };
+      tick();
+      countdownTimer = setInterval(tick, 100);
       autoTimer = setTimeout(function () {
         if (ws && ws.readyState === 1) {
           append('sys', '*', 'auto-disconnecting after ' + (AUTO_DISCONNECT_MS / 1000) + 's to protect the browser');
@@ -1194,6 +1224,7 @@
     };
     ws.onclose = function (ev) {
       if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+      if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
       setStatus('closed', 'err');
       append('sys', '*', 'closed: code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
       ws = null;
