@@ -103,6 +103,7 @@
     vertical-align: 1px;
   }
   nav.side a.active .chip { background: rgba(255,255,255,0.25); }
+  nav.side a .chip.get { background: #34c759; }
   nav.side .footer { color: var(--muted); font-size: 12px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
   nav.side .footer a { display: inline; padding: 0; color: var(--accent); }
 
@@ -162,6 +163,58 @@
     color: var(--muted);
     line-height: 1.5;
   }
+
+  .streams-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 6px 0 18px;
+  }
+  .streams-list .stream-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    background: var(--code-bg);
+    cursor: pointer;
+    transition: border-color 120ms, transform 120ms;
+    position: relative;
+  }
+  .streams-list .stream-card:hover { border-color: var(--accent); }
+  .streams-list .stream-card.copied { border-color: var(--good); }
+  .streams-list .stream-id {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 4px;
+    word-break: break-all;
+  }
+  .streams-list .stream-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin: 0 0 6px;
+  }
+  .streams-list .stream-meta {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+  }
+  .streams-list .stream-meta span code { background: transparent; padding: 0; }
+  .streams-list .stream-copied {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    font-size: 11px;
+    color: var(--good);
+    opacity: 0;
+    transition: opacity 120ms;
+    font-family: var(--mono);
+  }
+  .streams-list .stream-card.copied .stream-copied { opacity: 1; }
   .method {
     display: inline-block;
     font-family: var(--mono);
@@ -321,7 +374,16 @@
   <div class="group">
     <div class="group-title">Overview</div>
     <a href="#intro">Introduction</a>
+    <a href="#streams">Streams</a>
     <a href="#urls">URL modes</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">HTTP</div>
+    <a href="/streams" target="_blank"><span class="chip get">GET</span>/streams</a>
+    <a href="/healthz" target="_blank"><span class="chip get">GET</span>/healthz</a>
+    <a href="/SKILL.md" target="_blank"><span class="chip get">GET</span>/SKILL.md</a>
+    <a href="/llms.txt" target="_blank"><span class="chip get">GET</span>/llms.txt</a>
   </div>
 
   <div class="group">
@@ -378,9 +440,17 @@
     </p>
   </section>
 
+  <section id="streams">
+    <h2>Available streams</h2>
+    <p>Live snapshot of every stream this server is configured to broadcast. Click a tile to copy its <code>network@stream</code> selector. Data sourced from <a href="/streams" target="_blank"><code>GET /streams</code></a>.</p>
+    <div id="streams-list" class="streams-list">
+      <p class="streams-loading" style="color: var(--muted); font-size: 13px;">Loading from <code>/streams</code>…</p>
+    </div>
+  </section>
+
   <section id="urls">
     <h2>URL modes</h2>
-    <p>Two ways to connect, plus a wildcard star for either field.</p>
+    <p>Stream selectors are <code>&lt;network&gt;@&lt;stream&gt;</code>. <code>*</code> is a wildcard on either side. Two ways to connect:</p>
     <table>
       <thead>
         <tr><th>URL</th><th>Mode</th><th>Envelope</th></tr>
@@ -401,26 +471,11 @@
           <td>Combined, query</td>
           <td>wrapped</td>
         </tr>
-        <tr>
-          <td><span class="method http">GET</span><code>/healthz</code></td>
-          <td>Health check</td>
-          <td><code>200 ok</code></td>
-        </tr>
-        <tr>
-          <td><span class="method http">GET</span><code><a href="/SKILL.md">/SKILL.md</a></code></td>
-          <td>Agent reference</td>
-          <td><code>text/markdown</code></td>
-        </tr>
-        <tr>
-          <td><span class="method http">GET</span><code><a href="/llms.txt">/llms.txt</a></code></td>
-          <td>llms.txt summary</td>
-          <td><code>text/plain</code></td>
-        </tr>
       </tbody>
     </table>
     <p>When wrapped, every payload is delivered as:</p>
 <pre>{ "stream": "&lt;network&gt;@&lt;stream&gt;", "data": &lt;raw payload&gt; }</pre>
-    <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly.</p>
+    <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly. See the <strong>HTTP</strong> group in the sidebar for non-WebSocket endpoints (<code>/streams</code>, <code>/healthz</code>, <code>/SKILL.md</code>, <code>/llms.txt</code>).</p>
   </section>
 
   <section id="welcome">
@@ -768,6 +823,75 @@
       cmdEl.focus();
     };
   });
+
+  // Populate the "Available streams" section by fetching /streams.
+  (function loadStreams() {
+    var host = document.getElementById('streams-list');
+    if (!host) return;
+    fetch('/streams')
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (streams) {
+        if (!Array.isArray(streams) || streams.length === 0) {
+          host.innerHTML = '<p style="color: var(--muted); font-size: 13px;">No streams configured.</p>';
+          return;
+        }
+        host.innerHTML = '';
+        streams.forEach(function (s) {
+          var id = (s.network || '*') + '@' + (s.stream || '*');
+          var card = document.createElement('div');
+          card.className = 'stream-card';
+          card.setAttribute('data-id', id);
+          card.title = 'Click to copy ' + id;
+
+          var idEl = document.createElement('div');
+          idEl.className = 'stream-id';
+          idEl.textContent = id;
+          card.appendChild(idEl);
+
+          if (s.description) {
+            var desc = document.createElement('p');
+            desc.className = 'stream-desc';
+            desc.textContent = s.description;
+            card.appendChild(desc);
+          }
+
+          var meta = document.createElement('div');
+          meta.className = 'stream-meta';
+          var parts = [];
+          if (s.package_name)    parts.push({ k: 'package', v: s.package_name + (s.package_version ? ' ' + s.package_version : '') });
+          if (s.module)          parts.push({ k: 'module',  v: s.module });
+          if (s.module_hash)     parts.push({ k: 'hash',    v: s.module_hash.slice(0, 12) + '…' });
+          parts.forEach(function (p) {
+            var span = document.createElement('span');
+            span.innerHTML = p.k + ' <code>' + escapeHtml(p.v) + '</code>';
+            meta.appendChild(span);
+          });
+          card.appendChild(meta);
+
+          var copied = document.createElement('span');
+          copied.className = 'stream-copied';
+          copied.textContent = '✓ copied';
+          card.appendChild(copied);
+
+          card.addEventListener('click', function () {
+            var text = id;
+            var done = function () {
+              card.classList.add('copied');
+              setTimeout(function () { card.classList.remove('copied'); }, 1200);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text).then(done, done);
+            } else {
+              done();
+            }
+          });
+          host.appendChild(card);
+        });
+      })
+      .catch(function (err) {
+        host.innerHTML = '<p style="color: var(--bad); font-size: 13px;">Failed to load /streams (' + err + ').</p>';
+      });
+  })();
 
   // Syntax-highlight every JSON example in the docs <pre> blocks.
   // Detected by content — blocks that begin with { or [ are parsed and

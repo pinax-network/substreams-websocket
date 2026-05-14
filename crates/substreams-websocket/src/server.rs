@@ -64,6 +64,15 @@ struct StreamMeta {
     module: String,
     manifest: String,
     module_hash: String,
+    /// Top-level spkg name from Package.package_meta[0].name, when present.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    package_name: String,
+    /// Top-level spkg version from Package.package_meta[0].version, when present.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    package_version: String,
+    /// Package description sourced from PackageMetadata.description or PackageMetadata.doc.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    description: String,
 }
 
 pub async fn serve(config: Config) -> Result<(), ServerError> {
@@ -129,6 +138,7 @@ fn build_app(state: AppState) -> Router {
     let stream_path = state.config.websocket.stream_path.clone();
     Router::new()
         .route("/", get(landing_html))
+        .route("/streams", get(streams_json))
         .route("/SKILL.md", get(skill_md))
         .route("/llms.txt", get(llms_txt))
         .route("/favicon.ico", get(favicon_png))
@@ -156,6 +166,12 @@ async fn skill_md() -> impl IntoResponse {
 
 async fn llms_txt() -> impl IntoResponse {
     ([("content-type", "text/plain; charset=utf-8")], LLMS_TXT)
+}
+
+async fn streams_json(State(state): State<AppState>) -> impl IntoResponse {
+    let body =
+        serde_json::to_string(state.streams_meta.as_ref()).unwrap_or_else(|_| "[]".to_owned());
+    ([("content-type", "application/json; charset=utf-8")], body)
 }
 
 async fn favicon_png() -> impl IntoResponse {
@@ -189,18 +205,41 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
     let module = stream.substreams.module.clone();
     let name = stream.name.clone();
 
+    let make_meta = |module_hash: String,
+                     pkg: Option<&crate::substreams::pb::sf::substreams::v1::Package>|
+     -> StreamMeta {
+        let (pkg_name, pkg_version, description) = pkg
+            .and_then(|p| p.package_meta.first())
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    m.version.clone(),
+                    if !m.description.is_empty() {
+                        m.description.clone()
+                    } else {
+                        m.doc.clone()
+                    },
+                )
+            })
+            .unwrap_or_default();
+        StreamMeta {
+            name: name.clone(),
+            network: network.clone(),
+            module: module.clone(),
+            manifest: manifest.clone(),
+            module_hash,
+            package_name: pkg_name,
+            package_version: pkg_version,
+            description,
+        }
+    };
+
     let package = match load_package(&manifest).await {
         Ok(package) => package,
         Err(error) => {
             return PreparedStream {
                 config: stream,
-                meta: StreamMeta {
-                    name,
-                    network,
-                    module,
-                    manifest,
-                    module_hash: String::new(),
-                },
+                meta: make_meta(String::new(), None),
                 package: None,
                 error: Some(error.to_string()),
             };
@@ -210,13 +249,7 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
     let Some(modules_pb) = package.modules.as_ref() else {
         return PreparedStream {
             config: stream,
-            meta: StreamMeta {
-                name,
-                network,
-                module,
-                manifest,
-                module_hash: String::new(),
-            },
+            meta: make_meta(String::new(), Some(&package)),
             package: None,
             error: Some("package contains no modules".to_owned()),
         };
@@ -229,13 +262,7 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
     if output_type != SUPPORTED_OUTPUT_TYPE {
         return PreparedStream {
             config: stream,
-            meta: StreamMeta {
-                name,
-                network,
-                module: module.clone(),
-                manifest,
-                module_hash: String::new(),
-            },
+            meta: make_meta(String::new(), Some(&package)),
             package: None,
             error: Some(format!(
                 "module {module:?} output type {output_type:?} is not supported; only {SUPPORTED_OUTPUT_TYPE} is accepted"
@@ -246,25 +273,13 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
     match compute_module_hash_hex(modules_pb, &module) {
         Ok(module_hash) => PreparedStream {
             config: stream,
-            meta: StreamMeta {
-                name,
-                network,
-                module,
-                manifest,
-                module_hash,
-            },
+            meta: make_meta(module_hash, Some(&package)),
             package: Some(package),
             error: None,
         },
         Err(error) => PreparedStream {
             config: stream,
-            meta: StreamMeta {
-                name,
-                network,
-                module,
-                manifest,
-                module_hash: String::new(),
-            },
+            meta: make_meta(String::new(), Some(&package)),
             package: None,
             error: Some(error.to_string()),
         },
@@ -1665,6 +1680,9 @@ mod tests {
                         module: s.substreams.module.clone(),
                         manifest: s.substreams.manifest.clone(),
                         module_hash: String::new(),
+                        package_name: String::new(),
+                        package_version: String::new(),
+                        description: String::new(),
                     })
                     .collect::<Vec<_>>(),
             );
