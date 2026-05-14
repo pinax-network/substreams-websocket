@@ -37,13 +37,9 @@
     background: var(--bg);
     color: var(--fg);
     display: grid;
-    grid-template-columns: 240px 1fr 420px;
+    grid-template-columns: 240px 1fr;
     grid-template-rows: 100vh;
     overflow: hidden;
-  }
-  @media (max-width: 1100px) {
-    body { grid-template-columns: 200px 1fr; }
-    aside.try { display: none; }
   }
   @media (max-width: 760px) {
     body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
@@ -228,44 +224,104 @@
   .method.ws { background: #5e5ce6; }
   .method.http { background: var(--good); }
 
-  /* --- try-it sidebar --- */
-  aside.try {
-    background: var(--sidebar-bg);
-    border-left: 1px solid var(--border);
+  /* --- Try it modal --- */
+  .tryit-fab {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 50;
+    padding: 12px 18px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    box-shadow: 0 6px 24px rgba(10,132,255,0.35), 0 2px 8px rgba(0,0,0,0.12);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 120ms, box-shadow 120ms;
+  }
+  .tryit-fab:hover { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(10,132,255,0.45), 0 3px 10px rgba(0,0,0,0.15); }
+  .tryit-fab svg { width: 16px; height: 16px; }
+
+  .tryit-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 28px;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .tryit-modal.open { display: flex; }
+  .tryit {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 1200px;
+    height: 100%;
+    max-height: calc(100vh - 56px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.35);
   }
-  aside.try header {
-    padding: 14px 16px;
+  .tryit header {
+    padding: 18px 22px;
     border-bottom: 1px solid var(--border);
+    background: var(--sidebar-bg);
   }
-  aside.try header h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
-  aside.try .row { display: flex; gap: 6px; margin-bottom: 6px; }
-  aside.try input, aside.try button {
+  .tryit header h2 {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .tryit-close {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 22px;
+    line-height: 1;
+    padding: 0 4px;
+  }
+  .tryit-close:hover { color: var(--fg); }
+  .tryit .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .tryit input, .tryit button {
     font: inherit;
-    padding: 5px 9px;
+    padding: 7px 11px;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--fg);
   }
-  aside.try input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; }
-  aside.try button { cursor: pointer; }
-  aside.try button:disabled { opacity: 0.5; cursor: not-allowed; }
-  aside.try .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--border); color: var(--muted); font-family: var(--mono); display: inline-block; }
-  aside.try .pill.ok  { background: rgba(52,199,89,0.15);  color: var(--good); }
-  aside.try .pill.err { background: rgba(255,59,48,0.15);  color: var(--bad); }
-  aside.try .pill.dim { background: var(--border); color: var(--muted); }
-  aside.try .tpl-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
-  aside.try .tpl-row button { padding: 3px 8px; font-size: 11px; }
-  aside.try #log {
+  .tryit input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; }
+  .tryit button { cursor: pointer; }
+  .tryit button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .tryit .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--border); color: var(--muted); font-family: var(--mono); display: inline-block; }
+  .tryit .pill.ok  { background: rgba(52,199,89,0.15);  color: var(--good); }
+  .tryit .pill.err { background: rgba(255,59,48,0.15);  color: var(--bad); }
+  .tryit .pill.dim { background: var(--border); color: var(--muted); }
+  .tryit .tpl-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .tryit .tpl-row button { padding: 4px 10px; font-size: 12px; }
+  .tryit #log {
     flex: 1;
     overflow-y: auto;
-    padding: 10px 16px;
+    padding: 16px 22px;
     font-family: var(--mono);
-    font-size: 11.5px;
-    line-height: 1.5;
+    font-size: 12px;
+    line-height: 1.55;
   }
   .msg { padding: 8px 0; border-bottom: 1px solid var(--border); }
   .msg:last-child { border-bottom: 0; }
@@ -436,7 +492,7 @@
     </div>
 
     <p style="color: var(--muted); font-size: 13px;">
-      Try it live in the <span class="pill dim" style="font-size: 11px;">right panel</span> — connect, subscribe, and watch blocks roll in without leaving this page.
+      Use the <strong>Try it</strong> button in the bottom-right corner to open a full-screen WebSocket client — connect, subscribe, and watch blocks roll in without leaving this page.
     </p>
   </section>
 
@@ -599,30 +655,40 @@
   </section>
 </main>
 
-<aside class="try">
-  <header>
-    <h2>Try it</h2>
-    <div class="row">
-      <input id="url" type="text" />
-      <button id="connect">Connect</button>
-    </div>
-    <div class="row">
-      <button id="disconnect" disabled style="flex:1;">Disconnect</button>
-      <button id="clear" style="flex:1;">Clear log</button>
-      <span id="status" class="pill dim" style="align-self:center;">idle</span>
-    </div>
-    <div class="row">
-      <input id="cmd" type="text" placeholder='{"method":"LIST_SUBSCRIPTIONS","id":1}' />
-      <button id="send" disabled>Send</button>
-    </div>
-    <div class="tpl-row">
-      <button data-tpl="LIST_SUBSCRIPTIONS">LIST</button>
-      <button data-tpl="SUBSCRIBE">SUBSCRIBE</button>
-      <button data-tpl="UNSUBSCRIBE">UNSUBSCRIBE</button>
-    </div>
-  </header>
-  <div id="log"></div>
-</aside>
+<button class="tryit-fab" id="tryit-open" type="button" aria-label="Open the Try it client">
+  <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+    <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm3.78 8.78-4.5 4.5a.75.75 0 0 1-1.06-1.06l3.97-3.97-3.97-3.97a.75.75 0 1 1 1.06-1.06l4.5 4.5a.75.75 0 0 1 0 1.06Z"/>
+  </svg>
+  Try it
+</button>
+
+<div class="tryit-modal" id="tryit-modal" role="dialog" aria-modal="true" aria-labelledby="tryit-title">
+  <div class="tryit">
+    <header>
+      <h2 id="tryit-title">
+        Try it
+        <button class="tryit-close" id="tryit-close" type="button" aria-label="Close">×</button>
+      </h2>
+      <div class="row">
+        <input id="url" type="text" />
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <button id="clear">Clear log</button>
+        <span id="status" class="pill dim" style="align-self:center;">idle</span>
+      </div>
+      <div class="row">
+        <input id="cmd" type="text" placeholder='{"method":"LIST_SUBSCRIPTIONS","id":1}' />
+        <button id="send" disabled>Send</button>
+      </div>
+      <div class="tpl-row">
+        <button data-tpl="LIST_SUBSCRIPTIONS">LIST_SUBSCRIPTIONS</button>
+        <button data-tpl="SUBSCRIBE">SUBSCRIBE</button>
+        <button data-tpl="UNSUBSCRIBE">UNSUBSCRIBE</button>
+      </div>
+    </header>
+    <div id="log"></div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -808,6 +874,26 @@
 
   cmdEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') sendBtn.click(); });
   urlEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') connectBtn.click(); });
+
+  // Modal open/close.
+  var modalEl = document.getElementById('tryit-modal');
+  var openBtn = document.getElementById('tryit-open');
+  var closeBtn = document.getElementById('tryit-close');
+  function openModal() {
+    modalEl.classList.add('open');
+    setTimeout(function () { urlEl.focus(); }, 50);
+  }
+  function closeModal() {
+    modalEl.classList.remove('open');
+  }
+  openBtn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  modalEl.addEventListener('click', function (e) {
+    if (e.target === modalEl) closeModal();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && modalEl.classList.contains('open')) closeModal();
+  });
 
   Array.prototype.forEach.call(document.querySelectorAll('[data-tpl]'), function (btn) {
     btn.onclick = function () {
