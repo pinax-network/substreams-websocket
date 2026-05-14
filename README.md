@@ -54,7 +54,7 @@ curl http://127.0.0.1:8080/healthz
 # -> ok
 
 # 5. Open a WebSocket and watch blocks roll in
-npx wscat -c 'ws://127.0.0.1:8080/ws?subscribe=*:*'
+npx wscat -c 'ws://127.0.0.1:8080/ws/*@*'
 ```
 
 You don't pass `--streams` because the server picks up `./streams.toml` by default.
@@ -96,6 +96,7 @@ Configuration is split deliberately: **secrets and single-value runtime settings
 | Runtime | `SUBSTREAMS_FINAL_BLOCKS_ONLY` | `false` | Skip un-finalized blocks. |
 | Runtime | `SUBSTREAMS_PLAINTEXT` / `SUBSTREAMS_INSECURE` | `false` | TLS toggles for non-public endpoints. |
 | Server | `SUBSTREAMS_WEBSOCKET_STREAMS` | `./streams.toml` | Path to the streams TOML. |
+| Server | `SUBSTREAMS_WEBSOCKET_STREAM_PATH` | `/stream` | Query-mode route (Binance combined-stream style). |
 | Server | `SUBSTREAMS_WEBSOCKET_LISTEN` | `127.0.0.1:8080` | HTTP/WS listen address. |
 | Server | `SUBSTREAMS_WEBSOCKET_WS_PATH` | `/ws` | WebSocket route. |
 | Server | `SUBSTREAMS_WEBSOCKET_HEALTH_PATH` | `/healthz` | Health-check route. |
@@ -178,38 +179,64 @@ only proto:sf.substreams.sink.database.v1.DatabaseChanges is accepted
 
 ## WebSocket API
 
-Connect to `ws://<host>:<port>/ws`. The server speaks four message types.
+The WebSocket API mirrors Binance's market-streams URL conventions. Stream selectors are written `<network>@<stream>` (e.g. `solana-mainnet@swaps`). `*` is a wildcard on either side.
 
-### Subscribing to specific streams
+### Connecting
 
-Connections **must** declare what they want to receive. Pass one or more `subscribe=<network>:<stream>` query parameters at upgrade time. A connection with no `subscribe=` parameter is rejected with `HTTP 400`. The server pushes a payload only when the entry's `(network, stream)` matches at least one filter.
+Two modes are supported:
+
+**`ws` mode** — streams in the URL path:
 
 ```
-# only Solana swaps
-ws://host:8080/ws?subscribe=solana-mainnet:swaps
+# Single stream — raw payloads, no envelope
+ws://host:8080/ws/solana-mainnet@swaps
 
-# Solana swaps AND Ethereum transfers
-ws://host:8080/ws?subscribe=solana-mainnet:swaps&subscribe=ethereum-mainnet:transfers
+# Multiple streams — payloads wrapped: {"stream":"<id>","data":<raw>}
+ws://host:8080/ws/solana-mainnet@swaps/ethereum-mainnet@transfers
 
-# comma-separated form (equivalent to above)
-ws://host:8080/ws?subscribe=solana-mainnet:swaps,ethereum-mainnet:transfers
-
-# every "swaps" stream regardless of chain
-ws://host:8080/ws?subscribe=*:swaps
-
-# every Solana stream
-ws://host:8080/ws?subscribe=solana-mainnet:*
-
-# explicit "give me everything" — required if you actually want all streams
-ws://host:8080/ws?subscribe=*:*
+# Wildcards
+ws://host:8080/ws/*@swaps              # every "swaps" stream
+ws://host:8080/ws/solana-mainnet@*     # every Solana stream
+ws://host:8080/ws/*@*                  # every stream (always wrapped — >1 stream)
 ```
 
-- `*` is the wildcard for either field.
-- Multiple filters are **OR**-combined.
-- A missing or empty `subscribe=` parameter is rejected with `HTTP 400`. Pass `subscribe=*:*` to opt into all streams explicitly.
-- An entry without a `:` is rejected with HTTP 400.
-- The session welcome message echoes the parsed filter (see below) so clients can confirm what was applied. The welcome itself is always sent.
-- Stream lifecycle (`started`, `error`, `undo`, ...) messages are filtered the same way — a client subscribed to `solana-mainnet:swaps` does not see lifecycle events from other streams.
+**`stream` mode** — streams in query string. Always wraps payloads:
+
+```
+ws://host:8080/stream?streams=solana-mainnet@swaps/ethereum-mainnet@transfers
+ws://host:8080/stream?streams=*@swaps
+ws://host:8080/stream?streams=*@*
+```
+
+Connecting to bare `/ws` with no path streams is rejected with `HTTP 400`. The server pushes a payload only when the broadcasted `(network, stream)` matches at least one of the connection's subscriptions.
+
+### Live SUBSCRIBE / UNSUBSCRIBE / LIST_SUBSCRIPTIONS
+
+The connected socket accepts JSON commands and replies with a matching `{"result", "id"}` object — same shape as Binance's market streams:
+
+```json
+// Add subscriptions (idempotent)
+{ "method": "SUBSCRIBE",
+  "params": ["solana-mainnet@swaps", "ethereum-mainnet@transfers"],
+  "id": 1 }
+// -> {"result": null, "id": 1}
+
+// Remove subscriptions
+{ "method": "UNSUBSCRIBE",
+  "params": ["ethereum-mainnet@transfers"],
+  "id": 2 }
+// -> {"result": null, "id": 2}
+
+// Query current subscriptions
+{ "method": "LIST_SUBSCRIPTIONS", "id": 3 }
+// -> {"result": ["solana-mainnet@swaps"], "id": 3}
+```
+
+Wildcards are honored in `params` (e.g. `*@swaps`). Unknown methods, missing `:`/`@` separators, and malformed JSON return `{"error": "...", "id": <id-or-null>}`.
+
+### Lifecycle messages and filtering
+
+Stream lifecycle messages (`started`, `error`, `undo`, ...) are filtered the same way as block payloads: a client subscribed to `solana-mainnet@swaps` does not see lifecycle events from other streams. The session welcome itself is always sent and echoes the parsed subscriptions and envelope mode.
 
 ### 1. `session` -- sent once on connect
 
@@ -234,13 +261,12 @@ ws://host:8080/ws?subscribe=*:*
       "module_hash": "673da4a738be4a99d6dc3c421f2b5744d4c7a2b9"
     }
   ],
-  "filter": [
-    { "network": "solana-mainnet", "stream": "swaps" }
-  ]
+  "subscriptions": ["solana-mainnet@swaps"],
+  "wrap_envelope": false
 }
 ```
 
-`filter` echoes whatever `subscribe=` entries the client passed on the URL. The array always has at least one entry — connecting without a filter is rejected at the HTTP layer. `*` is preserved verbatim for wildcards.
+`subscriptions` echoes whatever stream selectors the client passed in the URL path or query. `wrap_envelope` is `true` for `/stream?streams=...` and for `/ws` connections with more than one stream — when `true`, every payload (block and lifecycle) is wrapped as `{"stream":"<network>@<stream>","data":<payload>}` so clients can demultiplex.
 
 The `module_hash` is the canonical Substreams SHA-1 of the configured output module. Compare it to `substreams info <spkg>` to detect spkg upgrades.
 
@@ -380,7 +406,6 @@ There is no Dockerfile or unit file in-tree yet. The binary is a single static-i
 ## Known limitations
 
 - **No replay buffer.** Disconnected clients miss broadcasts during the gap.
-- **No subscribe protocol after connect.** The filter is fixed at connection time via the URL `subscribe=` query parameter. Reconnect with a different filter to change subscriptions.
 - **One output type.** Only `sf.substreams.sink.database.v1.DatabaseChanges` is supported.
 
 ---

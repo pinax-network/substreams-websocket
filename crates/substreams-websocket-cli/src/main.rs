@@ -160,6 +160,13 @@ struct WebSocketArgs {
 
     #[arg(
         long,
+        env = "SUBSTREAMS_WEBSOCKET_STREAM_PATH",
+        default_value = "/stream"
+    )]
+    stream_path: String,
+
+    #[arg(
+        long,
         env = "SUBSTREAMS_WEBSOCKET_HEALTH_PATH",
         default_value = "/healthz"
     )]
@@ -198,6 +205,7 @@ impl WebSocketArgs {
         WebSocketConfig {
             listen: self.listen,
             ws_path: self.ws_path,
+            stream_path: self.stream_path,
             health_path: self.health_path,
             heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
             heartbeat_timeout: Duration::from_secs(self.heartbeat_timeout_secs),
