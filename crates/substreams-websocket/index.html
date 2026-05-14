@@ -236,6 +236,7 @@
   .jnum  { color: #ff9500; }
   .jbool { color: #ff9500; }
   .jnull { color: var(--muted); }
+  .jcomment { color: var(--muted); font-style: italic; }
   @media (prefers-color-scheme: dark) {
     .jkey  { color: #bf5af2; }
     .jstr  { color: #30d158; }
@@ -663,6 +664,33 @@
       cmdEl.value = JSON.stringify(body);
       cmdEl.focus();
     };
+  });
+
+  // Syntax-highlight every JSON example in the docs <pre> blocks.
+  // Detected by content — blocks that begin with { or [ are parsed and
+  // re-rendered with highlightJson. Comment lines (`// ...`) are kept as-is
+  // and styled as muted comments.
+  Array.prototype.forEach.call(document.querySelectorAll('main pre'), function (pre) {
+    var raw = pre.textContent;
+    var trimmed = raw.replace(/^\s+/, '');
+    if (!(trimmed[0] === '{' || trimmed[0] === '[' || /^\/\//.test(trimmed))) return;
+
+    var html = raw
+      .split('\n')
+      .map(function (line) {
+        // Comment line: render as a muted comment, leave the rest of the line raw.
+        if (/^\s*\/\//.test(line)) {
+          return '<span class="jcomment">' + escapeHtml(line) + '</span>';
+        }
+        // Try to highlight the trimmed line as JSON tokens.
+        try {
+          return highlightJson(line);
+        } catch (_) {
+          return escapeHtml(line);
+        }
+      })
+      .join('\n');
+    pre.innerHTML = html;
   });
 
   // Highlight active sidebar link as user scrolls.
