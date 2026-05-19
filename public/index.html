@@ -961,11 +961,21 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
         <button data-tpl="LIST_SUBSCRIPTIONS">LIST_SUBSCRIPTIONS</button>
         <button data-tpl="SUBSCRIBE">SUBSCRIBE</button>
         <button data-tpl="UNSUBSCRIBE">UNSUBSCRIBE</button>
+        <button data-tpl="LIST_FILTERS">LIST_FILTERS</button>
+        <button data-tpl="CLEAR_FILTER">CLEAR_FILTER</button>
         <span class="tryit-filter" role="group" aria-label="Filter messages">
           <button data-filter="all"  class="active" type="button">All</button>
           <button data-filter="in"   type="button">Received</button>
           <button data-filter="out"  type="button">Sent</button>
         </span>
+      </div>
+      <div class="tpl-row" id="filter-presets">
+        <span style="font-size:11px; color: var(--muted); align-self:center; margin-right:4px;">SET_FILTER presets:</span>
+        <button data-filter-preset='{"protocol":"raydium_cpmm"}'>protocol=raydium_cpmm</button>
+        <button data-filter-preset='{"protocol":["raydium_cpmm","pump_fun"]}'>protocol IN (raydium_cpmm, pump_fun)</button>
+        <button data-filter-preset='{"input_mint":"So11111111111111111111111111111111111111112"}'>input_mint=SOL</button>
+        <button data-filter-preset='{"user":"F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8"}'>user=&lt;wallet&gt;</button>
+        <button data-filter-preset='{"program_id":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}'>program_id=SPL Token</button>
       </div>
     </header>
     <div id="log"></div>
@@ -1437,8 +1447,10 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     });
   });
 
-  // Populate the stream dropdown from /streams; default URL to the first
-  // configured stream (single, raw-payload mode).
+  // Populate the stream dropdown from /streams. Each spkg declares its
+  // tables via `tables: [...]`; we expand that into one option per
+  // `(network, table)` so the default URL points at a concrete channel
+  // instead of a `@*` wildcard. Wildcard helpers are appended at the end.
   (function loadTryItStreams() {
     var sel = document.getElementById('stream-select');
     if (!sel) return;
@@ -1450,23 +1462,56 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           sel.disabled = true;
           return;
         }
+
+        // Build the unique `(network, table)` set + remember which networks
+        // appeared so we can suggest `<network>@*` wildcards too.
+        var seen = {};
+        var channels = [];
+        var networks = {};
+        streams.forEach(function (s) {
+          var network = s.network || '*';
+          networks[network] = true;
+          if (Array.isArray(s.tables) && s.tables.length > 0) {
+            s.tables.forEach(function (t) {
+              var id = network + '@' + t;
+              if (!seen[id]) { seen[id] = true; channels.push(id); }
+            });
+          }
+        });
+        channels.sort();
+
         sel.innerHTML = '';
-        streams.forEach(function (s, i) {
-          var id = (s.network || '*') + '@' + (s.stream || '*');
+        channels.forEach(function (id, i) {
           var opt = document.createElement('option');
           opt.value = id;
           opt.textContent = id;
           if (i === 0) opt.selected = true;
           sel.appendChild(opt);
         });
-        // Add wildcard catch-all at the end.
+
+        // Wildcard catch-alls at the bottom — separator first.
+        if (channels.length > 0) {
+          var sep = document.createElement('option');
+          sep.disabled = true;
+          sep.textContent = '──────────';
+          sel.appendChild(sep);
+        }
+        Object.keys(networks).sort().forEach(function (network) {
+          var opt = document.createElement('option');
+          opt.value = network + '@*';
+          opt.textContent = network + '@*  (every table on this network)';
+          sel.appendChild(opt);
+        });
         var all = document.createElement('option');
         all.value = '*@*';
-        all.textContent = '*@*  (every stream)';
+        all.textContent = '*@*  (every channel)';
         sel.appendChild(all);
 
-        // Default URL to the first stream.
-        urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
+        // Default URL to the first concrete `(network, table)` if any,
+        // otherwise fall back to `*@*`.
+        var initial = channels[0] || '*@*';
+        sel.value = initial;
+        urlEl.value = scheme + '://' + location.host + '/ws/' + initial;
         sel.addEventListener('change', function () {
           if (!sel.value) return;
           urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
@@ -1481,12 +1526,39 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     btn.onclick = function () {
       counter += 1;
       var method = btn.getAttribute('data-tpl');
+      var sel = document.getElementById('stream-select');
+      var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : '*@swaps';
       var body;
-      if (method === 'LIST_SUBSCRIPTIONS') {
-        body = { method: method, id: counter };
-      } else {
-        body = { method: method, params: ['*@swaps'], id: counter };
+      switch (method) {
+        case 'LIST_SUBSCRIPTIONS':
+        case 'LIST_FILTERS':
+          body = { method: method, id: counter };
+          break;
+        case 'CLEAR_FILTER':
+          body = { method: method, params: [selector], id: counter };
+          break;
+        default:
+          body = { method: method, params: [selector], id: counter };
       }
+      cmdEl.value = JSON.stringify(body);
+      cmdEl.focus();
+    };
+  });
+
+  // Filter-preset chips: paste a SET_FILTER command for the currently-selected
+  // stream selector with the chip's filter object as params[1].
+  Array.prototype.forEach.call(document.querySelectorAll('[data-filter-preset]'), function (btn) {
+    btn.onclick = function () {
+      counter += 1;
+      var filterObj;
+      try {
+        filterObj = JSON.parse(btn.getAttribute('data-filter-preset'));
+      } catch (e) {
+        return;
+      }
+      var sel = document.getElementById('stream-select');
+      var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : 'solana-mainnet@swaps';
+      var body = { method: 'SET_FILTER', params: [selector, filterObj], id: counter };
       cmdEl.value = JSON.stringify(body);
       cmdEl.focus();
     };
