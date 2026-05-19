@@ -964,28 +964,45 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
       </div>
       <div class="tpl-row" id="filter-presets">
         <span style="font-size:11px; color: var(--muted); align-self:center; margin-right:4px;">SET_FILTER presets:</span>
-        <select id="protocol-preset" title="SVM swap protocol — source: token-api openapi">
+        <select id="protocol-preset" title="DEX protocol — source: token-api openapi">
           <option value="">protocol=…</option>
-          <option value="jupiter_v4">jupiter_v4</option>
-          <option value="jupiter_v6">jupiter_v6</option>
-          <option value="pumpfun">pumpfun</option>
-          <option value="pumpfun_amm">pumpfun_amm</option>
-          <option value="raydium_amm_v4">raydium_amm_v4</option>
-          <option value="raydium_clmm">raydium_clmm</option>
-          <option value="raydium_cpmm">raydium_cpmm</option>
-          <option value="raydium_launchpad">raydium_launchpad</option>
-          <option value="meteora_daam">meteora_daam</option>
-          <option value="meteora_dlmm">meteora_dlmm</option>
-          <option value="meteora_amm">meteora_amm</option>
-          <option value="orca_whirlpool">orca_whirlpool</option>
-          <option value="boop">boop</option>
-          <option value="byreal">byreal</option>
-          <option value="darklake">darklake</option>
-          <option value="dumpfun">dumpfun</option>
-          <option value="moonshot">moonshot</option>
-          <option value="pancakeswap">pancakeswap</option>
-          <option value="spl_token_swap">spl_token_swap</option>
-          <option value="okx_dex">okx_dex</option>
+          <optgroup label="SVM">
+            <option value="jupiter_v4">jupiter_v4</option>
+            <option value="jupiter_v6">jupiter_v6</option>
+            <option value="pumpfun">pumpfun</option>
+            <option value="pumpfun_amm">pumpfun_amm</option>
+            <option value="raydium_amm_v4">raydium_amm_v4</option>
+            <option value="raydium_clmm">raydium_clmm</option>
+            <option value="raydium_cpmm">raydium_cpmm</option>
+            <option value="raydium_launchpad">raydium_launchpad</option>
+            <option value="meteora_daam">meteora_daam</option>
+            <option value="meteora_dlmm">meteora_dlmm</option>
+            <option value="meteora_amm">meteora_amm</option>
+            <option value="orca_whirlpool">orca_whirlpool</option>
+            <option value="boop">boop</option>
+            <option value="byreal">byreal</option>
+            <option value="darklake">darklake</option>
+            <option value="dumpfun">dumpfun</option>
+            <option value="moonshot">moonshot</option>
+            <option value="pancakeswap">pancakeswap</option>
+            <option value="spl_token_swap">spl_token_swap</option>
+            <option value="okx_dex">okx_dex</option>
+          </optgroup>
+          <optgroup label="EVM">
+            <option value="uniswap_v1">uniswap_v1</option>
+            <option value="uniswap_v2">uniswap_v2</option>
+            <option value="uniswap_v3">uniswap_v3</option>
+            <option value="uniswap_v4">uniswap_v4</option>
+            <option value="curvefi">curvefi</option>
+            <option value="balancer">balancer</option>
+            <option value="bancor">bancor</option>
+            <option value="cow">cow</option>
+            <option value="aerodrome">aerodrome</option>
+            <option value="dodo">dodo</option>
+            <option value="woofi">woofi</option>
+            <option value="traderjoe">traderjoe</option>
+            <option value="kyber_elastic">kyber_elastic</option>
+          </optgroup>
         </select>
         <button data-filter-preset='{"protocol":["raydium_cpmm","pumpfun","jupiter_v6","orca_whirlpool"]}'>top SVM DEXs</button>
         <button data-filter-preset='{"input_mint":"So11111111111111111111111111111111111111112"}'>input_mint=SOL</button>
