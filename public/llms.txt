@@ -39,9 +39,16 @@ Send a JSON text frame on the connected socket:
 { "method": "SUBSCRIBE",         "params": ["solana-mainnet@swaps"], "id": 1 }
 { "method": "UNSUBSCRIBE",       "params": ["solana-mainnet@swaps"], "id": 2 }
 { "method": "LIST_SUBSCRIPTIONS", "id": 3 }
+{ "method": "SET_FILTER",        "params": ["solana-mainnet@swaps", {"protocol":"raydium_cpmm","user":["a","b"]}], "id": 4 }
+{ "method": "CLEAR_FILTER",      "params": ["solana-mainnet@swaps"], "id": 5 }
+{ "method": "LIST_FILTERS",      "id": 6 }
 ```
 
-Replies are `{"result": null | [...], "id": <echoed>}`. Errors are `{"error": "...", "id": <echoed>}` and do not close the socket.
+Replies are `{"result": null | [...] | {...}, "id": <echoed>}`. Errors are `{"error": "...", "id": <echoed>}` and do not close the socket.
+
+## Event filters
+
+Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream. String equality only; fields AND, values OR; missing-field=miss; zero matches = block skipped. Wildcard selectors never filter. See `/SKILL.md` and `docs/filters.md` for per-stream filter examples.
 
 ## Resources
 
