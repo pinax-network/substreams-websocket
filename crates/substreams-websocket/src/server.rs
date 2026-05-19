@@ -307,7 +307,7 @@ fn spawn_streams(
 /// `RESTART_BACKOFF_MAX`. Resets to `RESTART_BACKOFF_MIN` whenever the
 /// stream gets past the first connect.
 const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
-const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(15);
 
 async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: CursorStore) {
     let PreparedStream {
