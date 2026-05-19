@@ -1444,6 +1444,11 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   });
 
   // Populate the "Available streams" section by fetching /streams.
+  // Each spkg entry from /streams declares which DatabaseChanges tables it
+  // emits via `tables: [...]`. We render one card per `(network, table)`
+  // pair so subscribers can copy a working `<network>@<table>` selector
+  // directly. Spkgs with no declared tables fall back to a single
+  // discovery-pending card.
   (function loadStreams() {
     var host = document.getElementById('streams-list');
     if (!host) return;
@@ -1454,32 +1459,56 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           host.innerHTML = '<p style="color: var(--muted); font-size: 13px;">No streams configured.</p>';
           return;
         }
-        host.innerHTML = '';
+
+        // Flatten spkg → per-table channels. Dedup `(network, table)` since
+        // multiple spkgs can feed the same channel (e.g. two swap-emitting
+        // spkgs on solana-mainnet); the card lists every contributing spkg.
+        var channels = {};
         streams.forEach(function (s) {
-          var id = (s.network || '*') + '@' + (s.stream || '*');
+          var network = s.network || '*';
+          var tables = Array.isArray(s.tables) && s.tables.length > 0 ? s.tables : [null];
+          tables.forEach(function (t) {
+            var id = network + '@' + (t || '?');
+            if (!channels[id]) channels[id] = { id: id, network: network, table: t, sources: [] };
+            channels[id].sources.push(s);
+          });
+        });
+
+        var sortedIds = Object.keys(channels).sort();
+        host.innerHTML = '';
+        sortedIds.forEach(function (id) {
+          var ch = channels[id];
           var card = document.createElement('div');
           card.className = 'stream-card';
           card.setAttribute('data-id', id);
-          card.title = 'Click to copy ' + id;
+          card.title = ch.table
+            ? 'Click to copy ' + id
+            : 'Tables not declared by spkg — discovered at runtime';
 
           var idEl = document.createElement('div');
           idEl.className = 'stream-id';
-          idEl.textContent = id;
+          idEl.textContent = ch.table ? id : ch.network + '@?';
           card.appendChild(idEl);
 
-          if (s.description) {
+          // Render description from the first source spkg that has one.
+          var description = ch.sources.map(function (s) { return s.description; }).filter(Boolean)[0];
+          if (description) {
             var desc = document.createElement('p');
             desc.className = 'stream-desc';
-            desc.textContent = s.description;
+            desc.textContent = description;
             card.appendChild(desc);
           }
 
           var meta = document.createElement('div');
           meta.className = 'stream-meta';
           var parts = [];
-          if (s.package_name)    parts.push({ k: 'package', v: s.package_name + (s.package_version ? ' ' + s.package_version : '') });
-          if (s.module)          parts.push({ k: 'module',  v: s.module });
-          if (s.module_hash)     parts.push({ k: 'hash',    v: s.module_hash.slice(0, 12) + '…' });
+          var names    = ch.sources.map(function (s) { return s.package_name; }).filter(Boolean);
+          var versions = ch.sources.map(function (s) { return s.package_version; }).filter(Boolean);
+          if (names.length)              parts.push({ k: 'name',    v: names.join(', ') });
+          if (versions.length)           parts.push({ k: 'version', v: versions.join(', ') });
+          if (ch.sources[0].module)      parts.push({ k: 'module',  v: ch.sources[0].module });
+          if (ch.sources[0].module_hash) parts.push({ k: 'hash',    v: ch.sources[0].module_hash.slice(0, 12) + '…' });
+          if (!ch.table)                 parts.push({ k: 'tables',  v: 'discovered at runtime' });
           parts.forEach(function (p) {
             var span = document.createElement('span');
             span.innerHTML = p.k + ' <code>' + escapeHtml(p.v) + '</code>';
@@ -1492,18 +1521,22 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           copied.textContent = '✓ copied';
           card.appendChild(copied);
 
-          card.addEventListener('click', function () {
-            var text = id;
-            var done = function () {
-              card.classList.add('copied');
-              setTimeout(function () { card.classList.remove('copied'); }, 1200);
-            };
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(text).then(done, done);
-            } else {
-              done();
-            }
-          });
+          if (ch.table) {
+            card.addEventListener('click', function () {
+              var text = id;
+              var done = function () {
+                card.classList.add('copied');
+                setTimeout(function () { card.classList.remove('copied'); }, 1200);
+              };
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done, done);
+              } else {
+                done();
+              }
+            });
+          } else {
+            card.style.cursor = 'default';
+          }
           host.appendChild(card);
         });
       })
