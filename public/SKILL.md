@@ -155,7 +155,24 @@ Invalid commands do **not** close the connection.
 
 ## Reconnects and replay
 
-Every block payload includes `block_num`. The server has no replay buffer today: if the connection drops, blocks broadcast during the gap are lost unless you backfill from Substreams gRPC directly (using `block_num + 1` as `start_block`). Cursor handling stays internal to the server — clients do not see or persist cursors.
+The server retains the last N blocks per stream on disk (default 1000, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_BLOCKS`). On reconnect, pass `?from_block=<n>` to receive every block with `block_num > n` from the on-disk window before the live stream resumes.
+
+```
+ws://host/ws/solana-mainnet@swaps?from_block=350000123
+ws://host/stream?streams=solana-mainnet@swaps&from_block=350000123
+```
+
+If `from_block` falls below the oldest retained block, the server emits a `gap` lifecycle message instead and continues live:
+
+```json
+{ "type": "stream", "status": "gap",
+  "stream": "swaps", "network": "solana-mainnet",
+  "requested_block": 100,
+  "oldest_buffered_block": 500,
+  "reason": "requested block outside replay window" }
+```
+
+Use `block_num + 1` from the latest payload you successfully processed. Wildcard selectors (`*@swaps`, `solana-mainnet@*`) skip replay — there is no concrete file to scan. Cursor handling stays internal to the server; clients deal in block numbers only.
 
 ## Heartbeats
 
@@ -200,7 +217,7 @@ Compare each broadcast's `module_hash` with the one you saw in the welcome messa
 
 ## What this server does NOT do
 
-- **No replay buffer.** Disconnected clients miss broadcasts during the gap. Use `block_num + 1` as `start_block` against Substreams gRPC directly for backfill.
+- **Bounded replay only.** The on-disk replay log holds the last `REPLAY_BLOCKS` per stream (default 1000). For older history, use Substreams gRPC directly with the desired `start_block`.
 - **No payload transformation.** Field values are pass-through strings from the source DatabaseChanges. Numeric parsing, decimal handling, base58 / hex encoding are the consumer's responsibility.
 - **No authentication.** The server itself is open; access control is the operator's deploy concern.
 - **No persistence of historical messages.** Once a block is broadcast, it's gone unless a connected subscriber received it.

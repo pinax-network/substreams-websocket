@@ -28,7 +28,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    BlockContext, Config, CursorStore, SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent,
+    BlockContext, Config, CursorStore, ReplayLog, SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent,
     SubstreamsClient, compute_module_hash_hex, decode_database_changes, substreams::load_package,
 };
 
@@ -54,6 +54,7 @@ struct AppState {
     /// message. Indexes match `config.streams`. Empty when a stream's
     /// package failed to load (hash will be empty string).
     streams_meta: Arc<Vec<StreamMeta>>,
+    replay: ReplayLog,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -96,10 +97,13 @@ pub async fn serve_with_shutdown(
             .collect::<Vec<_>>(),
     );
 
+    let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_blocks);
+
     let state = AppState {
         config: config.clone(),
         clients: ClientRegistry::default(),
         streams_meta,
+        replay,
     };
 
     let listen = state.config.websocket.listen;
@@ -291,13 +295,15 @@ fn spawn_streams(
     prepared: Vec<PreparedStream>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let cursors = CursorStore::new(state.config.cursors_dir.clone());
+    let replay = state.replay.clone();
     prepared
         .into_iter()
         .map(|prep| {
             let clients = state.clients.clone();
             let cursors = cursors.clone();
+            let replay = replay.clone();
             tokio::spawn(async move {
-                run_substream(prep, clients, cursors).await;
+                run_substream(prep, clients, cursors, replay).await;
             })
         })
         .collect()
@@ -309,7 +315,12 @@ fn spawn_streams(
 const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(15);
 
-async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: CursorStore) {
+async fn run_substream(
+    prep: PreparedStream,
+    clients: ClientRegistry,
+    cursors: CursorStore,
+    replay: ReplayLog,
+) {
     let PreparedStream {
         mut config,
         meta,
@@ -395,7 +406,15 @@ async fn run_substream(prep: PreparedStream, clients: ClientRegistry, cursors: C
             )
             .await;
 
-        let outcome = read_loop(&config, &clients, &cursors, &module_hash, &mut substream).await;
+        let outcome = read_loop(
+            &config,
+            &clients,
+            &cursors,
+            &replay,
+            &module_hash,
+            &mut substream,
+        )
+        .await;
         match outcome {
             ReadOutcome::Completed => {
                 info!(stream = %config.name, "Substreams read completed");
@@ -445,6 +464,7 @@ async fn read_loop(
     config: &StreamConfig,
     clients: &ClientRegistry,
     cursors: &CursorStore,
+    replay: &ReplayLog,
     module_hash: &str,
     substream: &mut crate::substreams::SubstreamsStream,
 ) -> ReadOutcome {
@@ -455,7 +475,7 @@ async fn read_loop(
                 if matches!(event, StreamEvent::Block { .. }) {
                     produced_any = true;
                 }
-                handle_substream_event(config, clients, cursors, module_hash, event).await;
+                handle_substream_event(config, clients, cursors, replay, module_hash, event).await;
             }
             Ok(None) => {
                 return if produced_any {
@@ -473,6 +493,7 @@ async fn handle_substream_event(
     config: &StreamConfig,
     clients: &ClientRegistry,
     cursors: &CursorStore,
+    replay: &ReplayLog,
     module_hash: &str,
     event: StreamEvent,
 ) {
@@ -522,8 +543,12 @@ async fn handle_substream_event(
                         return;
                     }
                 };
+                let payload_text = json.to_string();
+                if let Err(error) = replay.append(&network, &config.name, &payload_text).await {
+                    warn!(stream = %config.name, %error, "failed to append replay log");
+                }
                 let delivered = clients
-                    .broadcast_matching(&network, &config.name, json)
+                    .broadcast_matching_text(&network, &config.name, payload_text)
                     .await;
                 debug!(
                     stream = %config.name,
@@ -571,6 +596,12 @@ async fn handle_substream_event(
                 .await
             {
                 warn!(stream = %config.name, %error, "failed to persist last-valid cursor");
+            }
+            if let Err(error) = replay
+                .truncate_after(&network, &config.name, last_valid_block)
+                .await
+            {
+                warn!(stream = %config.name, %error, "failed to truncate replay log after reorg");
             }
         }
         StreamEvent::Session { .. }
@@ -644,6 +675,7 @@ async fn websocket_no_streams(State(_state): State<AppState>) -> Response {
 async fn websocket_path(
     State(state): State<AppState>,
     axum::extract::Path(streams_path): axum::extract::Path<String>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     ws: WebSocketUpgrade,
 ) -> Response {
     if state.clients.active_count().await >= state.config.websocket.max_clients {
@@ -653,12 +685,16 @@ async fn websocket_path(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+    let from_block = match parse_from_block(raw_query.as_deref()) {
+        Ok(v) => v,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
     let wrap_envelope = entries.len() > 1;
     let filter = StreamFilter {
         entries,
         wrap_envelope,
     };
-    ws.on_upgrade(move |socket| handle_socket(state, filter, socket))
+    ws.on_upgrade(move |socket| handle_socket(state, filter, from_block, socket))
         .into_response()
 }
 
@@ -688,15 +724,131 @@ async fn websocket_stream_query(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+    let from_block = match parse_from_block(Some(&raw)) {
+        Ok(v) => v,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
     let filter = StreamFilter {
         entries,
         wrap_envelope: true,
     };
-    ws.on_upgrade(move |socket| handle_socket(state, filter, socket))
+    ws.on_upgrade(move |socket| handle_socket(state, filter, from_block, socket))
         .into_response()
 }
 
-async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket) {
+/// Replay buffered blocks for every explicit `network@stream` selector with
+/// `block_num > from_block`. Wildcard selectors are skipped — they have no
+/// concrete file to scan and cannot resume from a single window. For each
+/// explicit selector with at least one retained block, either replay matching
+/// blocks (oldest first) or emit a `gap` lifecycle message when `from_block`
+/// falls below the oldest retained block.
+async fn replay_for_client(
+    replay: &ReplayLog,
+    filter: &StreamFilter,
+    from_block: u64,
+    client_id: ClientId,
+    outbound: &mpsc::Sender<Message>,
+) -> Result<(), String> {
+    if !replay.is_enabled() {
+        return Ok(());
+    }
+
+    for entry in &filter.entries {
+        let (Some(network), Some(stream)) = (entry.network.as_deref(), entry.stream.as_deref())
+        else {
+            // Wildcards skipped — no concrete log file to scan.
+            continue;
+        };
+
+        let result = replay
+            .read_from(network, stream, from_block)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let oldest = match result.oldest {
+            Some(v) => v,
+            None => continue,
+        };
+
+        if from_block + 1 < oldest {
+            // Resume point below the retained window — tell client there is a
+            // gap and continue with live stream only.
+            let gap = serde_json::json!({
+                "type": "stream",
+                "status": "gap",
+                "stream": stream,
+                "network": network,
+                "requested_block": from_block,
+                "oldest_buffered_block": oldest,
+                "reason": "requested block outside replay window",
+            });
+            let text = if filter.wrap_envelope {
+                format!(
+                    r#"{{"stream":"{network}@{stream}","data":{}}}"#,
+                    gap.to_string()
+                )
+            } else {
+                gap.to_string()
+            };
+            if outbound.send(Message::Text(text.into())).await.is_err() {
+                return Err("outbound channel closed during replay".to_owned());
+            }
+            info!(
+                client_id,
+                network,
+                stream,
+                from_block,
+                oldest_buffered_block = oldest,
+                "replay gap"
+            );
+            continue;
+        }
+
+        let replayed = result.blocks.len();
+        for (_block_num, raw_text) in result.blocks {
+            let text = if filter.wrap_envelope {
+                format!(r#"{{"stream":"{network}@{stream}","data":{raw_text}}}"#)
+            } else {
+                raw_text
+            };
+            if outbound.send(Message::Text(text.into())).await.is_err() {
+                return Err("outbound channel closed during replay".to_owned());
+            }
+        }
+
+        if replayed > 0 {
+            info!(
+                client_id,
+                network, stream, from_block, replayed, "replay delivered"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_from_block(raw_query: Option<&str>) -> Result<Option<u64>, &'static str> {
+    let Some(raw) = raw_query else {
+        return Ok(None);
+    };
+    let Some((_, value)) = url_query_pairs(raw).find(|(k, _)| k == "from_block") else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| "from_block must be a non-negative integer")
+}
+
+async fn handle_socket(
+    state: AppState,
+    filter: StreamFilter,
+    from_block: Option<u64>,
+    socket: WebSocket,
+) {
     let Some((client, filter_handle)) = state.clients.register(&state.config, filter.clone()).await
     else {
         warn!("rejecting WebSocket client because max client count was reached");
@@ -756,6 +908,13 @@ async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket)
         heartbeat.abort();
         writer.abort();
         return;
+    }
+
+    if let Some(from) = from_block
+        && let Err(reason) =
+            replay_for_client(&state.replay, &filter, from, client_id, &outbound).await
+    {
+        warn!(client_id, %reason, "replay failed; continuing with live stream only");
     }
 
     loop {
@@ -1016,7 +1175,16 @@ impl ClientRegistry {
         stream: &str,
         value: serde_json::Value,
     ) -> usize {
-        let raw_text = value.to_string();
+        self.broadcast_matching_text(network, stream, value.to_string())
+            .await
+    }
+
+    async fn broadcast_matching_text(
+        &self,
+        network: &str,
+        stream: &str,
+        raw_text: String,
+    ) -> usize {
         let wrapped_text = format!(r#"{{"stream":"{network}@{stream}","data":{raw_text}}}"#);
         let payload_bytes = raw_text.len();
         let raw_message = Message::Text(raw_text.into());
@@ -1472,6 +1640,7 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 
     use super::*;
+    use crate::config::ReplayConfig;
     use crate::decoder::pb::sf::substreams::sink::database::v1::{
         DatabaseChanges, Field, TableChange,
     };
@@ -1689,10 +1858,12 @@ mod tests {
         let stream_config = server.config.streams[0].clone();
         let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
         let cursors = CursorStore::new(cursors_dir.path());
+        let replay = ReplayLog::disabled();
         handle_substream_event(
             &stream_config,
             &server.clients,
             &cursors,
+            &replay,
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             StreamEvent::Block {
                 number: 999,
@@ -1743,10 +1914,121 @@ mod tests {
         socket.close(None).await.expect("client closes cleanly");
     }
 
+    #[tokio::test]
+    async fn websocket_replays_blocks_above_from_block() {
+        let replay_dir = tempfile::tempdir().expect("replay tempdir");
+        let mut cfg = config();
+        cfg.replay = ReplayConfig {
+            max_blocks: 100,
+            dir: replay_dir.path().to_path_buf(),
+        };
+        let server = TestServer::start(cfg).await;
+
+        for n in 100..105u64 {
+            let payload = serde_json::json!({
+                "stream": "swaps",
+                "network": "solana-mainnet",
+                "block_num": n,
+                "events": [],
+            })
+            .to_string();
+            server
+                .replay
+                .append("solana-mainnet", "swaps", &payload)
+                .await
+                .expect("seed replay");
+        }
+
+        let (mut socket, _) = connect_async(format!(
+            "ws://{}/ws/solana-mainnet@swaps?from_block=101",
+            server.addr
+        ))
+        .await
+        .expect("websocket connects");
+
+        let welcome = socket.next().await.expect("welcome").expect("welcome ok");
+        let welcome_text = match welcome {
+            TungsteniteMessage::Text(t) => t.to_string(),
+            other => panic!("expected text welcome, got {other:?}"),
+        };
+        assert!(welcome_text.contains("\"type\":\"session\""));
+
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("replay block arrives")
+                .expect("websocket open")
+                .expect("frame");
+            let text = match msg {
+                TungsteniteMessage::Text(t) => t.to_string(),
+                other => panic!("expected text, got {other:?}"),
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+            got.push(value["block_num"].as_u64().expect("block_num"));
+        }
+        assert_eq!(got, vec![102, 103, 104]);
+
+        socket.close(None).await.expect("clean close");
+    }
+
+    #[tokio::test]
+    async fn websocket_emits_gap_when_from_block_below_window() {
+        let replay_dir = tempfile::tempdir().expect("replay tempdir");
+        let mut cfg = config();
+        cfg.replay = ReplayConfig {
+            max_blocks: 100,
+            dir: replay_dir.path().to_path_buf(),
+        };
+        let server = TestServer::start(cfg).await;
+
+        for n in 500..505u64 {
+            let payload = serde_json::json!({
+                "stream": "swaps",
+                "network": "solana-mainnet",
+                "block_num": n,
+                "events": [],
+            })
+            .to_string();
+            server
+                .replay
+                .append("solana-mainnet", "swaps", &payload)
+                .await
+                .expect("seed replay");
+        }
+
+        let (mut socket, _) = connect_async(format!(
+            "ws://{}/ws/solana-mainnet@swaps?from_block=10",
+            server.addr
+        ))
+        .await
+        .expect("websocket connects");
+
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("gap arrives")
+            .expect("open")
+            .expect("frame");
+        let text = match msg {
+            TungsteniteMessage::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(value["type"], "stream");
+        assert_eq!(value["status"], "gap");
+        assert_eq!(value["requested_block"], 10);
+        assert_eq!(value["oldest_buffered_block"], 500);
+
+        socket.close(None).await.expect("clean close");
+    }
+
     struct TestServer {
         addr: SocketAddr,
         clients: ClientRegistry,
         config: Arc<Config>,
+        replay: ReplayLog,
         shutdown: Option<oneshot::Sender<()>>,
     }
 
@@ -1774,10 +2056,12 @@ mod tests {
                     })
                     .collect::<Vec<_>>(),
             );
+            let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_blocks);
             let state = AppState {
                 config: Arc::new(config),
                 clients: ClientRegistry::default(),
                 streams_meta,
+                replay: replay.clone(),
             };
             let clients = state.clients.clone();
             let config = state.config.clone();
@@ -1798,6 +2082,7 @@ mod tests {
                 addr,
                 clients,
                 config,
+                replay,
                 shutdown: Some(shutdown_tx),
             }
         }
@@ -1857,6 +2142,10 @@ mod tests {
                 client_buffer_size: 16,
             },
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
+            replay: ReplayConfig {
+                max_blocks: 0,
+                dir: std::path::PathBuf::from("/tmp/replay-test"),
+            },
         }
     }
 }
