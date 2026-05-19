@@ -29,7 +29,7 @@
 }
 ```
 
-All event field values are strings on the wire. `@table` identifies the source DB table per row. No replay buffer: on reconnect, use `block_num + 1` as `start_block` against Substreams gRPC directly to backfill.
+All event field values are strings on the wire. `@table` identifies the source DB table per row. On reconnect, pass `?from_block=<n>` to receive every retained block with `block_num > n`. Default retention is 1000 blocks per stream; outside that window the server emits a `gap` lifecycle message and clients must backfill via Substreams gRPC directly.
 
 ## Live commands
 

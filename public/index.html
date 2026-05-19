@@ -773,7 +773,16 @@
 
   <section id="reconnect">
     <h2>Reconnects</h2>
-    <p>This server has no replay buffer today. If your connection drops, blocks broadcast during the gap are lost. Track <code>block_num</code> on every payload; on reconnect, use <code>block_num + 1</code> as <code>start_block</code> against Substreams gRPC directly to backfill the gap. Substreams cursors stay internal — clients deal in block numbers only.</p>
+    <p>The server retains the last <code>REPLAY_BLOCKS</code> blocks per stream on disk (default 1000). On reconnect, pass <code>?from_block=&lt;n&gt;</code> on either URL mode:</p>
+<pre>ws://host/ws/solana-mainnet@swaps?from_block=350000123
+ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
+    <p>Every retained block with <code>block_num &gt; n</code> is replayed (oldest first) before the live stream resumes. If <code>n</code> falls below the oldest retained block, a <code>gap</code> lifecycle message is emitted instead and the client should backfill the hole via Substreams gRPC directly:</p>
+<pre>{ "type": "stream", "status": "gap",
+  "stream": "swaps", "network": "solana-mainnet",
+  "requested_block": 100,
+  "oldest_buffered_block": 500,
+  "reason": "requested block outside replay window" }</pre>
+    <p>Wildcards (<code>*@swaps</code>, <code>solana-mainnet@*</code>) skip replay — there is no concrete log file to scan for them. Cursors stay internal; clients deal in block numbers only.</p>
   </section>
 
   <section id="heartbeats">
@@ -784,7 +793,7 @@
   <section id="limits">
     <h2>Limits</h2>
     <ul>
-      <li><strong>No replay buffer.</strong> Disconnected clients miss broadcasts during the gap.</li>
+      <li><strong>Bounded replay.</strong> The on-disk replay log holds the last <code>REPLAY_BLOCKS</code> per stream (default 1000). For older history, backfill via Substreams gRPC directly.</li>
       <li><strong>One output type.</strong> Only <code>sf.substreams.sink.database.v1.DatabaseChanges</code>.</li>
       <li><strong>Per-connection client buffer.</strong> Slow consumers are dropped per-message rather than blocking the ingest loop. Defaults to 1024 messages, configurable via <code>SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE</code>.</li>
     </ul>

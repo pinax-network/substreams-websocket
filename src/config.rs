@@ -5,6 +5,15 @@ pub struct Config {
     pub streams: Vec<StreamConfig>,
     pub websocket: WebSocketConfig,
     pub cursors_dir: std::path::PathBuf,
+    pub replay: ReplayConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayConfig {
+    /// Number of recent blocks retained per stream as JSONL on disk.
+    /// `0` disables the replay log entirely.
+    pub max_blocks: usize,
+    pub dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +224,10 @@ mod tests {
             streams: vec![stream],
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
+            replay: ReplayConfig {
+                max_blocks: 0,
+                dir: std::path::PathBuf::from("/tmp/replay-test"),
+            },
         };
         assert!(matches!(
             config.validate(),
@@ -230,6 +243,10 @@ mod tests {
             streams: vec![stream],
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
+            replay: ReplayConfig {
+                max_blocks: 0,
+                dir: std::path::PathBuf::from("/tmp/replay-test"),
+            },
         };
         assert!(matches!(
             config.validate(),
@@ -245,6 +262,10 @@ mod tests {
             streams: vec![s],
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
+            replay: ReplayConfig {
+                max_blocks: 0,
+                dir: std::path::PathBuf::from("/tmp/replay-test"),
+            },
         };
         assert!(matches!(
             config.validate(),
@@ -261,6 +282,10 @@ mod tests {
             ],
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
+            replay: ReplayConfig {
+                max_blocks: 0,
+                dir: std::path::PathBuf::from("/tmp/replay-test"),
+            },
         };
         assert!(matches!(
             config.validate(),
@@ -277,6 +302,10 @@ mod tests {
             ],
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
+            replay: ReplayConfig {
+                max_blocks: 0,
+                dir: std::path::PathBuf::from("/tmp/replay-test"),
+            },
         };
         config.validate().expect("distinct networks are allowed");
     }

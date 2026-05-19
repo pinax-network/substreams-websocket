@@ -56,6 +56,23 @@ struct ServeArgs {
         default_value = "./cursors"
     )]
     cursors_dir: PathBuf,
+
+    /// Number of recent blocks retained per stream as JSONL for client
+    /// reconnect replay. `0` disables the replay log.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_REPLAY_BLOCKS",
+        default_value_t = 1000
+    )]
+    replay_blocks: usize,
+
+    /// Directory where per-stream JSONL replay logs are persisted.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_REPLAY_DIR",
+        default_value = "./replay"
+    )]
+    replay_dir: PathBuf,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -295,6 +312,10 @@ impl ServeArgs {
                 .collect(),
             websocket: self.websocket.into_config(),
             cursors_dir: self.cursors_dir,
+            replay: substreams_websocket::config::ReplayConfig {
+                max_blocks: self.replay_blocks,
+                dir: self.replay_dir,
+            },
         })
     }
 }

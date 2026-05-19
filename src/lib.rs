@@ -2,6 +2,7 @@ pub mod config;
 pub mod cursor;
 pub mod decoder;
 pub mod module_hash;
+pub mod replay;
 pub mod server;
 pub mod substreams;
 
@@ -13,5 +14,6 @@ pub use decoder::{
     BlockContext, DatabaseChangesBlockMessage, DecodeError, SUPPORTED_OUTPUT_TYPE,
     SUPPORTED_OUTPUT_TYPE_URL, decode_database_changes,
 };
+pub use replay::{ReadResult, ReplayError, ReplayLog};
 pub use server::{ServerError, serve};
 pub use substreams::{StreamEvent, SubstreamsClient, SubstreamsError};
