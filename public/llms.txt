@@ -22,7 +22,6 @@
   "block_num":   350000000,
   "block_hash":  "Gsk6...",
   "timestamp":   "2026-05-13 17:00:00",
-  "cursor":      "Mloz_-WpoBoZ...",
   "module_hash": "bd388f2e...",
   "events": [
     { "@table": "swaps", "input_amount": "1287000000", ... }
@@ -30,7 +29,7 @@
 }
 ```
 
-All event field values are strings on the wire. `@table` identifies the source DB table per row. `cursor` is opaque and can be used to backfill from a Substreams gRPC endpoint directly — this server has no replay buffer.
+All event field values are strings on the wire. `@table` identifies the source DB table per row. No replay buffer: on reconnect, use `block_num + 1` as `start_block` against Substreams gRPC directly to backfill.
 
 ## Live commands
 

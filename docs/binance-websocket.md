@@ -28,7 +28,7 @@ Authoritative upstream references:
 ## What is intentionally Binance-incompatible
 
 - **`undo` lifecycle messages.** Reorg handling is chain-native; Binance has nothing analogous.
-- **`cursor` field on every block.** Substreams resume semantics; not present in Binance's order-book feeds.
+- **`block_num` field on every block.** Chain-native resume key; not present in Binance's order-book feeds.
 - **Welcome (`session`) message.** Binance does not send one. We do, so clients can discover available streams and confirm their parsed subscriptions.
 
 ## Style chip

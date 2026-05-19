@@ -35,7 +35,6 @@ pub struct BlockContext {
     pub block_hash: String,
     pub timestamp: String,
     pub network: String,
-    pub cursor: String,
     pub module_hash: String,
 }
 
@@ -57,10 +56,6 @@ pub struct DatabaseChangesBlockMessage {
     pub block_num: u64,
     pub block_hash: String,
     pub timestamp: String,
-    /// Opaque Substreams cursor for the block being delivered. Subscribers may
-    /// persist this and reconnect to a Substreams endpoint directly using it
-    /// to resume from this exact position. This server does not replay.
-    pub cursor: String,
     /// Canonical Substreams module hash of the configured output module.
     /// Subscribers can use it to detect spkg upgrades.
     pub module_hash: String,
@@ -117,7 +112,6 @@ pub fn normalize_database_changes(
         block_num: context.block_num,
         block_hash: context.block_hash,
         timestamp: context.timestamp,
-        cursor: context.cursor,
         module_hash: context.module_hash,
         events,
     }
@@ -138,7 +132,6 @@ mod tests {
             block_hash: "block-hash".to_owned(),
             timestamp: "2026-05-13 17:00:00".to_owned(),
             network: "solana-mainnet".to_owned(),
-            cursor: "cur-xyz".to_owned(),
             module_hash: "deadbeef".to_owned(),
         }
     }
@@ -191,7 +184,6 @@ mod tests {
         assert_eq!(message.block_num, 350_000_000);
         assert_eq!(message.block_hash, "block-hash");
         assert_eq!(message.timestamp, "2026-05-13 17:00:00");
-        assert_eq!(message.cursor, "cur-xyz");
         assert_eq!(message.events.len(), 3);
         assert_eq!(message.events[0]["@table"], "swaps");
         assert_eq!(message.events[1]["@table"], "swaps");
@@ -298,7 +290,6 @@ mod tests {
         assert_eq!(json["block_num"], 350_000_000);
         assert_eq!(json["block_hash"], "block-hash");
         assert_eq!(json["timestamp"], "2026-05-13 17:00:00");
-        assert_eq!(json["cursor"], "cur-xyz");
         assert_eq!(json["module_hash"], "deadbeef");
         assert!(json.get("block").is_none(), "no nested 'block' object");
         assert!(
@@ -356,15 +347,14 @@ mod tests {
         let text = serde_json::to_string(&message).expect("serialize");
 
         // Top-level: stream, network, block_num, block_hash, timestamp,
-        // cursor, module_hash, events — in that exact order. `events` is last
-        // so subscribers see the metadata header before the payload array.
+        // module_hash, events — in that exact order. `events` is last so
+        // subscribers see the metadata header before the payload array.
         let order = [
             "\"stream\"",
             "\"network\"",
             "\"block_num\"",
             "\"block_hash\"",
             "\"timestamp\"",
-            "\"cursor\"",
             "\"module_hash\"",
             "\"events\"",
         ];
