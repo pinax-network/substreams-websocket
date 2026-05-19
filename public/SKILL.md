@@ -6,14 +6,14 @@ If you're an AI agent or programmatic client, this page tells you everything you
 
 ## Server URL conventions
 
-Stream selectors are `<network>@<stream>` (Binance market-streams style). `*` is a wildcard on either side. `<network>` is a chain identifier (e.g. `solana-mainnet`, `ethereum-mainnet`). `<stream>` is the operator-chosen display label for a stream (e.g. `swaps`, `transfers`).
+Stream selectors are `<network>@<table>` (Binance market-streams style). `*` is a wildcard on either side. `<network>` is a chain identifier (e.g. `solana-mainnet`, `ethereum-mainnet`). `<table>` is the DatabaseChanges table emitted by the spkg's `db_out` module (e.g. `swaps`, `transfers`, `spl_transfers`).
 
 Two URL modes:
 
 | URL | Behavior |
 |-----|----------|
-| `/ws/<a>` | Single stream — raw JSON payload per block. |
-| `/ws/<a>/<b>/...` | Multiple streams — every payload wrapped as `{"stream":"<network>@<stream>","data":<raw>}`. |
+| `/ws/<a>` | Single channel — raw JSON payload per block. |
+| `/ws/<a>/<b>/...` | Multiple channels — every payload wrapped as `{"stream":"<network>@<table>","data":<raw>}`. |
 | `/stream?streams=<a>/<b>/...` | Combined query mode — always wraps. |
 
 Bare `/ws` (no streams) returns HTTP 400. Use `/ws/*@*` to subscribe to everything explicitly.
@@ -184,7 +184,7 @@ If `from_block` falls below the oldest retained block, the server emits a `gap` 
 
 ```json
 { "type": "stream", "status": "gap",
-  "stream": "swaps", "network": "solana-mainnet",
+  "network": "solana-mainnet",
   "requested_block": 100,
   "oldest_buffered_block": 500,
   "reason": "requested block outside replay window" }

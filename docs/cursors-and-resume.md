@@ -4,16 +4,17 @@ What the server persists between restarts, and what "exact resume" actually buys
 
 ## File layout
 
-`SUBSTREAMS_WEBSOCKET_CURSORS_DIR` (default `./cursors`) holds one file per stream:
+`SUBSTREAMS_WEBSOCKET_CURSORS_DIR` (default `./cursors`) holds one file per spkg:
 
 ```
-cursors/<network>-<module_hash>.cursor
+cursors/<network>-<package_name>@<package_version>-<module_hash>.cursor
 ```
 
 - `network` comes from the stream's TOML entry.
+- `package_name` + `package_version` come from the spkg's `Package.package_meta[0]` (same as `substreams info`).
 - `module_hash` is computed locally from the `.spkg` — see [`substreams.md`](substreams.md#module-hash).
 
-Keying on the module hash means a manifest change (different module, different inputs, different binary) writes to a new file. Old cursors stay on disk but are never read again. Safe by construction.
+Keying on `(network, package_name, package_version, module_hash)` means a spkg upgrade — new version, new module hash, new inputs — writes to a new file. Old cursors stay on disk but are never read again. Safe by construction. Renaming a TOML entry has no effect; identity is anchored in the spkg.
 
 ## Write semantics
 
@@ -39,6 +40,6 @@ If you need historical replay, point a fresh consumer at the gRPC endpoint direc
 
 ## Operational notes
 
-- Wipe a single cursor to force a re-sync of one stream: `rm cursors/<network>-<hash>.cursor`.
+- Wipe a single cursor to force a re-sync of one spkg: `rm cursors/<network>-<package_name>@<package_version>-<module_hash>.cursor`.
 - Wipe the directory to re-sync everything.
 - On Railway / Fly / Heroku, the cursors dir lives on ephemeral storage. Cold deploys lose cursors and re-sync from the manifest's `initial_block`. For long-running deploys, mount a volume at `SUBSTREAMS_WEBSOCKET_CURSORS_DIR`.

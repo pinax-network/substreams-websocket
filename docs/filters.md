@@ -27,9 +27,9 @@ ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%
 ws://host/stream?streams=solana-mainnet@swaps&filter=%7B%22user%22%3A%5B%22a%22%2C%22b%22%5D%7D
 ```
 
-The filter applies to **every explicit `network@stream` selector** in the URL. Wildcard selectors (`*@swaps`, `solana-mainnet@*`) skip filtering — they always receive every event.
+The filter applies to **every explicit `network@table` selector** in the URL. Wildcard selectors (`*@swaps`, `solana-mainnet@*`) skip filtering — they always receive every event.
 
-For different filters per stream on one connection, use the live `SET_FILTER` command.
+For different filters per channel on one connection, use the live `SET_FILTER` command.
 
 ## Wire — live commands
 
@@ -45,7 +45,7 @@ For different filters per stream on one connection, use the live `SET_FILTER` co
 { "result": null, "id": 1 }
 ```
 
-- `params[0]` = explicit `network@stream` selector. Wildcards rejected.
+- `params[0]` = explicit `network@table` selector. Wildcards rejected.
 - `params[1]` = filter object. `{}` is valid and matches every event (effectively no-op).
 - Replaces any existing filter for the selector. Idempotent.
 
@@ -90,7 +90,7 @@ Wildcard selectors stay live-only (already documented in [`replay.md`](replay.md
 
 ## Common filter shapes
 
-Examples per stream type — the server doesn't enforce these, they're just operator-friendly suggestions matching the columns commonly present.
+Examples per table — the server doesn't enforce these, they're just operator-friendly suggestions matching the columns commonly present.
 
 ### SVM swaps (`solana-mainnet@swaps`)
 

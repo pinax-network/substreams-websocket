@@ -3,8 +3,9 @@
 > Real-time WebSocket fan-out server for Substreams `DatabaseChanges`. Decodes
 > blocks from any `db_out`-style Substreams package and broadcasts them as JSON
 > to connected WebSocket subscribers. URL conventions mirror Binance market
-> streams: stream selectors are `<network>@<stream>` with `*` wildcards on
-> either side.
+> streams: stream selectors are `<network>@<table>` (where `<table>` is the
+> DatabaseChanges table emitted by the spkg's `db_out` — e.g. `swaps`,
+> `transfers`, `spl_transfers`) with `*` wildcards on either side.
 
 ## Connecting
 

@@ -675,7 +675,7 @@
       </tbody>
     </table>
     <p>When wrapped, every payload is delivered as:</p>
-<pre>{ "stream": "&lt;network&gt;@&lt;stream&gt;", "data": &lt;raw payload&gt; }</pre>
+<pre>{ "stream": "&lt;network&gt;@&lt;table&gt;", "data": &lt;raw payload&gt; }</pre>
     <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly. See the <strong>HTTP</strong> group in the sidebar for non-WebSocket endpoints (<code>/streams</code>, <code>/healthz</code>, <code>/SKILL.md</code>, <code>/llms.txt</code>).</p>
   </section>
 
@@ -688,11 +688,12 @@
   "client_id": 1,
   "streams": [
     {
-      "stream": "swaps",
       "network": "solana-mainnet",
       "module": "db_out",
       "manifest": "https://.../svm-dex-v0.5.1.spkg",
-      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797"
+      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797",
+      "package_name": "svm_dex",
+      "package_version": "v0.5.1"
     }
   ],
   "subscriptions": ["solana-mainnet@swaps"],
@@ -856,7 +857,7 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values</pre>
 ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     <p>Every retained block with <code>block_num &gt; n</code> is replayed (oldest first) before the live stream resumes. If <code>n</code> falls below the oldest retained block, a <code>gap</code> lifecycle message is emitted instead and the client should backfill the hole via Substreams gRPC directly:</p>
 <pre>{ "type": "stream", "status": "gap",
-  "stream": "swaps", "network": "solana-mainnet",
+  "network": "solana-mainnet",
   "requested_block": 100,
   "oldest_buffered_block": 500,
   "reason": "requested block outside replay window" }</pre>
