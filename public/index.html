@@ -205,65 +205,58 @@
     border-radius: 999px;
     border: 1px solid var(--border);
   }
-  .streams-list .table-row {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-    gap: 14px;
-    padding: 10px 18px;
-    border-top: 1px solid var(--border);
-    cursor: pointer;
-    position: relative;
-    transition: background 120ms;
-  }
-  .streams-list .table-row:first-of-type { border-top: 0; }
-  .streams-list .table-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  .streams-list .table-row.copied { background: color-mix(in srgb, var(--good) 14%, transparent); }
-  .streams-list .table-row.discovery { cursor: default; }
-  .streams-list .table-row.discovery:hover { background: transparent; }
-  .streams-list .table-id {
+  .streams-list .pkg-group { border-top: 1px solid var(--border); }
+  .streams-list .pkg-group:first-of-type { border-top: 0; }
+  .streams-list .pkg-header {
     display: flex;
     align-items: center;
-    gap: 10px;
-    font-family: var(--mono);
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--fg);
-    min-width: 0;
-  }
-  .streams-list .table-id .selector { word-break: break-all; }
-  .streams-list .table-row.discovery .table-id .selector { color: var(--muted); font-style: italic; font-weight: 400; }
-  .streams-list .table-name-badge {
-    display: inline-block;
-    padding: 2px 9px;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-  }
-  .streams-list .table-source {
+    gap: 8px;
+    padding: 10px 18px 6px;
     font-family: var(--mono);
     font-size: 11px;
     color: var(--muted);
-    text-align: right;
-    line-height: 1.4;
+    letter-spacing: 0.02em;
   }
-  .streams-list .table-source .src-name { color: var(--fg); font-weight: 600; }
-  .streams-list .table-source .src-version { color: var(--muted); margin-left: 4px; }
-  .streams-list .table-copied {
-    position: absolute;
-    right: 14px;
-    top: 4px;
-    font-size: 10px;
-    color: var(--good);
-    opacity: 0;
-    transition: opacity 120ms;
+  .streams-list .pkg-header .pkg-name { color: var(--fg); font-weight: 600; }
+  .streams-list .pkg-header .pkg-version { color: var(--muted); }
+  .streams-list .pkg-tables {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 18px 12px;
+  }
+  .streams-list .table-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
     font-family: var(--mono);
-    letter-spacing: 0.04em;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 120ms, transform 80ms;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    position: relative;
   }
-  .streams-list .table-row.copied .table-copied { opacity: 1; }
+  .streams-list .table-pill:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    transform: translateY(-1px);
+  }
+  .streams-list .table-pill.copied {
+    background: color-mix(in srgb, var(--good) 20%, transparent);
+    color: var(--good);
+    border-color: color-mix(in srgb, var(--good) 32%, transparent);
+  }
+  .streams-list .pkg-discovery {
+    padding: 0 18px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+  }
   .method {
     display: inline-block;
     font-family: var(--mono);
@@ -1580,30 +1573,21 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           return;
         }
 
-        // networks: { network: { tables: { table: [{name, version}, ...] }, discovery: [{name, version}, ...] } }
+        // networks: { network: { packages: [{ name, version, tables: [t,...], discovery: bool }, ...] } }
+        // Each spkg is its own sub-group under the network — tables can repeat
+        // across packages (e.g. two swap-emitting spkgs both publish `swaps`)
+        // and that's expressed by appearing under each spkg's group.
         var networks = {};
         streams.forEach(function (s) {
           var network = s.network || '*';
-          if (!networks[network]) networks[network] = { tables: {}, discovery: [] };
-          var src = {
-            name: s.package_name || '',
+          if (!networks[network]) networks[network] = { packages: [] };
+          networks[network].packages.push({
+            name: s.package_name || '?',
             version: s.package_version || '',
-          };
-          if (Array.isArray(s.tables) && s.tables.length > 0) {
-            s.tables.forEach(function (t) {
-              if (!networks[network].tables[t]) networks[network].tables[t] = [];
-              networks[network].tables[t].push(src);
-            });
-          } else {
-            networks[network].discovery.push(src);
-          }
+            tables: (Array.isArray(s.tables) ? s.tables.slice() : []),
+            discovery: !Array.isArray(s.tables) || s.tables.length === 0,
+          });
         });
-
-        var renderSource = function (src) {
-          var name = escapeHtml(src.name || '?');
-          var version = src.version ? '<span class="src-version">' + escapeHtml(src.version) + '</span>' : '';
-          return '<span class="src-name">' + name + '</span>' + version;
-        };
 
         host.innerHTML = '';
         Object.keys(networks).sort().forEach(function (network) {
@@ -1622,8 +1606,11 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           nameEl.textContent = network;
           header.appendChild(nameEl);
 
-          var tables = Object.keys(networks[network].tables).sort();
-          var totalChannels = tables.length + networks[network].discovery.length;
+          // Total channel count across all packages in this network.
+          var totalChannels = 0;
+          networks[network].packages.forEach(function (pkg) {
+            totalChannels += pkg.discovery ? 1 : pkg.tables.length;
+          });
           var count = document.createElement('span');
           count.className = 'network-count';
           count.textContent = totalChannels + ' ' + (totalChannels === 1 ? 'table' : 'tables');
@@ -1631,60 +1618,55 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
 
           group.appendChild(header);
 
-          tables.forEach(function (table) {
-            var id = network + '@' + table;
-            var row = document.createElement('div');
-            row.className = 'table-row';
-            row.title = 'Click to copy ' + id;
-
-            var idEl = document.createElement('div');
-            idEl.className = 'table-id';
-            idEl.innerHTML =
-              '<span class="table-name-badge">' + escapeHtml(table) + '</span>' +
-              '<span class="selector">' + escapeHtml(id) + '</span>';
-            row.appendChild(idEl);
-
-            var sourceEl = document.createElement('div');
-            sourceEl.className = 'table-source';
-            sourceEl.innerHTML = networks[network].tables[table].map(renderSource).join('<br>');
-            row.appendChild(sourceEl);
-
-            var copied = document.createElement('span');
-            copied.className = 'table-copied';
-            copied.textContent = '✓ copied';
-            row.appendChild(copied);
-
-            row.addEventListener('click', function () {
-              var done = function () {
-                row.classList.add('copied');
-                setTimeout(function () { row.classList.remove('copied'); }, 1200);
-              };
-              if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(id).then(done, done);
-              } else {
-                done();
-              }
-            });
-            group.appendChild(row);
+          // Sort packages by name + version for stable rendering.
+          networks[network].packages.sort(function (a, b) {
+            var ka = a.name + ' ' + a.version;
+            var kb = b.name + ' ' + b.version;
+            return ka < kb ? -1 : ka > kb ? 1 : 0;
           });
 
-          // Discovery placeholder — spkgs in this network with no declared tables.
-          networks[network].discovery.forEach(function (src) {
-            var row = document.createElement('div');
-            row.className = 'table-row discovery';
+          networks[network].packages.forEach(function (pkg) {
+            var pkgGroup = document.createElement('div');
+            pkgGroup.className = 'pkg-group';
 
-            var idEl = document.createElement('div');
-            idEl.className = 'table-id';
-            idEl.innerHTML =
-              '<span class="table-name-badge" style="background: color-mix(in srgb, var(--muted) 12%, transparent); color: var(--muted);">?</span>' +
-              '<span class="selector">' + escapeHtml(network) + '@? (discovered at runtime)</span>';
-            row.appendChild(idEl);
+            var pkgHeader = document.createElement('div');
+            pkgHeader.className = 'pkg-header';
+            pkgHeader.innerHTML =
+              '<span class="pkg-name">' + escapeHtml(pkg.name) + '</span>' +
+              (pkg.version ? '<span class="pkg-version">' + escapeHtml(pkg.version) + '</span>' : '');
+            pkgGroup.appendChild(pkgHeader);
 
-            var sourceEl = document.createElement('div');
-            sourceEl.className = 'table-source';
-            sourceEl.innerHTML = renderSource(src);
-            row.appendChild(sourceEl);
-            group.appendChild(row);
+            if (pkg.discovery) {
+              var hint = document.createElement('div');
+              hint.className = 'pkg-discovery';
+              hint.textContent = 'tables discovered at runtime';
+              pkgGroup.appendChild(hint);
+            } else {
+              var pillRow = document.createElement('div');
+              pillRow.className = 'pkg-tables';
+              pkg.tables.slice().sort().forEach(function (table) {
+                var id = network + '@' + table;
+                var pill = document.createElement('span');
+                pill.className = 'table-pill';
+                pill.textContent = table;
+                pill.title = 'Click to copy ' + id;
+                pill.addEventListener('click', function () {
+                  var done = function () {
+                    pill.classList.add('copied');
+                    setTimeout(function () { pill.classList.remove('copied'); }, 1200);
+                  };
+                  if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(id).then(done, done);
+                  } else {
+                    done();
+                  }
+                });
+                pillRow.appendChild(pill);
+              });
+              pkgGroup.appendChild(pillRow);
+            }
+
+            group.appendChild(pkgGroup);
           });
 
           host.appendChild(group);
