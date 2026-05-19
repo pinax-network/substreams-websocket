@@ -124,8 +124,10 @@ impl EventFilter {
     }
 }
 
-/// Per-connection map of explicit `network@stream` selector → filter.
-/// Wildcards are not supported as filter keys.
+/// Per-connection map of `network@table` selector → filter. Wildcards on
+/// either side of `@` are supported: `*@*`, `<network>@*`, `*@<table>`.
+/// At broadcast time every stored filter whose selector matches the
+/// outgoing `(network, table)` contributes — all must pass.
 #[derive(Debug, Clone, Default)]
 pub struct EventFilterSet {
     by_selector: HashMap<String, EventFilter>,
@@ -146,6 +148,22 @@ impl EventFilterSet {
 
     pub fn get(&self, selector: &str) -> Option<&EventFilter> {
         self.by_selector.get(selector)
+    }
+
+    /// Every stored filter whose selector matches `(network, table)` —
+    /// exact match plus the three wildcard variants.
+    pub fn matching(&self, network: &str, table: &str) -> Vec<&EventFilter> {
+        let candidates = [
+            format!("{network}@{table}"),
+            format!("{network}@*"),
+            format!("*@{table}"),
+            "*@*".to_owned(),
+        ];
+        candidates
+            .iter()
+            .filter_map(|k| self.by_selector.get(k))
+            .filter(|f| !f.is_empty())
+            .collect()
     }
 
     pub fn list(&self) -> Map<String, Value> {

@@ -164,57 +164,99 @@
     line-height: 1.5;
   }
 
-  .streams-list {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    margin: 6px 0 18px;
-  }
-  .streams-list .stream-card {
+  .streams-list { margin: 8px 0 24px; }
+  .streams-list .network-group {
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px 14px;
+    border-radius: 12px;
+    margin-bottom: 14px;
     background: var(--code-bg);
-    cursor: pointer;
-    transition: border-color 120ms, transform 120ms;
-    position: relative;
+    overflow: hidden;
   }
-  .streams-list .stream-card:hover { border-color: var(--accent); }
-  .streams-list .stream-card.copied { border-color: var(--good); }
-  .streams-list .stream-id {
+  .streams-list .network-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent);
+    border-bottom: 1px solid var(--border);
+  }
+  .streams-list .network-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+    flex-shrink: 0;
+  }
+  .streams-list .network-name {
     font-family: var(--mono);
     font-size: 13px;
     font-weight: 600;
     color: var(--fg);
-    margin-bottom: 4px;
-    word-break: break-all;
+    letter-spacing: 0.01em;
+    flex: 1;
   }
-  .streams-list .stream-desc {
-    font-size: 12px;
-    color: var(--muted);
-    line-height: 1.5;
-    margin: 0 0 6px;
-  }
-  .streams-list .stream-meta {
+  .streams-list .network-count {
     font-family: var(--mono);
     font-size: 11px;
     color: var(--muted);
+    background: var(--bg);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+  }
+  .streams-list .pkg-group { border-top: 1px solid var(--border); }
+  .streams-list .pkg-group:first-of-type { border-top: 0; }
+  .streams-list .pkg-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+  }
+  .streams-list .pkg-header .pkg-name { color: var(--fg); font-weight: 600; }
+  .streams-list .pkg-header .pkg-version { color: var(--muted); }
+  .streams-list .pkg-tables {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px 14px;
+    gap: 6px;
+    padding: 0 18px 12px;
   }
-  .streams-list .stream-meta span code { background: transparent; padding: 0; }
-  .streams-list .stream-copied {
-    position: absolute;
-    top: 8px;
-    right: 12px;
-    font-size: 11px;
-    color: var(--good);
-    opacity: 0;
-    transition: opacity 120ms;
+  .streams-list .table-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
     font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 120ms, transform 80ms;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    position: relative;
   }
-  .streams-list .stream-card.copied .stream-copied { opacity: 1; }
+  .streams-list .table-pill:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    transform: translateY(-1px);
+  }
+  .streams-list .table-pill.copied {
+    background: color-mix(in srgb, var(--good) 20%, transparent);
+    color: var(--good);
+    border-color: color-mix(in srgb, var(--good) 32%, transparent);
+  }
+  .streams-list .pkg-discovery {
+    padding: 0 18px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+  }
   .method {
     display: inline-block;
     font-family: var(--mono);
@@ -675,7 +717,7 @@
       </tbody>
     </table>
     <p>When wrapped, every payload is delivered as:</p>
-<pre>{ "stream": "&lt;network&gt;@&lt;stream&gt;", "data": &lt;raw payload&gt; }</pre>
+<pre>{ "stream": "&lt;network&gt;@&lt;table&gt;", "data": &lt;raw payload&gt; }</pre>
     <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly. See the <strong>HTTP</strong> group in the sidebar for non-WebSocket endpoints (<code>/streams</code>, <code>/healthz</code>, <code>/SKILL.md</code>, <code>/llms.txt</code>).</p>
   </section>
 
@@ -688,11 +730,13 @@
   "client_id": 1,
   "streams": [
     {
-      "stream": "swaps",
       "network": "solana-mainnet",
       "module": "db_out",
       "manifest": "https://.../svm-dex-v0.5.1.spkg",
-      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797"
+      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797",
+      "package_name": "svm_dex",
+      "package_version": "v0.5.1",
+      "tables": ["swaps"]
     }
   ],
   "subscriptions": ["solana-mainnet@swaps"],
@@ -702,17 +746,16 @@
 
   <section id="block">
     <h2>Block payload</h2>
-    <p>One message per non-empty block. Empty blocks are skipped; server-side cursor still advances.</p>
+    <p>One payload per <code>(network, table)</code> group per block. A spkg that emits both <code>swaps</code> and <code>transfers</code> in one block produces two per-table broadcasts.</p>
 <pre>{
-  "stream":      "swaps",
   "network":     "solana-mainnet",
+  "table":       "swaps",
   "block_num":   350000000,
   "block_hash":  "Gsk6...",
   "timestamp":   "2026-05-13 17:00:00",
   "module_hash": "bd388f2e...",
   "events": [
     {
-      "@table":        "swaps",
       "input_amount":  "1287000000",
       "input_mint":    "So11111111111111111111111111111111111111112",
       "output_amount": "6848381008732",
@@ -724,7 +767,8 @@
 }</pre>
     <p>Field rules:</p>
     <ul>
-      <li><code>@table</code> identifies the source table per row. Prefixed so a real column literally named <code>table</code> can't shadow it.</li>
+      <li>Top-level <code>table</code> identifies the channel (= the DatabaseChanges table emitted by the spkg's <code>db_out</code>).</li>
+      <li>Per-event <code>@table</code> is dropped because the parent payload already carries <code>table</code>.</li>
       <li>Field values inside <code>events[*]</code> are <strong>strings</strong> on the wire (per DatabaseChanges proto). Numeric parsing is the consumer's job.</li>
       <li>Row-level keys that duplicate top-level meta (<code>block_num</code>, <code>block_hash</code>, <code>timestamp</code>, <code>minute</code>) are stripped.</li>
       <li>Upstream <code>ordinal</code>, <code>operation</code>, <code>pk</code>/<code>composite_pk</code>, <code>update_op</code> are dropped.</li>
@@ -856,7 +900,7 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values</pre>
 ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     <p>Every retained block with <code>block_num &gt; n</code> is replayed (oldest first) before the live stream resumes. If <code>n</code> falls below the oldest retained block, a <code>gap</code> lifecycle message is emitted instead and the client should backfill the hole via Substreams gRPC directly:</p>
 <pre>{ "type": "stream", "status": "gap",
-  "stream": "swaps", "network": "solana-mainnet",
+  "network": "solana-mainnet",
   "requested_block": 100,
   "oldest_buffered_block": 500,
   "reason": "requested block outside replay window" }</pre>
@@ -910,11 +954,64 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
         <button data-tpl="LIST_SUBSCRIPTIONS">LIST_SUBSCRIPTIONS</button>
         <button data-tpl="SUBSCRIBE">SUBSCRIBE</button>
         <button data-tpl="UNSUBSCRIBE">UNSUBSCRIBE</button>
+        <button data-tpl="LIST_FILTERS">LIST_FILTERS</button>
+        <button data-tpl="CLEAR_FILTER">CLEAR_FILTER</button>
         <span class="tryit-filter" role="group" aria-label="Filter messages">
           <button data-filter="all"  class="active" type="button">All</button>
           <button data-filter="in"   type="button">Received</button>
           <button data-filter="out"  type="button">Sent</button>
         </span>
+      </div>
+      <div class="tpl-row" id="filter-presets">
+        <span style="font-size:11px; color: var(--muted); align-self:center; margin-right:4px;">SET_FILTER presets:</span>
+        <select id="protocol-preset" title="DEX protocol — source: token-api openapi">
+          <option value="">protocol=…</option>
+          <optgroup label="SVM">
+            <option value="jupiter_v4">jupiter_v4</option>
+            <option value="jupiter_v6">jupiter_v6</option>
+            <option value="pumpfun">pumpfun</option>
+            <option value="pumpfun_amm">pumpfun_amm</option>
+            <option value="raydium_amm_v4">raydium_amm_v4</option>
+            <option value="raydium_clmm">raydium_clmm</option>
+            <option value="raydium_cpmm">raydium_cpmm</option>
+            <option value="raydium_launchpad">raydium_launchpad</option>
+            <option value="meteora_daam">meteora_daam</option>
+            <option value="meteora_dlmm">meteora_dlmm</option>
+            <option value="meteora_amm">meteora_amm</option>
+            <option value="orca_whirlpool">orca_whirlpool</option>
+            <option value="boop">boop</option>
+            <option value="byreal">byreal</option>
+            <option value="darklake">darklake</option>
+            <option value="dumpfun">dumpfun</option>
+            <option value="moonshot">moonshot</option>
+            <option value="pancakeswap">pancakeswap</option>
+            <option value="spl_token_swap">spl_token_swap</option>
+            <option value="okx_dex">okx_dex</option>
+          </optgroup>
+          <optgroup label="EVM">
+            <option value="uniswap_v1">uniswap_v1</option>
+            <option value="uniswap_v2">uniswap_v2</option>
+            <option value="uniswap_v3">uniswap_v3</option>
+            <option value="uniswap_v4">uniswap_v4</option>
+            <option value="curvefi">curvefi</option>
+            <option value="balancer">balancer</option>
+            <option value="bancor">bancor</option>
+            <option value="cow">cow</option>
+            <option value="aerodrome">aerodrome</option>
+            <option value="dodo">dodo</option>
+            <option value="woofi">woofi</option>
+            <option value="traderjoe">traderjoe</option>
+            <option value="kyber_elastic">kyber_elastic</option>
+          </optgroup>
+        </select>
+        <button data-filter-preset='{"protocol":["raydium_cpmm","pumpfun","jupiter_v6","orca_whirlpool"]}'>top SVM DEXs</button>
+        <button data-filter-preset='{"protocol":["uniswap_v2","uniswap_v3","uniswap_v4","curvefi"]}'>top EVM DEXs</button>
+        <button data-filter-preset='{"input_mint":"So11111111111111111111111111111111111111112"}'>input_mint=SOL</button>
+        <button data-filter-preset='{"user":"F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8"}'>user=&lt;wallet&gt;</button>
+        <button data-filter-preset='{"program_id":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}'>program_id=SPL Token</button>
+        <button data-filter-preset='{"log_address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"}'>log_address=USDC</button>
+        <button data-filter-preset='{"from":"0x0000000000000000000000000000000000000000"}'>from=mint (0x0)</button>
+        <button data-filter-preset='{"to":"0x0000000000000000000000000000000000000000"}'>to=burn (0x0)</button>
       </div>
     </header>
     <div id="log"></div>
@@ -1029,9 +1126,10 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   };
   var PREVIEW_FIELDS_DEFAULT = ['signature', 'tx_hash', 'transaction_hash', 'amount', 'input_amount', 'output_amount', 'user', 'from', 'to', 'protocol', 'mint'];
 
-  function eventPreview(ev) {
+  function eventPreview(ev, parentTable) {
     if (!ev || typeof ev !== 'object') return '';
-    var prefer = PREVIEW_FIELDS_BY_TABLE[ev['@table']] || PREVIEW_FIELDS_DEFAULT;
+    var table = ev['@table'] || parentTable || '';
+    var prefer = PREVIEW_FIELDS_BY_TABLE[table] || PREVIEW_FIELDS_DEFAULT;
     var parts = [];
     prefer.forEach(function (k) {
       if (typeof ev[k] === 'string' && ev[k].length) {
@@ -1051,7 +1149,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     return parts.slice(0, 4).join('  ');
   }
 
-  function renderEventRow(ev) {
+  function renderEventRow(ev, parentTable) {
     var row = document.createElement('div');
     row.className = 'event-row';
 
@@ -1063,14 +1161,15 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     chev.textContent = '▶';
     rmeta.appendChild(chev);
 
+    var table = ev['@table'] || parentTable;
     var tag = document.createElement('span');
     tag.className = 'table-tag';
-    tag.textContent = '@' + (ev['@table'] || 'event');
+    tag.textContent = '@' + (table || 'event');
     rmeta.appendChild(tag);
 
     var preview = document.createElement('span');
     preview.className = 'preview';
-    preview.textContent = eventPreview(ev);
+    preview.textContent = eventPreview(ev, parentTable);
     rmeta.appendChild(preview);
 
     row.appendChild(rmeta);
@@ -1096,6 +1195,9 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
       var bn = inner.block_num != null ? inner.block_num : '?';
       var ts = inner.timestamp || '';
       var tables = {};
+      // Modern payloads carry `table` at the top level; legacy per-event
+      // `@table` is honored as a fallback.
+      if (typeof inner.table === 'string' && inner.table) tables[inner.table] = true;
       inner.events.forEach(function (e) { if (e && e['@table']) tables[e['@table']] = true; });
       var tableList = Object.keys(tables).join(',') || '(none)';
       return {
@@ -1244,8 +1346,9 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
         label.textContent = innerObj.events.length + ' event' + (innerObj.events.length === 1 ? '' : 's');
         body.appendChild(label);
 
+        var parentTable = typeof innerObj.table === 'string' ? innerObj.table : '';
         innerObj.events.forEach(function (ev) {
-          body.appendChild(renderEventRow(ev));
+          body.appendChild(renderEventRow(ev, parentTable));
         });
       } else {
         var bodyPre = document.createElement('pre');
@@ -1263,14 +1366,22 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     }
 
     logEl.appendChild(div);
+    // Cap the in-DOM history. Each payload's collapsed card still carries a
+    // full highlighted-JSON body, so unbounded growth on a busy stream stalls
+    // the renderer within seconds. Drop oldest first.
+    while (logEl.childElementCount > MAX_LOG_ENTRIES) {
+      logEl.removeChild(logEl.firstChild);
+    }
     logEl.scrollTop = logEl.scrollHeight;
   }
+
+  var MAX_LOG_ENTRIES = 200;
 
   // Browser auto-disconnect cap: connections in the in-page client are for
   // exploring the API, not long-running ingest. A live block stream can fire
   // hundreds of payloads per second; without this cap the browser runs out
   // of memory rendering them. Server-to-server clients have no such cap.
-  var AUTO_DISCONNECT_MS = 5000;
+  var AUTO_DISCONNECT_MS = 15000;
   var autoTimer = null;
   var countdownTimer = null;
   var autoDeadline = 0;
@@ -1339,7 +1450,29 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   }
 
   connectBtn.onclick = connect;
-  disconnectBtn.onclick = function () { if (ws) ws.close(); };
+  disconnectBtn.onclick = function () {
+    if (!ws) return;
+    // Detach handlers immediately so any frames the browser still has
+    // queued from the kernel buffer stop being parsed / rendered while
+    // ws.close() works its way through. Without this, on a hot stream the
+    // user sees blocks keep arriving for a second or two after pressing
+    // Disconnect — the browser is just draining onmessage callbacks for
+    // frames already received.
+    var sock = ws;
+    ws = null;
+    sock.onmessage = null;
+    sock.onerror = null;
+    sock.onclose = null;
+    try { sock.close(1000, 'user disconnected'); } catch (_) {}
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    statusEl.className = 'pill dim';
+    statusEl.textContent = 'closed';
+    connectBtn.disabled = false;
+    disconnectBtn.disabled = true;
+    sendBtn.disabled = true;
+    append('sys', '*', 'disconnected by user');
+  };
   $('clear').onclick = function () { logEl.innerHTML = ''; };
 
   sendBtn.onclick = function () {
@@ -1362,6 +1495,16 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     setTimeout(function () { urlEl.focus(); }, 50);
   }
   function closeModal() {
+    // Tear down the live socket + clear the log first. A busy stream can
+    // queue hundreds of paint-blocking nodes; if we hide the modal without
+    // draining them, the user perceives the close as frozen.
+    if (ws) {
+      try { ws.close(1000, 'modal closed'); } catch (_) {}
+      ws = null;
+    }
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    logEl.innerHTML = '';
     modalEl.classList.remove('open');
   }
   openBtn.addEventListener('click', openModal);
@@ -1386,8 +1529,10 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     });
   });
 
-  // Populate the stream dropdown from /streams; default URL to the first
-  // configured stream (single, raw-payload mode).
+  // Populate the stream dropdown from /streams. Each spkg declares its
+  // tables via `tables: [...]`; we expand that into one option per
+  // `(network, table)` so the default URL points at a concrete channel
+  // instead of a `@*` wildcard. Wildcard helpers are appended at the end.
   (function loadTryItStreams() {
     var sel = document.getElementById('stream-select');
     if (!sel) return;
@@ -1399,23 +1544,56 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           sel.disabled = true;
           return;
         }
+
+        // Build the unique `(network, table)` set + remember which networks
+        // appeared so we can suggest `<network>@*` wildcards too.
+        var seen = {};
+        var channels = [];
+        var networks = {};
+        streams.forEach(function (s) {
+          var network = s.network || '*';
+          networks[network] = true;
+          if (Array.isArray(s.tables) && s.tables.length > 0) {
+            s.tables.forEach(function (t) {
+              var id = network + '@' + t;
+              if (!seen[id]) { seen[id] = true; channels.push(id); }
+            });
+          }
+        });
+        channels.sort();
+
         sel.innerHTML = '';
-        streams.forEach(function (s, i) {
-          var id = (s.network || '*') + '@' + (s.stream || '*');
+        channels.forEach(function (id, i) {
           var opt = document.createElement('option');
           opt.value = id;
           opt.textContent = id;
           if (i === 0) opt.selected = true;
           sel.appendChild(opt);
         });
-        // Add wildcard catch-all at the end.
+
+        // Wildcard catch-alls at the bottom — separator first.
+        if (channels.length > 0) {
+          var sep = document.createElement('option');
+          sep.disabled = true;
+          sep.textContent = '──────────';
+          sel.appendChild(sep);
+        }
+        Object.keys(networks).sort().forEach(function (network) {
+          var opt = document.createElement('option');
+          opt.value = network + '@*';
+          opt.textContent = network + '@*  (every table on this network)';
+          sel.appendChild(opt);
+        });
         var all = document.createElement('option');
         all.value = '*@*';
-        all.textContent = '*@*  (every stream)';
+        all.textContent = '*@*  (every channel)';
         sel.appendChild(all);
 
-        // Default URL to the first stream.
-        urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
+        // Default URL to the first concrete `(network, table)` if any,
+        // otherwise fall back to `*@*`.
+        var initial = channels[0] || '*@*';
+        sel.value = initial;
+        urlEl.value = scheme + '://' + location.host + '/ws/' + initial;
         sel.addEventListener('change', function () {
           if (!sel.value) return;
           urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
@@ -1430,18 +1608,77 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     btn.onclick = function () {
       counter += 1;
       var method = btn.getAttribute('data-tpl');
+      var sel = document.getElementById('stream-select');
+      var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : '*@swaps';
       var body;
-      if (method === 'LIST_SUBSCRIPTIONS') {
-        body = { method: method, id: counter };
-      } else {
-        body = { method: method, params: ['*@swaps'], id: counter };
+      switch (method) {
+        case 'LIST_SUBSCRIPTIONS':
+        case 'LIST_FILTERS':
+          body = { method: method, id: counter };
+          break;
+        case 'CLEAR_FILTER':
+          body = { method: method, params: [selector], id: counter };
+          break;
+        default:
+          body = { method: method, params: [selector], id: counter };
       }
       cmdEl.value = JSON.stringify(body);
       cmdEl.focus();
     };
   });
 
+  // Apply a filter preset: paste a SET_FILTER body into the cmd field for
+  // the currently-selected stream selector AND mirror the filter into the
+  // URL's `?filter=` query so a subsequent Connect applies it at upgrade
+  // time (the auto-disconnect cap makes the live SET_FILTER path a tight
+  // window).
+  function applyFilterPreset(filterObj) {
+      counter += 1;
+      var sel = document.getElementById('stream-select');
+      var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : 'solana-mainnet@swaps';
+      var body = { method: 'SET_FILTER', params: [selector, filterObj], id: counter };
+      cmdEl.value = JSON.stringify(body);
+
+      // Rewrite the URL field: strip any existing `?filter=` then append the
+      // new one. `?from_block=...` and other params are preserved.
+      var raw = urlEl.value || '';
+      var hashIdx = raw.indexOf('#');
+      var hash = hashIdx === -1 ? '' : raw.slice(hashIdx);
+      var base = hashIdx === -1 ? raw : raw.slice(0, hashIdx);
+      var qIdx = base.indexOf('?');
+      var path = qIdx === -1 ? base : base.slice(0, qIdx);
+      var qs = qIdx === -1 ? '' : base.slice(qIdx + 1);
+      var pairs = qs.split('&').filter(function (p) {
+        return p && p.split('=')[0] !== 'filter';
+      });
+      pairs.push('filter=' + encodeURIComponent(JSON.stringify(filterObj)));
+      urlEl.value = path + '?' + pairs.join('&') + hash;
+
+      cmdEl.focus();
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-filter-preset]'), function (btn) {
+    btn.onclick = function () {
+      try {
+        applyFilterPreset(JSON.parse(btn.getAttribute('data-filter-preset')));
+      } catch (e) { /* ignore */ }
+    };
+  });
+
+  // Protocol dropdown: emit a `{ "protocol": "<picked>" }` filter on change.
+  var protoSel = document.getElementById('protocol-preset');
+  if (protoSel) {
+    protoSel.addEventListener('change', function () {
+      if (!protoSel.value) return;
+      applyFilterPreset({ protocol: protoSel.value });
+    });
+  }
+
   // Populate the "Available streams" section by fetching /streams.
+  // Render one network group per `network`, listing every `(network, table)`
+  // channel underneath. Each table row carries the spkg `name v0.X.Y` that
+  // backs it (multiple spkgs feeding the same channel are joined with `,`).
+  // Tables not declared in streams.toml render as a discovery placeholder.
   (function loadStreams() {
     var host = document.getElementById('streams-list');
     if (!host) return;
@@ -1452,57 +1689,104 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           host.innerHTML = '<p style="color: var(--muted); font-size: 13px;">No streams configured.</p>';
           return;
         }
-        host.innerHTML = '';
+
+        // networks: { network: { packages: [{ name, version, tables: [t,...], discovery: bool }, ...] } }
+        // Each spkg is its own sub-group under the network — tables can repeat
+        // across packages (e.g. two swap-emitting spkgs both publish `swaps`)
+        // and that's expressed by appearing under each spkg's group.
+        var networks = {};
         streams.forEach(function (s) {
-          var id = (s.network || '*') + '@' + (s.stream || '*');
-          var card = document.createElement('div');
-          card.className = 'stream-card';
-          card.setAttribute('data-id', id);
-          card.title = 'Click to copy ' + id;
-
-          var idEl = document.createElement('div');
-          idEl.className = 'stream-id';
-          idEl.textContent = id;
-          card.appendChild(idEl);
-
-          if (s.description) {
-            var desc = document.createElement('p');
-            desc.className = 'stream-desc';
-            desc.textContent = s.description;
-            card.appendChild(desc);
-          }
-
-          var meta = document.createElement('div');
-          meta.className = 'stream-meta';
-          var parts = [];
-          if (s.package_name)    parts.push({ k: 'package', v: s.package_name + (s.package_version ? ' ' + s.package_version : '') });
-          if (s.module)          parts.push({ k: 'module',  v: s.module });
-          if (s.module_hash)     parts.push({ k: 'hash',    v: s.module_hash.slice(0, 12) + '…' });
-          parts.forEach(function (p) {
-            var span = document.createElement('span');
-            span.innerHTML = p.k + ' <code>' + escapeHtml(p.v) + '</code>';
-            meta.appendChild(span);
+          var network = s.network || '*';
+          if (!networks[network]) networks[network] = { packages: [] };
+          networks[network].packages.push({
+            name: s.package_name || '?',
+            version: s.package_version || '',
+            tables: (Array.isArray(s.tables) ? s.tables.slice() : []),
+            discovery: !Array.isArray(s.tables) || s.tables.length === 0,
           });
-          card.appendChild(meta);
+        });
 
-          var copied = document.createElement('span');
-          copied.className = 'stream-copied';
-          copied.textContent = '✓ copied';
-          card.appendChild(copied);
+        host.innerHTML = '';
+        Object.keys(networks).sort().forEach(function (network) {
+          var group = document.createElement('div');
+          group.className = 'network-group';
 
-          card.addEventListener('click', function () {
-            var text = id;
-            var done = function () {
-              card.classList.add('copied');
-              setTimeout(function () { card.classList.remove('copied'); }, 1200);
-            };
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(text).then(done, done);
+          var header = document.createElement('div');
+          header.className = 'network-header';
+
+          var dot = document.createElement('span');
+          dot.className = 'network-dot';
+          header.appendChild(dot);
+
+          var nameEl = document.createElement('span');
+          nameEl.className = 'network-name';
+          nameEl.textContent = network;
+          header.appendChild(nameEl);
+
+          // Total channel count across all packages in this network.
+          var totalChannels = 0;
+          networks[network].packages.forEach(function (pkg) {
+            totalChannels += pkg.discovery ? 1 : pkg.tables.length;
+          });
+          var count = document.createElement('span');
+          count.className = 'network-count';
+          count.textContent = totalChannels + ' ' + (totalChannels === 1 ? 'table' : 'tables');
+          header.appendChild(count);
+
+          group.appendChild(header);
+
+          // Sort packages by name + version for stable rendering.
+          networks[network].packages.sort(function (a, b) {
+            var ka = a.name + ' ' + a.version;
+            var kb = b.name + ' ' + b.version;
+            return ka < kb ? -1 : ka > kb ? 1 : 0;
+          });
+
+          networks[network].packages.forEach(function (pkg) {
+            var pkgGroup = document.createElement('div');
+            pkgGroup.className = 'pkg-group';
+
+            var pkgHeader = document.createElement('div');
+            pkgHeader.className = 'pkg-header';
+            pkgHeader.innerHTML =
+              '<span class="pkg-name">' + escapeHtml(pkg.name) + '</span>' +
+              (pkg.version ? '<span class="pkg-version">' + escapeHtml(pkg.version) + '</span>' : '');
+            pkgGroup.appendChild(pkgHeader);
+
+            if (pkg.discovery) {
+              var hint = document.createElement('div');
+              hint.className = 'pkg-discovery';
+              hint.textContent = 'tables discovered at runtime';
+              pkgGroup.appendChild(hint);
             } else {
-              done();
+              var pillRow = document.createElement('div');
+              pillRow.className = 'pkg-tables';
+              pkg.tables.slice().sort().forEach(function (table) {
+                var id = network + '@' + table;
+                var pill = document.createElement('span');
+                pill.className = 'table-pill';
+                pill.textContent = table;
+                pill.title = 'Click to copy ' + id;
+                pill.addEventListener('click', function () {
+                  var done = function () {
+                    pill.classList.add('copied');
+                    setTimeout(function () { pill.classList.remove('copied'); }, 1200);
+                  };
+                  if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(id).then(done, done);
+                  } else {
+                    done();
+                  }
+                });
+                pillRow.appendChild(pill);
+              });
+              pkgGroup.appendChild(pillRow);
             }
+
+            group.appendChild(pkgGroup);
           });
-          host.appendChild(card);
+
+          host.appendChild(group);
         });
       })
       .catch(function (err) {

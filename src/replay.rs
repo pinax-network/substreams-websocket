@@ -5,16 +5,13 @@ use std::{
     sync::Arc,
 };
 
+use serde_json::Value;
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::Mutex,
 };
 
-/// Maximum percentage headroom over `max_blocks` before a lazy trim fires.
-/// At `max_blocks = 1000` and `headroom = 0.10`, the file is allowed to grow
-/// to 1100 lines before being rewritten down to 1000. Avoids per-block
-/// rewrites at the cost of a small overshoot.
 const TRIM_HEADROOM_FRACTION: f32 = 0.10;
 
 #[derive(Debug, thiserror::Error)]
@@ -29,9 +26,10 @@ pub enum ReplayError {
     MissingBlockNum,
 }
 
-/// Per-stream append-only JSONL replay log. One file per `(network, stream)`
-/// pair, named `{network}@{stream}.jsonl` under `dir`. Holds the last
-/// `max_blocks` payloads. Disabled when `max_blocks == 0`.
+/// One append-only JSONL file per `(network, package_name, package_version,
+/// module_hash)`. Each line is the **whole** block JSON (network, block_num,
+/// timestamp, module_hash, events). On resume, callers filter events by
+/// table at read time, since one block may carry events for multiple tables.
 #[derive(Clone)]
 pub struct ReplayLog {
     inner: Option<Arc<ReplayInner>>,
@@ -49,9 +47,36 @@ struct StreamState {
     line_count: usize,
 }
 
+/// File-name key derived from spkg provenance + network.
+fn file_key(
+    network: &str,
+    package_name: &str,
+    package_version: &str,
+    module_hash_hex: &str,
+) -> String {
+    format!(
+        "{}-{}@{}-{}",
+        sanitize(network),
+        sanitize(package_name),
+        sanitize(package_version),
+        sanitize(module_hash_hex),
+    )
+}
+
+fn sanitize(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 impl ReplayLog {
-    /// Disabled instance — `append` and `read_from` are no-ops / always return
-    /// gap. Equivalent to `new(_, 0)`.
     pub fn disabled() -> Self {
         Self { inner: None }
     }
@@ -80,20 +105,20 @@ impl ReplayLog {
         self.inner.as_ref().map(|i| i.max_blocks).unwrap_or(0)
     }
 
-    /// Append one JSONL payload for `(network, stream)`. The payload must be
-    /// pre-serialized JSON ending without a trailing newline (one will be
-    /// added). Triggers a lazy trim once line count exceeds the threshold.
+    /// Append one block payload to the spkg-provenance-keyed JSONL file.
     pub async fn append(
         &self,
         network: &str,
-        stream: &str,
+        package_name: &str,
+        package_version: &str,
+        module_hash_hex: &str,
         payload: &str,
     ) -> Result<(), ReplayError> {
         let Some(inner) = &self.inner else {
             return Ok(());
         };
 
-        let key = format!("{network}@{stream}");
+        let key = file_key(network, package_name, package_version, module_hash_hex);
         let mut guard = inner.streams.lock().await;
         let state = match guard.get_mut(&key) {
             Some(state) => state,
@@ -129,59 +154,20 @@ impl ReplayLog {
         Ok(())
     }
 
-    /// Read every retained payload with `block_num > from_block`, ordered by
-    /// `block_num` ascending. Returns `Ok((blocks, oldest))` where `oldest` is
-    /// the smallest `block_num` present on disk (None if empty). Callers use
-    /// `oldest` to decide whether to emit a `gap` lifecycle message:
-    /// `from_block < oldest - 1` means the resume point is below the window.
-    pub async fn read_from(
-        &self,
-        network: &str,
-        stream: &str,
-        from_block: u64,
-    ) -> Result<ReadResult, ReplayError> {
-        let Some(inner) = &self.inner else {
-            return Ok(ReadResult::default());
-        };
-
-        let path = inner.dir.join(format!("{network}@{stream}.jsonl"));
-        if !path.exists() {
-            return Ok(ReadResult::default());
-        }
-
-        let file = File::open(&path).await?;
-        let mut reader = BufReader::new(file).lines();
-        let mut blocks = Vec::new();
-        let mut oldest: Option<u64> = None;
-
-        while let Some(line) = reader.next_line().await? {
-            if line.is_empty() {
-                continue;
-            }
-            let block_num = parse_block_num(&line)?;
-            if oldest.is_none() {
-                oldest = Some(block_num);
-            }
-            if block_num > from_block {
-                blocks.push((block_num, line));
-            }
-        }
-        Ok(ReadResult { blocks, oldest })
-    }
-
-    /// Drop every payload with `block_num > last_valid_block`. Called on
-    /// `BlockUndoSignal` so replay never serves undone forks.
+    /// Truncate the spkg log at the first row with `block_num > last_valid_block`.
     pub async fn truncate_after(
         &self,
         network: &str,
-        stream: &str,
+        package_name: &str,
+        package_version: &str,
+        module_hash_hex: &str,
         last_valid_block: u64,
     ) -> Result<(), ReplayError> {
         let Some(inner) = &self.inner else {
             return Ok(());
         };
 
-        let key = format!("{network}@{stream}");
+        let key = file_key(network, package_name, package_version, module_hash_hex);
         let path = inner.dir.join(format!("{key}.jsonl"));
         if !path.exists() {
             return Ok(());
@@ -208,14 +194,120 @@ impl ReplayLog {
         }
         Ok(())
     }
+
+    /// Read every retained block with `block_num > from_block` that carries at
+    /// least one event whose `@table == target_table` (or any table when
+    /// `target_table` is `None`). Scans every `.jsonl` file in the directory
+    /// whose name starts with `<network>-` (or all files when `network_filter`
+    /// is `None`). Returns per-table sub-blocks: each entry holds the
+    /// filtered block JSON with `events[]` restricted to rows matching the
+    /// target table.
+    pub async fn read_from(
+        &self,
+        network_filter: Option<&str>,
+        target_table: Option<&str>,
+        from_block: u64,
+    ) -> Result<ReadResult, ReplayError> {
+        let Some(inner) = &self.inner else {
+            return Ok(ReadResult::default());
+        };
+        if !inner.dir.exists() {
+            return Ok(ReadResult::default());
+        }
+
+        let mut dir = tokio::fs::read_dir(&inner.dir).await?;
+        let mut matched_files = Vec::new();
+        while let Some(entry) = dir.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            if let Some(net) = network_filter
+                && !stem.starts_with(&format!("{}-", sanitize(net)))
+            {
+                continue;
+            }
+            matched_files.push(entry.path());
+        }
+
+        let mut blocks: Vec<(u64, String)> = Vec::new();
+        let mut oldest: Option<u64> = None;
+
+        for path in matched_files {
+            let file = File::open(&path).await?;
+            let mut reader = BufReader::new(file).lines();
+            while let Some(line) = reader.next_line().await? {
+                if line.is_empty() {
+                    continue;
+                }
+                let mut value: Value = serde_json::from_str(&line)?;
+                let block_num = value
+                    .get("block_num")
+                    .and_then(Value::as_u64)
+                    .ok_or(ReplayError::MissingBlockNum)?;
+                if oldest.map_or(true, |o| block_num < o) {
+                    oldest = Some(block_num);
+                }
+                if block_num <= from_block {
+                    continue;
+                }
+                if let Some(table) = target_table {
+                    filter_events_by_table(&mut value, table);
+                    let has_events = value
+                        .get("events")
+                        .and_then(Value::as_array)
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false);
+                    if !has_events {
+                        continue;
+                    }
+                    // Rewrite the top-level `table` field so the per-table
+                    // payload looks identical to a live broadcast.
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("table".to_owned(), Value::String(table.to_owned()));
+                    }
+                }
+                blocks.push((block_num, value.to_string()));
+            }
+        }
+
+        blocks.sort_by_key(|(n, _)| *n);
+        Ok(ReadResult { blocks, oldest })
+    }
+}
+
+fn filter_events_by_table(block: &mut Value, target_table: &str) {
+    let Some(events) = block.get_mut("events").and_then(Value::as_array_mut) else {
+        return;
+    };
+    events.retain(|event| {
+        event
+            .get("@table")
+            .and_then(Value::as_str)
+            .map(|t| t == target_table)
+            .unwrap_or(false)
+    });
+    // Drop the per-event @table prefix — the parent block now carries `table`
+    // at the top level. Rebuild the map in iteration order so we preserve the
+    // original field ordering; `serde_json::Map::remove` under the
+    // `preserve_order` feature is `swap_remove` and would scramble it.
+    for event in events {
+        if let Some(obj) = event.as_object_mut() {
+            let mut rebuilt = serde_json::Map::with_capacity(obj.len().saturating_sub(1));
+            for (k, v) in obj.iter() {
+                if k == "@table" {
+                    continue;
+                }
+                rebuilt.insert(k.clone(), v.clone());
+            }
+            *obj = rebuilt;
+        }
+    }
 }
 
 #[derive(Default, Debug)]
 pub struct ReadResult {
-    /// Payloads with `block_num > from_block`, ordered ascending.
     pub blocks: Vec<(u64, String)>,
-    /// Smallest `block_num` present on disk, regardless of `from_block`.
-    /// `None` if the file is empty / missing.
     pub oldest: Option<u64>,
 }
 
@@ -243,8 +335,8 @@ async fn trim_to(path: &Path, keep: usize) -> Result<(), io::Error> {
             all.push(line);
         }
     }
-    let drop = all.len().saturating_sub(keep);
-    let tail = &all[drop..];
+    let drop_n = all.len().saturating_sub(keep);
+    let tail = &all[drop_n..];
     rewrite_lines(path, tail).await
 }
 
@@ -266,10 +358,10 @@ async fn rewrite_lines(path: &Path, lines: &[String]) -> Result<(), io::Error> {
 }
 
 fn parse_block_num(line: &str) -> Result<u64, ReplayError> {
-    let value: serde_json::Value = serde_json::from_str(line)?;
+    let value: Value = serde_json::from_str(line)?;
     value
         .get("block_num")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(Value::as_u64)
         .ok_or(ReplayError::MissingBlockNum)
 }
 
@@ -277,21 +369,32 @@ fn parse_block_num(line: &str) -> Result<u64, ReplayError> {
 mod tests {
     use super::*;
 
-    fn payload(block_num: u64) -> String {
+    const PKG: &str = "svm_swaps";
+    const VER: &str = "v0.1.0";
+    const HASH: &str = "deadbeef";
+
+    fn block_with_tables(block_num: u64, tables: &[&str]) -> String {
+        let events: Vec<serde_json::Value> = tables
+            .iter()
+            .map(|t| serde_json::json!({ "@table": *t, "id": format!("evt-{block_num}-{t}") }))
+            .collect();
         serde_json::json!({
-            "stream": "swaps",
             "network": "solana-mainnet",
             "block_num": block_num,
-            "events": [],
+            "events": events,
         })
         .to_string()
     }
 
     fn tmpdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "substreams-websocket-replay-{}-{}",
+            "substreams-websocket-replay-{}-{}-{}",
             name,
             std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -299,62 +402,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_and_read_returns_blocks_above_from_block() {
-        let dir = tmpdir("happy");
+    async fn read_by_table_returns_filtered_blocks_above_from_block() {
+        let dir = tmpdir("by_table");
         let log = ReplayLog::new(&dir, 100);
         for n in 100..110 {
-            log.append("solana-mainnet", "swaps", &payload(n))
-                .await
-                .unwrap();
-        }
-        let result = log.read_from("solana-mainnet", "swaps", 105).await.unwrap();
-        let block_nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
-        assert_eq!(block_nums, vec![106, 107, 108, 109]);
-        assert_eq!(result.oldest, Some(100));
-    }
-
-    #[tokio::test]
-    async fn read_with_future_from_block_returns_empty() {
-        let dir = tmpdir("future");
-        let log = ReplayLog::new(&dir, 100);
-        for n in 100..105 {
-            log.append("solana-mainnet", "swaps", &payload(n))
-                .await
-                .unwrap();
-        }
-        let result = log
-            .read_from("solana-mainnet", "swaps", 9_999)
+            log.append(
+                "solana-mainnet",
+                PKG,
+                VER,
+                HASH,
+                &block_with_tables(n, &["swaps", "transfers"]),
+            )
             .await
             .unwrap();
-        assert!(result.blocks.is_empty());
+        }
+        let result = log
+            .read_from(Some("solana-mainnet"), Some("swaps"), 105)
+            .await
+            .unwrap();
+        assert_eq!(result.blocks.len(), 4);
+        for (block_num, raw) in &result.blocks {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(v["table"], "swaps");
+            let events = v["events"].as_array().unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(events[0].get("@table").is_none(), "@table must be stripped");
+            assert_eq!(events[0]["id"], format!("evt-{block_num}-swaps"));
+        }
         assert_eq!(result.oldest, Some(100));
     }
 
     #[tokio::test]
-    async fn read_with_missing_file_reports_no_oldest() {
-        let dir = tmpdir("missing");
+    async fn read_by_table_skips_blocks_without_matching_events() {
+        let dir = tmpdir("no_match");
         let log = ReplayLog::new(&dir, 100);
-        let result = log.read_from("solana-mainnet", "swaps", 0).await.unwrap();
-        assert!(result.blocks.is_empty());
-        assert!(result.oldest.is_none());
+        // odd blocks carry only `transfers`, even blocks carry only `swaps`
+        for n in 100..104 {
+            let tables: &[&str] = if n % 2 == 0 {
+                &["swaps"]
+            } else {
+                &["transfers"]
+            };
+            log.append(
+                "solana-mainnet",
+                PKG,
+                VER,
+                HASH,
+                &block_with_tables(n, tables),
+            )
+            .await
+            .unwrap();
+        }
+        let result = log
+            .read_from(Some("solana-mainnet"), Some("swaps"), 99)
+            .await
+            .unwrap();
+        assert_eq!(result.blocks.len(), 2);
+        let block_nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
+        assert_eq!(block_nums, vec![100, 102]);
     }
 
     #[tokio::test]
-    async fn lazy_trim_keeps_only_max_blocks_after_threshold() {
-        let dir = tmpdir("trim");
-        let log = ReplayLog::new(&dir, 10);
-        // threshold = 10 + ceil(10*0.10) = 11, so on the 12th append we trim
-        // back down to 10. Append 15 to verify we end exactly at 10 holding
-        // the last 10 block_nums.
-        for n in 100..115 {
-            log.append("solana-mainnet", "swaps", &payload(n))
-                .await
-                .unwrap();
-        }
-        let result = log.read_from("solana-mainnet", "swaps", 0).await.unwrap();
-        assert_eq!(result.blocks.len(), 10);
-        let block_nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
-        assert_eq!(block_nums, (105..115).collect::<Vec<_>>());
+    async fn cross_file_scan_merges_two_spkgs_into_one_table_stream() {
+        let dir = tmpdir("cross");
+        let log = ReplayLog::new(&dir, 100);
+        log.append(
+            "solana-mainnet",
+            "svm_dex",
+            "v0.5.0",
+            "aaaa",
+            &block_with_tables(100, &["swaps"]),
+        )
+        .await
+        .unwrap();
+        log.append(
+            "solana-mainnet",
+            "svm_pump",
+            "v0.2.0",
+            "bbbb",
+            &block_with_tables(101, &["swaps"]),
+        )
+        .await
+        .unwrap();
+        let result = log
+            .read_from(Some("solana-mainnet"), Some("swaps"), 0)
+            .await
+            .unwrap();
+        let nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
+        assert_eq!(nums, vec![100, 101]);
     }
 
     #[tokio::test]
@@ -362,58 +497,45 @@ mod tests {
         let dir = tmpdir("reorg");
         let log = ReplayLog::new(&dir, 100);
         for n in 100..110 {
-            log.append("solana-mainnet", "swaps", &payload(n))
-                .await
-                .unwrap();
-        }
-        log.truncate_after("solana-mainnet", "swaps", 104)
+            log.append(
+                "solana-mainnet",
+                PKG,
+                VER,
+                HASH,
+                &block_with_tables(n, &["swaps"]),
+            )
             .await
             .unwrap();
-        let result = log.read_from("solana-mainnet", "swaps", 0).await.unwrap();
-        let block_nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
-        assert_eq!(block_nums, vec![100, 101, 102, 103, 104]);
+        }
+        log.truncate_after("solana-mainnet", PKG, VER, HASH, 104)
+            .await
+            .unwrap();
+        let result = log
+            .read_from(Some("solana-mainnet"), Some("swaps"), 0)
+            .await
+            .unwrap();
+        let nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
+        assert_eq!(nums, vec![100, 101, 102, 103, 104]);
     }
 
     #[tokio::test]
     async fn disabled_log_is_noop() {
         let log = ReplayLog::disabled();
         assert!(!log.is_enabled());
-        log.append("solana-mainnet", "swaps", &payload(1))
+        log.append(
+            "solana-mainnet",
+            PKG,
+            VER,
+            HASH,
+            &block_with_tables(1, &["swaps"]),
+        )
+        .await
+        .unwrap();
+        let result = log
+            .read_from(Some("solana-mainnet"), Some("swaps"), 0)
             .await
             .unwrap();
-        let result = log.read_from("solana-mainnet", "swaps", 0).await.unwrap();
         assert!(result.blocks.is_empty());
         assert!(result.oldest.is_none());
-    }
-
-    #[tokio::test]
-    async fn max_blocks_zero_is_disabled() {
-        let dir = tmpdir("zero");
-        let log = ReplayLog::new(&dir, 0);
-        assert!(!log.is_enabled());
-        log.append("solana-mainnet", "swaps", &payload(1))
-            .await
-            .unwrap();
-        assert!(!dir.join("solana-mainnet@swaps.jsonl").exists());
-    }
-
-    #[tokio::test]
-    async fn line_count_reloaded_on_restart() {
-        let dir = tmpdir("restart");
-        {
-            let log = ReplayLog::new(&dir, 5);
-            for n in 100..103 {
-                log.append("solana-mainnet", "swaps", &payload(n))
-                    .await
-                    .unwrap();
-            }
-        }
-        // New instance, same dir — must not trim existing content prematurely.
-        let log = ReplayLog::new(&dir, 5);
-        log.append("solana-mainnet", "swaps", &payload(103))
-            .await
-            .unwrap();
-        let result = log.read_from("solana-mainnet", "swaps", 0).await.unwrap();
-        assert_eq!(result.blocks.len(), 4);
     }
 }

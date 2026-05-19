@@ -5,7 +5,8 @@ use std::{
 
 use tokio::{fs, io::AsyncWriteExt};
 
-/// Per-stream cursor persistence. One file per (network, name) under `dir`.
+/// Per-stream cursor persistence. One file per
+/// `(network, package_name, package_version, module_hash)` under `dir`.
 #[derive(Debug, Clone)]
 pub struct CursorStore {
     dir: PathBuf,
@@ -16,19 +17,36 @@ impl CursorStore {
         Self { dir: dir.into() }
     }
 
-    /// Cursor file path keyed by `{network}-{module_hash_hex}`. The same
-    /// `.spkg` module hash may be run against multiple chains (e.g. EVM
-    /// mainnet vs Arbitrum), so the network is part of the cursor identity.
-    pub fn path(&self, network: &str, module_hash_hex: &str) -> PathBuf {
+    /// Cursor file path keyed by `{network}-{pkg_name}@{pkg_version}-{hash}`.
+    /// Naming mirrors `substreams info`: package name + version anchor the
+    /// file to the source spkg, module_hash disambiguates schema upgrades
+    /// inside the same package, and network keeps cross-chain runs isolated.
+    pub fn path(
+        &self,
+        network: &str,
+        package_name: &str,
+        package_version: &str,
+        module_hash_hex: &str,
+    ) -> PathBuf {
         self.dir.join(format!(
-            "{}-{}.cursor",
+            "{}-{}@{}-{}.cursor",
             sanitize(network),
+            sanitize(package_name),
+            sanitize(package_version),
             sanitize(module_hash_hex)
         ))
     }
 
-    pub async fn load(&self, network: &str, module_hash_hex: &str) -> io::Result<Option<String>> {
-        match fs::read_to_string(self.path(network, module_hash_hex)).await {
+    pub async fn load(
+        &self,
+        network: &str,
+        package_name: &str,
+        package_version: &str,
+        module_hash_hex: &str,
+    ) -> io::Result<Option<String>> {
+        match fs::read_to_string(self.path(network, package_name, package_version, module_hash_hex))
+            .await
+        {
             Ok(value) => {
                 let trimmed = value.trim().to_owned();
                 Ok(if trimmed.is_empty() {
@@ -43,12 +61,19 @@ impl CursorStore {
     }
 
     /// Persist atomically: write to `<path>.tmp` then rename.
-    pub async fn save(&self, network: &str, module_hash_hex: &str, cursor: &str) -> io::Result<()> {
+    pub async fn save(
+        &self,
+        network: &str,
+        package_name: &str,
+        package_version: &str,
+        module_hash_hex: &str,
+        cursor: &str,
+    ) -> io::Result<()> {
         if cursor.is_empty() {
             return Ok(());
         }
         fs::create_dir_all(&self.dir).await?;
-        let final_path = self.path(network, module_hash_hex);
+        let final_path = self.path(network, package_name, package_version, module_hash_hex);
         let tmp_path = final_path.with_extension("cursor.tmp");
         {
             let mut file = fs::File::create(&tmp_path).await?;
@@ -63,7 +88,7 @@ fn sanitize(value: &str) -> String {
     value
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c
             } else {
                 '_'
@@ -81,23 +106,32 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    const PKG: &str = "svm_transfers";
+    const VER: &str = "v0.3.0";
+
     #[tokio::test]
     async fn roundtrips_cursor() {
         let dir = tempdir().expect("tempdir");
         let store = CursorStore::new(dir.path());
         let net = "solana-mainnet";
         let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert_eq!(store.load(net, hash).await.unwrap(), None);
+        assert_eq!(store.load(net, PKG, VER, hash).await.unwrap(), None);
 
-        store.save(net, hash, "abc123").await.expect("save");
+        store
+            .save(net, PKG, VER, hash, "abc123")
+            .await
+            .expect("save");
         assert_eq!(
-            store.load(net, hash).await.unwrap(),
+            store.load(net, PKG, VER, hash).await.unwrap(),
             Some("abc123".to_owned())
         );
 
-        store.save(net, hash, "def456").await.expect("save");
+        store
+            .save(net, PKG, VER, hash, "def456")
+            .await
+            .expect("save");
         assert_eq!(
-            store.load(net, hash).await.unwrap(),
+            store.load(net, PKG, VER, hash).await.unwrap(),
             Some("def456".to_owned())
         );
     }
@@ -107,23 +141,40 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = CursorStore::new(dir.path());
         let hash = "1111111111111111111111111111111111111111";
-        store.save("ethereum-mainnet", hash, "ETH").await.unwrap();
-        store.save("arbitrum-one", hash, "ARB").await.unwrap();
-        store.save("base-mainnet", hash, "BASE").await.unwrap();
+        store
+            .save("ethereum-mainnet", PKG, VER, hash, "ETH")
+            .await
+            .unwrap();
+        store
+            .save("arbitrum-one", PKG, VER, hash, "ARB")
+            .await
+            .unwrap();
+        store
+            .save("base-mainnet", PKG, VER, hash, "BASE")
+            .await
+            .unwrap();
         assert_eq!(
             store
-                .load("ethereum-mainnet", hash)
+                .load("ethereum-mainnet", PKG, VER, hash)
                 .await
                 .unwrap()
                 .as_deref(),
             Some("ETH")
         );
         assert_eq!(
-            store.load("arbitrum-one", hash).await.unwrap().as_deref(),
+            store
+                .load("arbitrum-one", PKG, VER, hash)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("ARB")
         );
         assert_eq!(
-            store.load("base-mainnet", hash).await.unwrap().as_deref(),
+            store
+                .load("base-mainnet", PKG, VER, hash)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("BASE")
         );
     }
@@ -135,9 +186,41 @@ mod tests {
         let net = "solana-mainnet";
         let h1 = "2222222222222222222222222222222222222222";
         let h2 = "3333333333333333333333333333333333333333";
-        store.save(net, h1, "AAA").await.unwrap();
-        store.save(net, h2, "BBB").await.unwrap();
-        assert_eq!(store.load(net, h1).await.unwrap().as_deref(), Some("AAA"));
-        assert_eq!(store.load(net, h2).await.unwrap().as_deref(), Some("BBB"));
+        store.save(net, PKG, VER, h1, "AAA").await.unwrap();
+        store.save(net, PKG, VER, h2, "BBB").await.unwrap();
+        assert_eq!(
+            store.load(net, PKG, VER, h1).await.unwrap().as_deref(),
+            Some("AAA")
+        );
+        assert_eq!(
+            store.load(net, PKG, VER, h2).await.unwrap().as_deref(),
+            Some("BBB")
+        );
+    }
+
+    #[tokio::test]
+    async fn different_pkg_versions_isolated() {
+        let dir = tempdir().expect("tempdir");
+        let store = CursorStore::new(dir.path());
+        let net = "solana-mainnet";
+        let hash = "4444444444444444444444444444444444444444";
+        store.save(net, PKG, "v0.3.0", hash, "OLD").await.unwrap();
+        store.save(net, PKG, "v0.4.0", hash, "NEW").await.unwrap();
+        assert_eq!(
+            store
+                .load(net, PKG, "v0.3.0", hash)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("OLD")
+        );
+        assert_eq!(
+            store
+                .load(net, PKG, "v0.4.0", hash)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("NEW")
+        );
     }
 }

@@ -47,11 +47,12 @@ pub enum DecodeError {
     Serialize(#[from] serde_json::Error),
 }
 
+/// Decoded block, pre-routing. Subscribers receive per-table sub-blocks
+/// (one per `@table` group) so the routing happens at the broadcast layer,
+/// not at decode. Each event row carries its `@table` key so the server can
+/// split the block by table before fan-out.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DatabaseChangesBlockMessage {
-    /// Stream display name (the TOML `[[streams]].name`). Forms the
-    /// `(stream, network)` identity WebSocket subscribers register against.
-    pub stream: String,
     pub network: String,
     pub block_num: u64,
     pub block_hash: String,
@@ -70,16 +71,14 @@ pub struct DatabaseChangesBlockMessage {
 /// that duplicate `block.*` (block_num, block_hash, timestamp, minute) are
 /// stripped from each row.
 pub fn decode_database_changes(
-    stream: &str,
     payload: &[u8],
     context: BlockContext,
 ) -> Result<DatabaseChangesBlockMessage, DecodeError> {
     let changes = DatabaseChanges::decode(payload).map_err(DecodeError::DatabaseChanges)?;
-    Ok(normalize_database_changes(stream, changes, context))
+    Ok(normalize_database_changes(changes, context))
 }
 
 pub fn normalize_database_changes(
-    stream: &str,
     changes: DatabaseChanges,
     context: BlockContext,
 ) -> DatabaseChangesBlockMessage {
@@ -95,10 +94,6 @@ pub fn normalize_database_changes(
                 }
                 row.insert(field.name, serde_json::Value::String(field.value));
             }
-            // Drop rows that carry no payload after the block-header columns
-            // are stripped (e.g. a `blocks` table whose only fields are
-            // block_num / block_hash / timestamp / minute, which are already
-            // surfaced at the top level of the message).
             if row.len() <= 1 {
                 return None;
             }
@@ -107,7 +102,6 @@ pub fn normalize_database_changes(
         .collect();
 
     DatabaseChangesBlockMessage {
-        stream: stream.to_owned(),
         network: context.network,
         block_num: context.block_num,
         block_hash: context.block_hash,
@@ -178,8 +172,7 @@ mod tests {
         let mut payload = Vec::new();
         changes.encode(&mut payload).expect("encode");
 
-        let message = decode_database_changes("swaps", &payload, context()).expect("decode ok");
-        assert_eq!(message.stream, "swaps");
+        let message = decode_database_changes(&payload, context()).expect("decode ok");
         assert_eq!(message.network, "solana-mainnet");
         assert_eq!(message.block_num, 350_000_000);
         assert_eq!(message.block_hash, "block-hash");
@@ -223,7 +216,7 @@ mod tests {
         let mut payload = Vec::new();
         changes.encode(&mut payload).expect("encode");
 
-        let message = decode_database_changes("swaps", &payload, context()).expect("decode ok");
+        let message = decode_database_changes(&payload, context()).expect("decode ok");
         let event = &message.events[0];
         assert!(event.get("block_num").is_none());
         assert!(event.get("block_hash").is_none());
@@ -263,7 +256,7 @@ mod tests {
         let mut payload = Vec::new();
         changes.encode(&mut payload).expect("encode");
 
-        let message = decode_database_changes("swaps", &payload, context()).expect("decode");
+        let message = decode_database_changes(&payload, context()).expect("decode");
         assert_eq!(
             message.events.len(),
             1,
@@ -283,9 +276,9 @@ mod tests {
                 primary_key: None,
             }],
         };
-        let message = normalize_database_changes("swaps", changes, context());
+        let message = normalize_database_changes(changes, context());
         let json = serde_json::to_value(message).expect("serialize");
-        assert_eq!(json["stream"], "swaps");
+        assert!(json.get("stream").is_none(), "stream field is removed");
         assert_eq!(json["network"], "solana-mainnet");
         assert_eq!(json["block_num"], 350_000_000);
         assert_eq!(json["block_hash"], "block-hash");
@@ -319,12 +312,12 @@ mod tests {
                 primary_key: None,
             }],
         };
-        let message = normalize_database_changes("swaps", changes, context());
+        let message = normalize_database_changes(changes, context());
         let value = serde_json::to_value(&message).expect("to_value");
         let text = serde_json::to_string(&value).expect("to_string");
         assert!(
-            text.find("\"stream\"").unwrap() < text.find("\"events\"").unwrap(),
-            "events must come after stream in {text}"
+            text.find("\"network\"").unwrap() < text.find("\"events\"").unwrap(),
+            "events must come after network in {text}"
         );
         assert!(
             text.find("\"@table\"").unwrap() < text.find("\"zeta\"").unwrap(),
@@ -343,14 +336,13 @@ mod tests {
                 primary_key: None,
             }],
         };
-        let message = normalize_database_changes("swaps", changes, context());
+        let message = normalize_database_changes(changes, context());
         let text = serde_json::to_string(&message).expect("serialize");
 
-        // Top-level: stream, network, block_num, block_hash, timestamp,
-        // module_hash, events — in that exact order. `events` is last so
-        // subscribers see the metadata header before the payload array.
+        // Top-level: network, block_num, block_hash, timestamp, module_hash,
+        // events — in that exact order. `events` is last so subscribers see
+        // the metadata header before the payload array.
         let order = [
-            "\"stream\"",
             "\"network\"",
             "\"block_num\"",
             "\"block_hash\"",
@@ -374,7 +366,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_payload() {
-        let error = decode_database_changes("x", &[0xff, 0xff], context()).expect_err("rejects");
+        let error = decode_database_changes(&[0xff, 0xff], context()).expect_err("rejects");
         assert!(matches!(error, DecodeError::DatabaseChanges(_)));
     }
 }

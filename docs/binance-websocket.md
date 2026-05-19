@@ -9,7 +9,7 @@ Authoritative upstream references:
 
 ## What we mirrored verbatim
 
-- **Stream selector form `<symbol>@<channel>`.** Binance uses `bnbusdt@aggTrade`. We use `<network>@<stream>` (`solana-mainnet@swaps`). The `@` separator and the lowercase convention are identical.
+- **Stream selector form `<symbol>@<channel>`.** Binance uses `bnbusdt@aggTrade`. We use `<network>@<table>` (`solana-mainnet@swaps`) where `<table>` is the DatabaseChanges table emitted by the spkg's `db_out`. The `@` separator and the lowercase convention are identical.
 - **Two URL modes.**
   - `/ws/<a>` (single, raw) and `/ws/<a>/<b>/...` (combined, wrapped) match Binance's path layout exactly.
   - `/stream?streams=<a>/<b>/...` matches Binance's query layout exactly, including the `/`-separator inside the query value.

@@ -26,10 +26,9 @@ Example value:
 
 ```toml
 [[streams]]
-name = "swaps"
 network = "solana-mainnet"
 endpoint = "https://solana.substreams.pinax.network:443"
-spkg = "https://github.com/pinax-network/substreams-solana/releases/download/swaps-v0.1.0/swaps-v0.1.0.spkg"
+manifest = "https://github.com/pinax-network/substreams-solana/releases/download/swaps-v0.1.0/swaps-v0.1.0.spkg"
 module = "db_out"
 ```
 

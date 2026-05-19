@@ -10,18 +10,25 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct ReplayConfig {
-    /// Number of recent blocks retained per stream as JSONL on disk.
+    /// Number of recent blocks retained per spkg as JSONL on disk.
     /// `0` disables the replay log entirely.
     pub max_blocks: usize,
     pub dir: std::path::PathBuf,
 }
 
+/// One Substreams source the server reads from. Identity is derived from the
+/// loaded `.spkg` (`package_name`, `package_version`, `module_hash`) — there
+/// is no operator-supplied name. Subscribers identify streams by their event
+/// `@table`, not by anything in this struct.
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
-    /// User-defined display name. Forms the `(network, name)` identity used
-    /// by WebSocket subscribers and the cursor key. Has no effect on decoding.
-    pub name: String,
     pub substreams: SubstreamsConfig,
+    /// Operator-declared list of DatabaseChanges tables this spkg is expected
+    /// to emit (`swaps`, `transfers`, ...). Surfaced in the WebSocket welcome
+    /// message so subscribers can discover available `<network>@<table>`
+    /// channels without waiting for a block to land. Optional — empty means
+    /// "tables are discovered at runtime from event `@table` fields".
+    pub tables: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +56,7 @@ pub struct WebSocketConfig {
     pub listen: SocketAddr,
     pub ws_path: String,
     /// Query-mode WebSocket route. Default `/stream`. Accepts
-    /// `?streams=<network@stream>/<...>` and always wraps payloads in
+    /// `?streams=<network@table>/<...>` and always wraps payloads in
     /// `{"stream":"...","data":...}`.
     pub stream_path: String,
     pub health_path: String,
@@ -58,13 +65,8 @@ pub struct WebSocketConfig {
     pub connection_ttl: Option<Duration>,
     pub max_clients: usize,
     pub client_buffer_size: usize,
-    /// On SIGTERM/SIGINT, send a `Close` frame to every connected client and
-    /// wait up to this long for the registry to drain before axum stops
-    /// accepting and the process exits.
     pub shutdown_drain_timeout: Duration,
-    /// Maximum number of keys in a single client-supplied event filter.
     pub max_filter_fields: usize,
-    /// Maximum total string values across every key of one event filter.
     pub max_filter_values: usize,
 }
 
@@ -85,17 +87,23 @@ pub enum ConfigError {
     #[error("at least one stream must be configured")]
     NoStreams,
 
-    #[error("stream {index} ({name}) is missing a Substreams endpoint")]
-    MissingStreamEndpoint { index: usize, name: String },
+    #[error("stream {index} (manifest={manifest}) is missing a Substreams endpoint")]
+    MissingStreamEndpoint { index: usize, manifest: String },
 
-    #[error("stream {index} ({name}) is missing a network")]
-    MissingStreamNetwork { index: usize, name: String },
+    #[error("stream {index} (manifest={manifest}) is missing a network")]
+    MissingStreamNetwork { index: usize, manifest: String },
 
-    #[error("duplicate stream registration: network={network:?} name={name:?}")]
-    DuplicateStream { network: String, name: String },
+    #[error(
+        "duplicate stream registration: network={network:?} manifest={manifest:?} module={module:?}"
+    )]
+    DuplicateStream {
+        network: String,
+        manifest: String,
+        module: String,
+    },
 
-    #[error("stream {index} ({name}) is missing a start_block")]
-    MissingStreamStartBlock { index: usize, name: String },
+    #[error("stream {index} (manifest={manifest}) is missing a start_block")]
+    MissingStreamStartBlock { index: usize, manifest: String },
 }
 
 impl Config {
@@ -104,9 +112,9 @@ impl Config {
             return Err(ConfigError::NoStreams);
         }
 
-        let mut seen = std::collections::HashSet::<(String, String)>::new();
+        let mut seen = std::collections::HashSet::<(String, String, String)>::new();
         for (index, stream) in self.streams.iter().enumerate() {
-            let name = stream.name.as_str();
+            let manifest = stream.substreams.manifest.as_str();
             let endpoint = stream
                 .substreams
                 .endpoint
@@ -116,7 +124,7 @@ impl Config {
             if endpoint.is_empty() {
                 return Err(ConfigError::MissingStreamEndpoint {
                     index,
-                    name: name.to_owned(),
+                    manifest: manifest.to_owned(),
                 });
             }
 
@@ -129,7 +137,7 @@ impl Config {
             if network.is_empty() {
                 return Err(ConfigError::MissingStreamNetwork {
                     index,
-                    name: name.to_owned(),
+                    manifest: manifest.to_owned(),
                 });
             }
 
@@ -142,14 +150,16 @@ impl Config {
             if start_block.is_empty() {
                 return Err(ConfigError::MissingStreamStartBlock {
                     index,
-                    name: name.to_owned(),
+                    manifest: manifest.to_owned(),
                 });
             }
 
-            if !seen.insert((network.to_owned(), name.to_owned())) {
+            let module = stream.substreams.module.clone();
+            if !seen.insert((network.to_owned(), manifest.to_owned(), module.clone())) {
                 return Err(ConfigError::DuplicateStream {
                     network: network.to_owned(),
-                    name: name.to_owned(),
+                    manifest: manifest.to_owned(),
+                    module,
                 });
             }
         }
@@ -186,11 +196,11 @@ fn validate_path(field: &'static str, value: &str) -> Result<(), ConfigError> {
 mod tests {
     use super::*;
 
-    fn stream(name: &str, network: &str, endpoint: &str) -> StreamConfig {
+    fn stream(manifest: &str, network: &str, endpoint: &str) -> StreamConfig {
         StreamConfig {
-            name: name.to_owned(),
+            tables: Vec::new(),
             substreams: SubstreamsConfig {
-                manifest: "./demo.spkg".to_owned(),
+                manifest: manifest.to_owned(),
                 module: "db_out".to_owned(),
                 endpoint: Some(endpoint.to_owned()),
                 network: Some(network.to_owned()),
@@ -227,77 +237,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejects_streams_missing_endpoint() {
-        let mut stream = stream("swaps", "solana-mainnet", "");
-        stream.substreams.endpoint = None;
-        let config = Config {
-            streams: vec![stream],
+    fn cfg(streams: Vec<StreamConfig>) -> Config {
+        Config {
+            streams,
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
             replay: ReplayConfig {
                 max_blocks: 0,
                 dir: std::path::PathBuf::from("/tmp/replay-test"),
             },
-        };
+        }
+    }
+
+    #[test]
+    fn rejects_streams_missing_endpoint() {
+        let mut s = stream("./svm-dex.spkg", "solana-mainnet", "");
+        s.substreams.endpoint = None;
         assert!(matches!(
-            config.validate(),
+            cfg(vec![s]).validate(),
             Err(ConfigError::MissingStreamEndpoint { .. })
         ));
     }
 
     #[test]
     fn rejects_streams_missing_network() {
-        let mut stream = stream("transfers", "", "https://e:443");
-        stream.substreams.network = None;
-        let config = Config {
-            streams: vec![stream],
-            websocket: websocket(),
-            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
-            replay: ReplayConfig {
-                max_blocks: 0,
-                dir: std::path::PathBuf::from("/tmp/replay-test"),
-            },
-        };
+        let mut s = stream("./svm-transfers.spkg", "", "https://e:443");
+        s.substreams.network = None;
         assert!(matches!(
-            config.validate(),
+            cfg(vec![s]).validate(),
             Err(ConfigError::MissingStreamNetwork { .. })
         ));
     }
 
     #[test]
     fn rejects_streams_missing_start_block() {
-        let mut s = stream("swaps", "solana-mainnet", "https://e:443");
+        let mut s = stream("./svm-dex.spkg", "solana-mainnet", "https://e:443");
         s.substreams.start_block = None;
-        let config = Config {
-            streams: vec![s],
-            websocket: websocket(),
-            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
-            replay: ReplayConfig {
-                max_blocks: 0,
-                dir: std::path::PathBuf::from("/tmp/replay-test"),
-            },
-        };
         assert!(matches!(
-            config.validate(),
+            cfg(vec![s]).validate(),
             Err(ConfigError::MissingStreamStartBlock { .. })
         ));
     }
 
     #[test]
-    fn rejects_duplicate_network_name_pairs() {
-        let config = Config {
-            streams: vec![
-                stream("transfers", "solana-mainnet", "https://e:443"),
-                stream("transfers", "solana-mainnet", "https://e:443"),
-            ],
-            websocket: websocket(),
-            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
-            replay: ReplayConfig {
-                max_blocks: 0,
-                dir: std::path::PathBuf::from("/tmp/replay-test"),
-            },
-        };
+    fn rejects_duplicate_network_manifest_module() {
+        let config = cfg(vec![
+            stream("./svm-dex.spkg", "solana-mainnet", "https://e:443"),
+            stream("./svm-dex.spkg", "solana-mainnet", "https://e:443"),
+        ]);
         assert!(matches!(
             config.validate(),
             Err(ConfigError::DuplicateStream { .. })
@@ -305,19 +292,11 @@ mod tests {
     }
 
     #[test]
-    fn allows_same_name_on_different_networks() {
-        let config = Config {
-            streams: vec![
-                stream("transfers", "solana-mainnet", "https://a:443"),
-                stream("transfers", "ethereum-mainnet", "https://b:443"),
-            ],
-            websocket: websocket(),
-            cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
-            replay: ReplayConfig {
-                max_blocks: 0,
-                dir: std::path::PathBuf::from("/tmp/replay-test"),
-            },
-        };
+    fn allows_same_manifest_on_different_networks() {
+        let config = cfg(vec![
+            stream("./svm-dex.spkg", "solana-mainnet", "https://a:443"),
+            stream("./svm-dex.spkg", "ethereum-mainnet", "https://b:443"),
+        ]);
         config.validate().expect("distinct networks are allowed");
     }
 }

@@ -28,7 +28,7 @@ Why: defaulting to all-streams turns a fat-fingered connect into a firehose. We'
 
 ## Binance URL conventions
 
-`<network>@<stream>` selectors, `/ws/<a>/<b>`, `/stream?streams=<a>/<b>`, JSON `{method, params, id}` commands. See [`binance-websocket.md`](binance-websocket.md).
+`<network>@<table>` selectors, `/ws/<a>/<b>`, `/stream?streams=<a>/<b>`, JSON `{method, params, id}` commands. See [`binance-websocket.md`](binance-websocket.md).
 
 Rejected: REST-style `/ws/<network>/<stream>`, GraphQL subscriptions, server-sent events.
 
