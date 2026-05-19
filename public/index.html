@@ -164,61 +164,104 @@
     line-height: 1.5;
   }
 
-  .streams-list { margin: 6px 0 18px; }
+  .streams-list { margin: 8px 0 24px; }
   .streams-list .network-group {
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 12px;
+    border-radius: 12px;
+    margin-bottom: 14px;
     background: var(--code-bg);
+    overflow: hidden;
   }
-  .streams-list .network-name {
-    font-family: var(--mono);
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--fg);
-    margin: 0 0 10px;
-    text-transform: lowercase;
-    letter-spacing: 0.02em;
-  }
-  .streams-list .table-row {
+  .streams-list .network-header {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 6px 0;
-    border-top: 1px solid var(--border);
-    cursor: pointer;
-    position: relative;
+    gap: 10px;
+    padding: 12px 18px;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent);
+    border-bottom: 1px solid var(--border);
   }
-  .streams-list .table-row:first-of-type { border-top: 0; padding-top: 0; }
-  .streams-list .table-row:hover .table-id { color: var(--accent); }
-  .streams-list .table-row.copied .table-id { color: var(--good); }
-  .streams-list .table-row.discovery { cursor: default; }
-  .streams-list .table-row.discovery .table-id { color: var(--muted); font-style: italic; }
-  .streams-list .table-id {
+  .streams-list .network-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+    flex-shrink: 0;
+  }
+  .streams-list .network-name {
     font-family: var(--mono);
     font-size: 13px;
     font-weight: 600;
     color: var(--fg);
-    flex: 0 0 auto;
-    transition: color 120ms;
+    letter-spacing: 0.01em;
+    flex: 1;
+  }
+  .streams-list .network-count {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--bg);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+  }
+  .streams-list .table-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 18px;
+    border-top: 1px solid var(--border);
+    cursor: pointer;
+    position: relative;
+    transition: background 120ms;
+  }
+  .streams-list .table-row:first-of-type { border-top: 0; }
+  .streams-list .table-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .streams-list .table-row.copied { background: color-mix(in srgb, var(--good) 14%, transparent); }
+  .streams-list .table-row.discovery { cursor: default; }
+  .streams-list .table-row.discovery:hover { background: transparent; }
+  .streams-list .table-id {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+    min-width: 0;
+  }
+  .streams-list .table-id .selector { word-break: break-all; }
+  .streams-list .table-row.discovery .table-id .selector { color: var(--muted); font-style: italic; font-weight: 400; }
+  .streams-list .table-name-badge {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
   }
   .streams-list .table-source {
     font-family: var(--mono);
     font-size: 11px;
     color: var(--muted);
-    margin-left: auto;
     text-align: right;
+    line-height: 1.4;
   }
+  .streams-list .table-source .src-name { color: var(--fg); font-weight: 600; }
+  .streams-list .table-source .src-version { color: var(--muted); margin-left: 4px; }
   .streams-list .table-copied {
     position: absolute;
-    right: 0;
-    top: -16px;
+    right: 14px;
+    top: 4px;
     font-size: 10px;
     color: var(--good);
     opacity: 0;
     transition: opacity 120ms;
     font-family: var(--mono);
+    letter-spacing: 0.04em;
   }
   .streams-list .table-row.copied .table-copied { opacity: 1; }
   .method {
@@ -1484,8 +1527,10 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           }
         });
 
-        var fmtSource = function (src) {
-          return (src.name || '?') + (src.version ? ' ' + src.version : '');
+        var renderSource = function (src) {
+          var name = escapeHtml(src.name || '?');
+          var version = src.version ? '<span class="src-version">' + escapeHtml(src.version) + '</span>' : '';
+          return '<span class="src-name">' + name + '</span>' + version;
         };
 
         host.innerHTML = '';
@@ -1493,12 +1538,27 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           var group = document.createElement('div');
           group.className = 'network-group';
 
-          var heading = document.createElement('div');
-          heading.className = 'network-name';
-          heading.textContent = network;
-          group.appendChild(heading);
+          var header = document.createElement('div');
+          header.className = 'network-header';
+
+          var dot = document.createElement('span');
+          dot.className = 'network-dot';
+          header.appendChild(dot);
+
+          var nameEl = document.createElement('span');
+          nameEl.className = 'network-name';
+          nameEl.textContent = network;
+          header.appendChild(nameEl);
 
           var tables = Object.keys(networks[network].tables).sort();
+          var totalChannels = tables.length + networks[network].discovery.length;
+          var count = document.createElement('span');
+          count.className = 'network-count';
+          count.textContent = totalChannels + ' ' + (totalChannels === 1 ? 'table' : 'tables');
+          header.appendChild(count);
+
+          group.appendChild(header);
+
           tables.forEach(function (table) {
             var id = network + '@' + table;
             var row = document.createElement('div');
@@ -1507,12 +1567,14 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
 
             var idEl = document.createElement('div');
             idEl.className = 'table-id';
-            idEl.textContent = id;
+            idEl.innerHTML =
+              '<span class="table-name-badge">' + escapeHtml(table) + '</span>' +
+              '<span class="selector">' + escapeHtml(id) + '</span>';
             row.appendChild(idEl);
 
             var sourceEl = document.createElement('div');
             sourceEl.className = 'table-source';
-            sourceEl.textContent = networks[network].tables[table].map(fmtSource).join(', ');
+            sourceEl.innerHTML = networks[network].tables[table].map(renderSource).join('<br>');
             row.appendChild(sourceEl);
 
             var copied = document.createElement('span');
@@ -1541,12 +1603,14 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
 
             var idEl = document.createElement('div');
             idEl.className = 'table-id';
-            idEl.textContent = network + '@? (discovered at runtime)';
+            idEl.innerHTML =
+              '<span class="table-name-badge" style="background: color-mix(in srgb, var(--muted) 12%, transparent); color: var(--muted);">?</span>' +
+              '<span class="selector">' + escapeHtml(network) + '@? (discovered at runtime)</span>';
             row.appendChild(idEl);
 
             var sourceEl = document.createElement('div');
             sourceEl.className = 'table-source';
-            sourceEl.textContent = fmtSource(src);
+            sourceEl.innerHTML = renderSource(src);
             row.appendChild(sourceEl);
             group.appendChild(row);
           });
