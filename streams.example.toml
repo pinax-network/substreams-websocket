@@ -44,7 +44,7 @@ tables = ["swaps"]
 network = "solana-mainnet"
 endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/svm-transfers-v0.3.0.spkg"
-tables = ["spl_transfers", "system_transfers"]
+tables = ["spl_transfer", "system_transfer"]
 
 [[streams]]
 network = "ethereum-mainnet"
@@ -56,4 +56,4 @@ tables = ["swaps"]
 network = "ethereum-mainnet"
 endpoint = "https://eth.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-evm/releases/download/evm-transfers-v0.4.0/evm-transfers-v0.4.0.spkg"
-tables = ["transfers"]
+tables = ["erc20_transfers"]
