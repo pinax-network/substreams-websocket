@@ -452,7 +452,19 @@ async fn connect_channel(config: &SubstreamsConfig) -> Result<Channel, Substream
         .ok_or(SubstreamsError::MissingEndpoint)?;
     let endpoint = normalize_endpoint(endpoint, config.plaintext);
     let uses_tls = endpoint.starts_with("https://");
-    let mut endpoint = Endpoint::from_shared(endpoint)?;
+    let mut endpoint = Endpoint::from_shared(endpoint)?
+        // Send HTTP/2 PING frames every 30s even when the stream is idle. Many
+        // upstream proxies / load balancers reset long-lived gRPC streams that
+        // appear idle (no DATA frames), surfacing as `h2 protocol error:
+        // error reading a body from connection: Io(ConnectionReset)`. Keepalive
+        // pings keep the path warm.
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .keep_alive_timeout(std::time::Duration::from_secs(20))
+        .keep_alive_while_idle(true)
+        // TCP-level keepalive as a second line of defense.
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        // Faster than the default to detect dead peers sooner.
+        .tcp_nodelay(true);
 
     if uses_tls && !config.insecure {
         endpoint = endpoint.tls_config(ClientTlsConfig::new().with_enabled_roots())?;
