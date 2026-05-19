@@ -1446,7 +1446,29 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   }
 
   connectBtn.onclick = connect;
-  disconnectBtn.onclick = function () { if (ws) ws.close(); };
+  disconnectBtn.onclick = function () {
+    if (!ws) return;
+    // Detach handlers immediately so any frames the browser still has
+    // queued from the kernel buffer stop being parsed / rendered while
+    // ws.close() works its way through. Without this, on a hot stream the
+    // user sees blocks keep arriving for a second or two after pressing
+    // Disconnect — the browser is just draining onmessage callbacks for
+    // frames already received.
+    var sock = ws;
+    ws = null;
+    sock.onmessage = null;
+    sock.onerror = null;
+    sock.onclose = null;
+    try { sock.close(1000, 'user disconnected'); } catch (_) {}
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    statusEl.className = 'pill dim';
+    statusEl.textContent = 'closed';
+    connectBtn.disabled = false;
+    disconnectBtn.disabled = true;
+    sendBtn.disabled = true;
+    append('sys', '*', 'disconnected by user');
+  };
   $('clear').onclick = function () { logEl.innerHTML = ''; };
 
   sendBtn.onclick = function () {
