@@ -1083,9 +1083,10 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   };
   var PREVIEW_FIELDS_DEFAULT = ['signature', 'tx_hash', 'transaction_hash', 'amount', 'input_amount', 'output_amount', 'user', 'from', 'to', 'protocol', 'mint'];
 
-  function eventPreview(ev) {
+  function eventPreview(ev, parentTable) {
     if (!ev || typeof ev !== 'object') return '';
-    var prefer = PREVIEW_FIELDS_BY_TABLE[ev['@table']] || PREVIEW_FIELDS_DEFAULT;
+    var table = ev['@table'] || parentTable || '';
+    var prefer = PREVIEW_FIELDS_BY_TABLE[table] || PREVIEW_FIELDS_DEFAULT;
     var parts = [];
     prefer.forEach(function (k) {
       if (typeof ev[k] === 'string' && ev[k].length) {
@@ -1105,7 +1106,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     return parts.slice(0, 4).join('  ');
   }
 
-  function renderEventRow(ev) {
+  function renderEventRow(ev, parentTable) {
     var row = document.createElement('div');
     row.className = 'event-row';
 
@@ -1117,14 +1118,15 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     chev.textContent = '▶';
     rmeta.appendChild(chev);
 
+    var table = ev['@table'] || parentTable;
     var tag = document.createElement('span');
     tag.className = 'table-tag';
-    tag.textContent = '@' + (ev['@table'] || 'event');
+    tag.textContent = '@' + (table || 'event');
     rmeta.appendChild(tag);
 
     var preview = document.createElement('span');
     preview.className = 'preview';
-    preview.textContent = eventPreview(ev);
+    preview.textContent = eventPreview(ev, parentTable);
     rmeta.appendChild(preview);
 
     row.appendChild(rmeta);
@@ -1150,6 +1152,9 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
       var bn = inner.block_num != null ? inner.block_num : '?';
       var ts = inner.timestamp || '';
       var tables = {};
+      // Modern payloads carry `table` at the top level; legacy per-event
+      // `@table` is honored as a fallback.
+      if (typeof inner.table === 'string' && inner.table) tables[inner.table] = true;
       inner.events.forEach(function (e) { if (e && e['@table']) tables[e['@table']] = true; });
       var tableList = Object.keys(tables).join(',') || '(none)';
       return {
@@ -1298,8 +1303,9 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
         label.textContent = innerObj.events.length + ' event' + (innerObj.events.length === 1 ? '' : 's');
         body.appendChild(label);
 
+        var parentTable = typeof innerObj.table === 'string' ? innerObj.table : '';
         innerObj.events.forEach(function (ev) {
-          body.appendChild(renderEventRow(ev));
+          body.appendChild(renderEventRow(ev, parentTable));
         });
       } else {
         var bodyPre = document.createElement('pre');
