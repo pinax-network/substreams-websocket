@@ -58,6 +58,10 @@ pub struct WebSocketConfig {
     pub connection_ttl: Option<Duration>,
     pub max_clients: usize,
     pub client_buffer_size: usize,
+    /// On SIGTERM/SIGINT, send a `Close` frame to every connected client and
+    /// wait up to this long for the registry to drain before axum stops
+    /// accepting and the process exits.
+    pub shutdown_drain_timeout: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -213,6 +217,7 @@ mod tests {
             connection_ttl: None,
             max_clients: 16,
             client_buffer_size: 16,
+            shutdown_drain_timeout: Duration::from_secs(1),
         }
     }
 

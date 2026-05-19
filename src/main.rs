@@ -221,6 +221,15 @@ struct WebSocketArgs {
         default_value_t = 1024
     )]
     client_buffer_size: usize,
+
+    /// On SIGTERM/SIGINT, send a `Close` frame to every connected client and
+    /// wait up to this long for them to disconnect before exiting.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS",
+        default_value_t = 10
+    )]
+    shutdown_drain_secs: u64,
 }
 
 impl WebSocketArgs {
@@ -235,6 +244,7 @@ impl WebSocketArgs {
             connection_ttl: self.connection_ttl_secs.map(Duration::from_secs),
             max_clients: self.max_clients,
             client_buffer_size: self.client_buffer_size,
+            shutdown_drain_timeout: Duration::from_secs(self.shutdown_drain_secs),
         }
     }
 }
