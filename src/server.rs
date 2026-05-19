@@ -704,10 +704,19 @@ fn build_table_payload(
     table: &str,
     events: &[&serde_json::Map<String, serde_json::Value>],
 ) -> serde_json::Value {
+    // Build the per-event map by iterating the source in order and skipping
+    // `@table` — `serde_json::Map::remove` under the `preserve_order`
+    // feature is `swap_remove`, which would scramble field order by moving
+    // the last entry into the `@table` slot.
     let mut out_events = Vec::with_capacity(events.len());
     for event in events {
-        let mut stripped = (*event).clone();
-        stripped.remove("@table");
+        let mut stripped = serde_json::Map::with_capacity(event.len().saturating_sub(1));
+        for (k, v) in event.iter() {
+            if k == "@table" {
+                continue;
+            }
+            stripped.insert(k.clone(), v.clone());
+        }
         out_events.push(serde_json::Value::Object(stripped));
     }
     serde_json::json!({

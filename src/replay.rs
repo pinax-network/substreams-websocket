@@ -288,10 +288,19 @@ fn filter_events_by_table(block: &mut Value, target_table: &str) {
             .unwrap_or(false)
     });
     // Drop the per-event @table prefix — the parent block now carries `table`
-    // at the top level.
+    // at the top level. Rebuild the map in iteration order so we preserve the
+    // original field ordering; `serde_json::Map::remove` under the
+    // `preserve_order` feature is `swap_remove` and would scramble it.
     for event in events {
         if let Some(obj) = event.as_object_mut() {
-            obj.remove("@table");
+            let mut rebuilt = serde_json::Map::with_capacity(obj.len().saturating_sub(1));
+            for (k, v) in obj.iter() {
+                if k == "@table" {
+                    continue;
+                }
+                rebuilt.insert(k.clone(), v.clone());
+            }
+            *obj = rebuilt;
         }
     }
 }
