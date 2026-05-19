@@ -1362,8 +1362,16 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     }
 
     logEl.appendChild(div);
+    // Cap the in-DOM history. Each payload's collapsed card still carries a
+    // full highlighted-JSON body, so unbounded growth on a busy stream stalls
+    // the renderer within seconds. Drop oldest first.
+    while (logEl.childElementCount > MAX_LOG_ENTRIES) {
+      logEl.removeChild(logEl.firstChild);
+    }
     logEl.scrollTop = logEl.scrollHeight;
   }
+
+  var MAX_LOG_ENTRIES = 200;
 
   // Browser auto-disconnect cap: connections in the in-page client are for
   // exploring the API, not long-running ingest. A live block stream can fire
@@ -1461,6 +1469,16 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
     setTimeout(function () { urlEl.focus(); }, 50);
   }
   function closeModal() {
+    // Tear down the live socket + clear the log first. A busy stream can
+    // queue hundreds of paint-blocking nodes; if we hide the modal without
+    // draining them, the user perceives the close as frozen.
+    if (ws) {
+      try { ws.close(1000, 'modal closed'); } catch (_) {}
+      ws = null;
+    }
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    logEl.innerHTML = '';
     modalEl.classList.remove('open');
   }
   openBtn.addEventListener('click', openModal);
