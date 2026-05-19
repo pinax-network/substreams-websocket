@@ -45,7 +45,7 @@ For different filters per channel on one connection, use the live `SET_FILTER` c
 { "result": null, "id": 1 }
 ```
 
-- `params[0]` = explicit `network@table` selector. Wildcards rejected.
+- `params[0]` = `network@table` selector. Wildcards accepted on either side: `*@*`, `<network>@*`, `*@<table>`. Filters with wildcard selectors apply to every matching outgoing `(network, table)`. Multiple stored filters (exact + wildcard) compose with AND semantics — each must pass.
 - `params[1]` = filter object. `{}` is valid and matches every event (effectively no-op).
 - Replaces any existing filter for the selector. Idempotent.
 

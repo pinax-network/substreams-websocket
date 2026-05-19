@@ -887,12 +887,11 @@ fn parse_filter_query(
     let filter = EventFilter::from_str(&value, max_fields, max_values)
         .map_err(|e| format!("invalid `filter` query: {e}"))?;
     let mut set = EventFilterSet::default();
+    // Store the filter under each subscribed selector verbatim, wildcards
+    // included. `EventFilterSet::matching` resolves wildcards at broadcast
+    // time, so `/ws/*@*?filter=...` applies the filter to every channel.
     for entry in entries {
-        let (Some(network), Some(stream)) = (entry.network.as_deref(), entry.stream.as_deref())
-        else {
-            continue;
-        };
-        set.set(format!("{network}@{stream}"), filter.clone());
+        set.set(entry.to_wire(), filter.clone());
     }
     Ok(set)
 }
@@ -967,26 +966,27 @@ async fn replay_for_client(
         }
 
         let selector = format!("{network}@{stream}");
-        let event_filter = filter.event_filters.get(&selector);
+        let matching_filters = filter.event_filters.matching(network, stream);
         let mut replayed: usize = 0;
         for (_block_num, raw_text) in result.blocks {
-            let payload_text = match event_filter {
-                Some(f) if !f.is_empty() => {
-                    let mut block = match serde_json::from_str::<serde_json::Value>(&raw_text) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            // Skip unparseable replay lines rather than fail the whole
-                            // replay; logged at the producer side already.
-                            continue;
-                        }
-                    };
-                    let remaining = apply_filter_in_place(&mut block, f);
+            let payload_text = if !matching_filters.is_empty() {
+                let mut block = match serde_json::from_str::<serde_json::Value>(&raw_text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let mut remaining = 0usize;
+                for f in &matching_filters {
+                    remaining = apply_filter_in_place(&mut block, f);
                     if remaining == 0 {
-                        continue;
+                        break;
                     }
-                    block.to_string()
                 }
-                _ => raw_text,
+                if remaining == 0 {
+                    continue;
+                }
+                block.to_string()
+            } else {
+                raw_text
             };
             let text = if filter.wrap_envelope {
                 format!(r#"{{"stream":"{selector}","data":{payload_text}}}"#)
@@ -1468,27 +1468,31 @@ impl ClientRegistry {
             if !filter.matches(network, stream) {
                 continue;
             }
-            let text = match filter.event_filters.get(&selector) {
-                Some(event_filter) if !event_filter.is_empty() => {
-                    let mut block_copy = block.clone();
-                    let remaining = apply_filter_in_place(&mut block_copy, event_filter);
+            let matching_filters = filter.event_filters.matching(network, stream);
+            let text = if !matching_filters.is_empty() {
+                let mut block_copy = block.clone();
+                // Apply every matching filter in turn — event must satisfy
+                // all of them (filters AND together).
+                let mut remaining = 0usize;
+                for f in &matching_filters {
+                    remaining = apply_filter_in_place(&mut block_copy, f);
                     if remaining == 0 {
-                        continue;
-                    }
-                    let filtered_text = block_copy.to_string();
-                    if filter.wrap_envelope {
-                        format!(r#"{{"stream":"{selector}","data":{filtered_text}}}"#)
-                    } else {
-                        filtered_text
+                        break;
                     }
                 }
-                _ => {
-                    if filter.wrap_envelope {
-                        unfiltered_wrapped.clone()
-                    } else {
-                        unfiltered_text.clone()
-                    }
+                if remaining == 0 {
+                    continue;
                 }
+                let filtered_text = block_copy.to_string();
+                if filter.wrap_envelope {
+                    format!(r#"{{"stream":"{selector}","data":{filtered_text}}}"#)
+                } else {
+                    filtered_text
+                }
+            } else if filter.wrap_envelope {
+                unfiltered_wrapped.clone()
+            } else {
+                unfiltered_text.clone()
             };
             drop(filter);
             let msg = Message::Text(text.into());
@@ -1691,21 +1695,16 @@ async fn handle_subscription_command(
             }
             let Some(selector) = cmd.params[0].as_str() else {
                 return serde_json::json!({
-                    "error": "SET_FILTER param[0] must be a `network@stream` selector",
+                    "error": "SET_FILTER param[0] must be a `network@table` selector",
                     "id": id,
                 })
                 .to_string();
             };
-            // Reject wildcard selectors: filters only apply to explicit pairs.
-            if let Ok(parsed) = StreamId::parse(selector)
-                && (parsed.network.is_none() || parsed.stream.is_none())
-            {
-                return serde_json::json!({
-                    "error": "SET_FILTER does not support wildcard selectors",
-                    "id": id,
-                })
-                .to_string();
-            }
+            // Wildcards on either side are allowed: `*@*`, `<network>@*`,
+            // `*@<table>`. Filter is stored under the wildcard literal; at
+            // broadcast time, every stored filter whose selector matches the
+            // outgoing (network, table) contributes — all must pass for the
+            // event to be delivered.
             if StreamId::parse(selector).is_err() {
                 return serde_json::json!({
                     "error": format!("invalid selector {selector:?}"),
