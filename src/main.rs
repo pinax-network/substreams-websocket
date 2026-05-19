@@ -387,6 +387,8 @@ struct FileStreamConfig {
     stop_block: Option<String>,
     #[serde(default)]
     params: Vec<String>,
+    #[serde(default)]
+    tables: Vec<String>,
     token: Option<String>,
     api_key: Option<String>,
     api_key_header: Option<String>,
@@ -396,6 +398,7 @@ struct FileStreamConfig {
 impl FileStreamConfig {
     fn into_config(self, defaults: &SubstreamsServeDefaults) -> StreamConfig {
         StreamConfig {
+            tables: self.tables,
             substreams: SubstreamsConfig {
                 manifest: self.manifest,
                 module: self.module,

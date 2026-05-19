@@ -27,23 +27,33 @@
 #                 to head. A persisted cursor on disk overrides this on resume.
 #   stop_block  — default "0" (stream indefinitely).
 #   params      — list of "module=value" Substreams parameters.
+#   tables      — operator-declared list of DatabaseChanges tables this spkg
+#                 emits (`swaps`, `transfers`, ...). Surfaced in the welcome
+#                 message so subscribers can discover `<network>@<table>`
+#                 channels without waiting for events. Optional — empty/omitted
+#                 means clients discover tables at runtime from event @table
+#                 fields.
 
 [[streams]]
 network = "solana-mainnet"
 endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg"
+tables = ["swaps"]
 
 [[streams]]
 network = "solana-mainnet"
 endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/svm-transfers-v0.3.0.spkg"
+tables = ["spl_transfers", "system_transfers"]
 
 [[streams]]
 network = "ethereum-mainnet"
 endpoint = "https://eth.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg"
+tables = ["swaps"]
 
 [[streams]]
 network = "ethereum-mainnet"
 endpoint = "https://eth.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-evm/releases/download/evm-transfers-v0.4.0/evm-transfers-v0.4.0.spkg"
+tables = ["transfers"]

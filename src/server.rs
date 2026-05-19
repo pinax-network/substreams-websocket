@@ -75,6 +75,11 @@ struct StreamMeta {
     /// Package description sourced from PackageMetadata.description or PackageMetadata.doc.
     #[serde(skip_serializing_if = "String::is_empty")]
     description: String,
+    /// Operator-declared list of DatabaseChanges tables this spkg is expected
+    /// to emit. Lets clients discover available `<network>@<table>` channels
+    /// from the welcome message without waiting for events.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tables: Vec<String>,
 }
 
 pub async fn serve(config: Config) -> Result<(), ServerError> {
@@ -225,6 +230,7 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
     let network = stream.substreams.network.clone().unwrap_or_default();
     let manifest = stream.substreams.manifest.clone();
     let module = stream.substreams.module.clone();
+    let tables = stream.tables.clone();
 
     let make_meta = |module_hash: String,
                      pkg: Option<&crate::substreams::pb::sf::substreams::v1::Package>|
@@ -251,6 +257,7 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
             package_name: pkg_name,
             package_version: pkg_version,
             description,
+            tables: tables.clone(),
         }
     };
 
@@ -2130,6 +2137,10 @@ mod tests {
             "welcome streams entries no longer carry a `stream` name"
         );
         assert_eq!(body["streams"][0]["module"], "db_out");
+        assert_eq!(
+            body["streams"][0]["tables"],
+            serde_json::json!(["swaps", "transfers"])
+        );
         assert_eq!(body["streams"][0]["network"], "solana-mainnet");
         assert_eq!(body["streams"][0]["manifest"], "./demo.spkg");
         assert!(body["client_id"].as_u64().is_some());
@@ -2747,6 +2758,7 @@ mod tests {
                         package_name: String::new(),
                         package_version: String::new(),
                         description: String::new(),
+                        tables: s.tables.clone(),
                     })
                     .collect::<Vec<_>>(),
             );
@@ -2818,6 +2830,7 @@ mod tests {
     fn config() -> Config {
         Config {
             streams: vec![StreamConfig {
+                tables: vec!["swaps".to_owned(), "transfers".to_owned()],
                 substreams: SubstreamsConfig {
                     manifest: "./demo.spkg".to_owned(),
                     module: "db_out".to_owned(),

@@ -23,6 +23,12 @@ pub struct ReplayConfig {
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
     pub substreams: SubstreamsConfig,
+    /// Operator-declared list of DatabaseChanges tables this spkg is expected
+    /// to emit (`swaps`, `transfers`, ...). Surfaced in the WebSocket welcome
+    /// message so subscribers can discover available `<network>@<table>`
+    /// channels without waiting for a block to land. Optional — empty means
+    /// "tables are discovered at runtime from event `@table` fields".
+    pub tables: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +198,7 @@ mod tests {
 
     fn stream(manifest: &str, network: &str, endpoint: &str) -> StreamConfig {
         StreamConfig {
+            tables: Vec::new(),
             substreams: SubstreamsConfig {
                 manifest: manifest.to_owned(),
                 module: "db_out".to_owned(),

@@ -124,6 +124,7 @@ manifest = "https://github.com/pinax-network/substreams-evm/releases/download/ev
 | `start_block` | no | `"-1"` | Negative = relative to head. Persisted cursor wins on resume. |
 | `stop_block` | no | `"0"` | `"0"` = indefinite. |
 | `params` | no | `[]` | `"module=value"` strings. |
+| `tables` | no | `[]` | Operator-declared DatabaseChanges tables this spkg emits (e.g. `["swaps", "transfers"]`). Surfaced in the welcome message for client-side discovery. Empty = runtime discovery only. |
 | `token` / `api_key` / `api_key_header` / `auth_url` | no | from `.env` | Per-stream overrides. |
 
 Validation refuses duplicate `(network, manifest, module)` triples. Non-DatabaseChanges output or missing `package_meta` fails fast at startup.

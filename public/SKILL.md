@@ -43,7 +43,8 @@ On connect, the server sends a single `session` message describing every configu
       "manifest": "https://.../svm-dex-v0.5.1.spkg",
       "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797",
       "package_name": "svm_dex",
-      "package_version": "v0.5.1"
+      "package_version": "v0.5.1",
+      "tables": ["swaps"]
     }
   ],
   "subscriptions": ["solana-mainnet@swaps"],
@@ -51,7 +52,7 @@ On connect, the server sends a single `session` message describing every configu
 }
 ```
 
-- `streams` lists every Substreams source the server reads. Each entry is identified by `(network, package_name, package_version, module_hash)` — there is no operator-defined name.
+- `streams` lists every Substreams source the server reads. Each entry is identified by `(network, package_name, package_version, module_hash)` — there is no operator-defined name. The optional `tables` array advertises which DatabaseChanges tables that spkg emits, so clients can build a discovery UI without waiting for blocks.
 - `subscriptions` is what this connection will actually receive (filtered set). Selectors are `<network>@<table>` where `<table>` is a DatabaseChanges table emitted by the spkg's `db_out`.
 - `wrap_envelope` tells you whether subsequent payloads are wrapped in `{"stream","data"}` or sent raw.
 
