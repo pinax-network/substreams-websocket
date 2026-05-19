@@ -1545,7 +1545,9 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   });
 
   // Filter-preset chips: paste a SET_FILTER command for the currently-selected
-  // stream selector with the chip's filter object as params[1].
+  // stream selector AND mirror the filter into the URL's `?filter=` query so
+  // a subsequent Connect applies it at upgrade time (the auto-disconnect cap
+  // makes the live SET_FILTER path a tight window).
   Array.prototype.forEach.call(document.querySelectorAll('[data-filter-preset]'), function (btn) {
     btn.onclick = function () {
       counter += 1;
@@ -1559,6 +1561,22 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
       var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : 'solana-mainnet@swaps';
       var body = { method: 'SET_FILTER', params: [selector, filterObj], id: counter };
       cmdEl.value = JSON.stringify(body);
+
+      // Rewrite the URL field: strip any existing `?filter=` then append the
+      // new one. `?from_block=...` and other params are preserved.
+      var raw = urlEl.value || '';
+      var hashIdx = raw.indexOf('#');
+      var hash = hashIdx === -1 ? '' : raw.slice(hashIdx);
+      var base = hashIdx === -1 ? raw : raw.slice(0, hashIdx);
+      var qIdx = base.indexOf('?');
+      var path = qIdx === -1 ? base : base.slice(0, qIdx);
+      var qs = qIdx === -1 ? '' : base.slice(qIdx + 1);
+      var pairs = qs.split('&').filter(function (p) {
+        return p && p.split('=')[0] !== 'filter';
+      });
+      pairs.push('filter=' + encodeURIComponent(JSON.stringify(filterObj)));
+      urlEl.value = path + '?' + pairs.join('&') + hash;
+
       cmdEl.focus();
     };
   });
