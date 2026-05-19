@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -55,6 +55,10 @@ struct AppState {
     /// package failed to load (hash will be empty string).
     streams_meta: Arc<Vec<StreamMeta>>,
     replay: ReplayLog,
+    /// Set on SIGTERM/SIGINT. While true, `/healthz` returns 503 so a
+    /// reverse proxy (Envoy, nginx, ALB) can drain this replica before
+    /// the WebSocket drain completes.
+    draining: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -104,6 +108,7 @@ pub async fn serve_with_shutdown(
         clients: ClientRegistry::default(),
         streams_meta,
         replay,
+        draining: Arc::new(AtomicBool::new(false)),
     };
 
     let listen = state.config.websocket.listen;
@@ -111,6 +116,7 @@ pub async fn serve_with_shutdown(
     let health_path = state.config.websocket.health_path.clone();
     let drain_timeout = state.config.websocket.shutdown_drain_timeout;
     let clients = state.clients.clone();
+    let draining = state.draining.clone();
     let stream_tasks = spawn_streams(&state, prepared);
     let app = build_app(state);
 
@@ -127,6 +133,10 @@ pub async fn serve_with_shutdown(
     // to drain_timeout for them to disconnect, (4) yield → axum tears down.
     let shutdown_with_drain = async move {
         shutdown.await;
+        // Flip /healthz to 503 first so reverse proxies (Envoy, nginx, ALB)
+        // mark this replica unhealthy and stop routing new connections to it
+        // before we send Close frames.
+        draining.store(true, Ordering::SeqCst);
         clients.drain("server shutting down", drain_timeout).await;
     };
 
@@ -666,8 +676,12 @@ async fn serve_listener(
         .map_err(ServerError::Serve)
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(state): State<AppState>) -> Response {
+    if state.draining.load(Ordering::SeqCst) {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response()
+    } else {
+        (StatusCode::OK, "ok").into_response()
+    }
 }
 
 /// Bare `/ws` connect without any streams in the path. Rejected — clients
@@ -2110,6 +2124,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_returns_503_during_drain() {
+        let mut cfg = config();
+        cfg.websocket.shutdown_drain_timeout = Duration::from_secs(5);
+        let mut server = TestServer::start(cfg).await;
+
+        // Open a WS client and never reply to Close so drain stays in flight
+        // long enough for us to observe /healthz returning 503.
+        let (mut socket, _) = connect_async(format!("ws://{}/ws/*@*", server.addr))
+            .await
+            .expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("ok");
+
+        server.fire_shutdown();
+
+        // Give the drain task a chance to flip the flag.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(server.addr)
+            .await
+            .expect("health tcp connection during drain");
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("health request writes");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("health response reads");
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "expected 503 during drain, got: {response}"
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_sends_close_frame_to_connected_clients() {
         let mut cfg = config();
         cfg.websocket.shutdown_drain_timeout = Duration::from_secs(2);
@@ -2172,11 +2222,13 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
             let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_blocks);
+            let draining = Arc::new(AtomicBool::new(false));
             let state = AppState {
                 config: Arc::new(config),
                 clients: ClientRegistry::default(),
                 streams_meta,
                 replay: replay.clone(),
+                draining: draining.clone(),
             };
             let clients = state.clients.clone();
             let config = state.config.clone();
@@ -2188,6 +2240,7 @@ mod tests {
             tokio::spawn(async move {
                 serve_listener(listener, app, ws_path, health_path, async move {
                     let _ = shutdown_rx.await;
+                    draining.store(true, Ordering::SeqCst);
                     drain_clients
                         .drain("server shutting down", drain_timeout)
                         .await;

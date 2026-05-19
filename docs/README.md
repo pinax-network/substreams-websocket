@@ -12,6 +12,7 @@ Reference material that is **not** loaded at runtime or compile time. Audience: 
 | [`cursors-and-resume.md`](cursors-and-resume.md) | Cursor persistence semantics and what "exact resume" means here |
 | [`replay.md`](replay.md) | Per-stream JSONL replay log for client reconnects (`?from_block=<n>`) |
 | [`graceful-shutdown.md`](graceful-shutdown.md) | SIGTERM drain protocol — clean `Close` to every client before exit |
+| [`envoy.md`](envoy.md) | Running behind Envoy (or any reverse proxy) — health-check, idle timeout, buffer sizing |
 | [`decisions.md`](decisions.md) | Log of significant design decisions made during dev |
 | [`railway.md`](railway.md) | Railway deployment specifics (inline TOML, volumes, GHCR image) |
 | [`sample.db_out.json`](sample.db_out.json) | Captured `db_out` response showing raw upstream JSON shape (pre-normalization) |

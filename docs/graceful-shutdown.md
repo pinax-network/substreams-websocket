@@ -11,11 +11,14 @@ Combined with [`replay.md`](replay.md), the reconnect-and-resume is near-seamles
 ## Sequence
 
 1. `SIGTERM` or `SIGINT` received.
-2. axum's `with_graceful_shutdown` stops accepting new connections — the listener still exists, but new HTTP requests are refused.
-3. Server iterates the client registry and sends `Message::Close(CloseFrame { code: 1001, reason: "server shutting down" })` to every client.
-4. Server polls the registry every 50ms. When all clients have closed their side of the socket, drain completes immediately.
-5. If `SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS` elapses with clients still attached, drain logs a `WARN` with the remaining count and yields. axum then tears down sockets hard.
-6. Per-stream Substreams reader tasks are aborted. Cursor + replay log writes already on disk are preserved.
+2. `/healthz` flips to return `503 draining`. Reverse proxies (Envoy, nginx, ALB) running active health checks remove this replica from rotation within one health-check cycle.
+3. axum's `with_graceful_shutdown` stops accepting new connections — the listener still exists, but new HTTP requests are refused.
+4. Server iterates the client registry and sends `Message::Close(CloseFrame { code: 1001, reason: "server shutting down" })` to every client.
+5. Server polls the registry every 50ms. When all clients have closed their side of the socket, drain completes immediately.
+6. If `SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS` elapses with clients still attached, drain logs a `WARN` with the remaining count and yields. axum then tears down sockets hard.
+7. Per-stream Substreams reader tasks are aborted. Cursor + replay log writes already on disk are preserved.
+
+For Envoy-specific health-check configuration, see [`envoy.md`](envoy.md).
 
 ## Configuration
 
