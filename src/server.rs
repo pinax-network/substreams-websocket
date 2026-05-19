@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -55,6 +55,10 @@ struct AppState {
     /// package failed to load (hash will be empty string).
     streams_meta: Arc<Vec<StreamMeta>>,
     replay: ReplayLog,
+    /// Set on SIGTERM/SIGINT. While true, `/healthz` returns 503 so a
+    /// reverse proxy (Envoy, nginx, ALB) can drain this replica before
+    /// the WebSocket drain completes.
+    draining: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -104,11 +108,15 @@ pub async fn serve_with_shutdown(
         clients: ClientRegistry::default(),
         streams_meta,
         replay,
+        draining: Arc::new(AtomicBool::new(false)),
     };
 
     let listen = state.config.websocket.listen;
     let ws_path = state.config.websocket.ws_path.clone();
     let health_path = state.config.websocket.health_path.clone();
+    let drain_timeout = state.config.websocket.shutdown_drain_timeout;
+    let clients = state.clients.clone();
+    let draining = state.draining.clone();
     let stream_tasks = spawn_streams(&state, prepared);
     let app = build_app(state);
 
@@ -119,7 +127,20 @@ pub async fn serve_with_shutdown(
             source,
         })?;
 
-    let result = serve_listener(listener, app, ws_path, health_path, shutdown).await;
+    // Wrap the caller-provided shutdown so we drain WebSocket clients before
+    // axum's graceful_shutdown stops accepting connections. Order matters:
+    // (1) wait for caller signal, (2) send Close to each client, (3) wait up
+    // to drain_timeout for them to disconnect, (4) yield → axum tears down.
+    let shutdown_with_drain = async move {
+        shutdown.await;
+        // Flip /healthz to 503 first so reverse proxies (Envoy, nginx, ALB)
+        // mark this replica unhealthy and stop routing new connections to it
+        // before we send Close frames.
+        draining.store(true, Ordering::SeqCst);
+        clients.drain("server shutting down", drain_timeout).await;
+    };
+
+    let result = serve_listener(listener, app, ws_path, health_path, shutdown_with_drain).await;
 
     for task in stream_tasks {
         task.abort();
@@ -655,8 +676,12 @@ async fn serve_listener(
         .map_err(ServerError::Serve)
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(state): State<AppState>) -> Response {
+    if state.draining.load(Ordering::SeqCst) {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response()
+    } else {
+        (StatusCode::OK, "ok").into_response()
+    }
 }
 
 /// Bare `/ws` connect without any streams in the path. Rejected — clients
@@ -1165,6 +1190,56 @@ impl ClientRegistry {
         self.clients.read().await.len()
     }
 
+    /// Send a `Close` frame to every connected client, then wait up to
+    /// `timeout` for the registry to drain. Returns the number of clients
+    /// still attached when the timeout fired (zero on clean drain).
+    async fn drain(&self, reason: &str, timeout: Duration) -> usize {
+        use axum::extract::ws::CloseFrame;
+
+        let snapshot: Vec<(ClientId, mpsc::Sender<Message>)> = {
+            let clients = self.clients.read().await;
+            clients
+                .iter()
+                .map(|(id, handle)| (*id, handle.tx.clone()))
+                .collect()
+        };
+
+        if snapshot.is_empty() {
+            return 0;
+        }
+
+        info!(
+            count = snapshot.len(),
+            timeout_secs = timeout.as_secs(),
+            "draining WebSocket clients on shutdown"
+        );
+
+        let close = Message::Close(Some(CloseFrame {
+            code: 1001, // GOING_AWAY
+            reason: reason.to_owned().into(),
+        }));
+
+        for (_, tx) in &snapshot {
+            let _ = tx.try_send(close.clone());
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = self.clients.read().await.len();
+            if remaining == 0 {
+                return 0;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                warn!(
+                    remaining,
+                    "shutdown drain timeout reached; remaining clients will be force-closed"
+                );
+                return remaining;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Send `value` to every client whose filter accepts `(network, stream)`.
     /// Clients with `wrap_envelope = true` get the message wrapped in
     /// `{"stream":"<network>@<stream>","data":<value>}`; otherwise the raw
@@ -1410,8 +1485,32 @@ async fn run_heartbeat(
 }
 
 async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        warn!(%error, "failed to listen for shutdown signal");
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            warn!(%error, "failed to listen for SIGINT");
+        }
+    };
+
+    #[cfg(unix)]
+    let sigterm = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(error) => {
+                warn!(%error, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("received SIGINT; starting graceful shutdown"),
+        _ = sigterm => info!("received SIGTERM; starting graceful shutdown"),
     }
 }
 
@@ -2024,6 +2123,72 @@ mod tests {
         socket.close(None).await.expect("clean close");
     }
 
+    #[tokio::test]
+    async fn health_returns_503_during_drain() {
+        let mut cfg = config();
+        cfg.websocket.shutdown_drain_timeout = Duration::from_secs(5);
+        let mut server = TestServer::start(cfg).await;
+
+        // Open a WS client and never reply to Close so drain stays in flight
+        // long enough for us to observe /healthz returning 503.
+        let (mut socket, _) = connect_async(format!("ws://{}/ws/*@*", server.addr))
+            .await
+            .expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("ok");
+
+        server.fire_shutdown();
+
+        // Give the drain task a chance to flip the flag.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(server.addr)
+            .await
+            .expect("health tcp connection during drain");
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("health request writes");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("health response reads");
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "expected 503 during drain, got: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_sends_close_frame_to_connected_clients() {
+        let mut cfg = config();
+        cfg.websocket.shutdown_drain_timeout = Duration::from_secs(2);
+        let mut server = TestServer::start(cfg).await;
+
+        let (mut socket, _) = connect_async(format!("ws://{}/ws/*@*", server.addr))
+            .await
+            .expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        server.fire_shutdown();
+
+        let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .expect("close frame arrives within drain window")
+            .expect("websocket open")
+            .expect("frame ok");
+        let close = match frame {
+            TungsteniteMessage::Close(close) => close,
+            other => panic!("expected close frame, got {other:?}"),
+        };
+        let close = close.expect("close frame carries a payload");
+        assert_eq!(
+            close.code,
+            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away
+        );
+        assert_eq!(close.reason, "server shutting down");
+    }
+
     struct TestServer {
         addr: SocketAddr,
         clients: ClientRegistry,
@@ -2057,20 +2222,28 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
             let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_blocks);
+            let draining = Arc::new(AtomicBool::new(false));
             let state = AppState {
                 config: Arc::new(config),
                 clients: ClientRegistry::default(),
                 streams_meta,
                 replay: replay.clone(),
+                draining: draining.clone(),
             };
             let clients = state.clients.clone();
             let config = state.config.clone();
+            let drain_timeout = config.websocket.shutdown_drain_timeout;
+            let drain_clients = clients.clone();
             let app = build_app(state);
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
             tokio::spawn(async move {
-                serve_listener(listener, app, ws_path, health_path, async {
+                serve_listener(listener, app, ws_path, health_path, async move {
                     let _ = shutdown_rx.await;
+                    draining.store(true, Ordering::SeqCst);
+                    drain_clients
+                        .drain("server shutting down", drain_timeout)
+                        .await;
                 })
                 .await
                 .expect("test server exits cleanly");
@@ -2084,6 +2257,12 @@ mod tests {
                 config,
                 replay,
                 shutdown: Some(shutdown_tx),
+            }
+        }
+
+        fn fire_shutdown(&mut self) {
+            if let Some(tx) = self.shutdown.take() {
+                let _ = tx.send(());
             }
         }
     }
@@ -2140,6 +2319,7 @@ mod tests {
                 connection_ttl: None,
                 max_clients: 16,
                 client_buffer_size: 16,
+                shutdown_drain_timeout: Duration::from_secs(1),
             },
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
             replay: ReplayConfig {
