@@ -25,7 +25,7 @@ use tokio::{
     time::Instant,
 };
 use tower_http::trace::TraceLayer;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     BlockContext, Config, CursorStore, SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent,
@@ -514,6 +514,8 @@ async fn handle_substream_event(
             // Skip empty-block broadcasts. Cursor is still persisted so resume
             // continues from this block on restart.
             if !decoded.events.is_empty() {
+                let block_num = decoded.block_num;
+                let event_count = decoded.events.len();
                 let json = match serde_json::to_value(decoded) {
                     Ok(value) => value,
                     Err(error) => {
@@ -521,9 +523,17 @@ async fn handle_substream_event(
                         return;
                     }
                 };
-                clients
+                let delivered = clients
                     .broadcast_matching(&network, &config.name, json)
                     .await;
+                debug!(
+                    stream = %config.name,
+                    network = %network,
+                    block_num,
+                    events = event_count,
+                    delivered,
+                    "broadcast block"
+                );
             }
 
             if let Err(error) = cursors.save(&network, module_hash, &cursor).await {
@@ -694,7 +704,13 @@ async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket)
         return;
     };
 
-    info!(client_id = client.name, "WebSocket client connected");
+    let initial_subs: Vec<String> = filter.entries.iter().map(StreamId::to_wire).collect();
+    info!(
+        client_id = client.name,
+        subscriptions = ?initial_subs,
+        wrap_envelope = filter.wrap_envelope,
+        "WebSocket client connected"
+    );
 
     let (mut sender, mut receiver) = socket.split();
     let mut messages = client.rx;
@@ -723,14 +739,12 @@ async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket)
         disconnect_tx,
     ));
 
-    let subscriptions: Vec<String> = filter.entries.iter().map(StreamId::to_wire).collect();
-
     let welcome = serde_json::json!({
         "type": "session",
         "status": "connected",
         "client_id": client_id,
         "streams": state.streams_meta.as_ref(),
-        "subscriptions": subscriptions,
+        "subscriptions": initial_subs,
         "wrap_envelope": filter.wrap_envelope,
     });
 
@@ -754,8 +768,8 @@ async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket)
 
                 match message {
                     Ok(Message::Text(text)) => {
-                        debug!(%text, "received WebSocket text message");
-                        let reply = handle_subscription_command(&filter_handle, text.as_str()).await;
+                        debug!(client_id, %text, "received WebSocket text message");
+                        let reply = handle_subscription_command(client_id, &filter_handle, text.as_str()).await;
                         if outbound.send(Message::Text(reply.into())).await.is_err() {
                             break;
                         }
@@ -792,7 +806,11 @@ async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket)
     heartbeat.abort();
     drop(outbound);
     let _ = writer.await;
-    info!(client_id, "WebSocket client disconnected");
+    info!(
+        client_id,
+        duration_secs = connected_at.elapsed().as_secs(),
+        "WebSocket client disconnected"
+    );
 }
 
 /// A single `network@stream` selector. Either field may be `*` (`None`) for
@@ -993,12 +1011,19 @@ impl ClientRegistry {
     /// Clients with `wrap_envelope = true` get the message wrapped in
     /// `{"stream":"<network>@<stream>","data":<value>}`; otherwise the raw
     /// value is sent.
-    async fn broadcast_matching(&self, network: &str, stream: &str, value: serde_json::Value) {
+    async fn broadcast_matching(
+        &self,
+        network: &str,
+        stream: &str,
+        value: serde_json::Value,
+    ) -> usize {
         let raw_text = value.to_string();
         let wrapped_text = format!(r#"{{"stream":"{network}@{stream}","data":{raw_text}}}"#);
+        let payload_bytes = raw_text.len();
         let raw_message = Message::Text(raw_text.into());
         let wrapped_message = Message::Text(wrapped_text.into());
         let clients = self.clients.read().await;
+        let mut delivered: usize = 0;
 
         for (client_id, client) in clients.iter() {
             let filter = client.filter.read().await;
@@ -1016,8 +1041,21 @@ impl ClientRegistry {
                     client_id,
                     "dropping broadcast message for slow WebSocket client"
                 );
+            } else {
+                delivered += 1;
             }
         }
+
+        trace!(
+            network,
+            stream,
+            payload_bytes,
+            delivered,
+            total_clients = clients.len(),
+            "broadcast"
+        );
+
+        delivered
     }
 }
 
@@ -1057,7 +1095,11 @@ impl std::fmt::Display for DisconnectReason {
 /// - `SUBSCRIBE`           — params: `["network@stream", ...]`
 /// - `UNSUBSCRIBE`         — params: `["network@stream", ...]`
 /// - `LIST_SUBSCRIPTIONS`  — no params, returns the current subscriptions
-async fn handle_subscription_command(filter: &Arc<RwLock<StreamFilter>>, text: &str) -> String {
+async fn handle_subscription_command(
+    client_id: ClientId,
+    filter: &Arc<RwLock<StreamFilter>>,
+    text: &str,
+) -> String {
     #[derive(serde::Deserialize)]
     struct Command {
         method: String,
@@ -1069,6 +1111,7 @@ async fn handle_subscription_command(filter: &Arc<RwLock<StreamFilter>>, text: &
     let cmd = match serde_json::from_str::<Command>(text) {
         Ok(c) => c,
         Err(error) => {
+            warn!(client_id, %error, "invalid WebSocket command JSON");
             return serde_json::json!({
                 "error": format!("invalid command: {error}"),
                 "id": serde_json::Value::Null,
@@ -1086,14 +1129,32 @@ async fn handle_subscription_command(filter: &Arc<RwLock<StreamFilter>>, text: &
                 match StreamId::parse(p) {
                     Ok(id) => parsed.push(id),
                     Err(error) => {
+                        warn!(
+                            client_id,
+                            params = ?cmd.params,
+                            %error,
+                            "SUBSCRIBE rejected: invalid selector"
+                        );
                         return serde_json::json!({ "error": error, "id": id }).to_string();
                     }
                 }
             }
-            let mut guard = filter.write().await;
-            for id in parsed {
-                guard.add(id);
-            }
+            let (added, total) = {
+                let mut guard = filter.write().await;
+                let before = guard.list().len();
+                for id in parsed {
+                    guard.add(id);
+                }
+                let total = guard.list().len();
+                (total.saturating_sub(before), total)
+            };
+            info!(
+                client_id,
+                params = ?cmd.params,
+                added,
+                total,
+                "SUBSCRIBE"
+            );
             serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
         }
         "UNSUBSCRIBE" => {
@@ -1102,25 +1163,47 @@ async fn handle_subscription_command(filter: &Arc<RwLock<StreamFilter>>, text: &
                 match StreamId::parse(p) {
                     Ok(id) => parsed.push(id),
                     Err(error) => {
+                        warn!(
+                            client_id,
+                            params = ?cmd.params,
+                            %error,
+                            "UNSUBSCRIBE rejected: invalid selector"
+                        );
                         return serde_json::json!({ "error": error, "id": id }).to_string();
                     }
                 }
             }
-            let mut guard = filter.write().await;
-            for id in &parsed {
-                guard.remove(id);
-            }
+            let (removed, total) = {
+                let mut guard = filter.write().await;
+                let before = guard.list().len();
+                for id in &parsed {
+                    guard.remove(id);
+                }
+                let total = guard.list().len();
+                (before.saturating_sub(total), total)
+            };
+            info!(
+                client_id,
+                params = ?cmd.params,
+                removed,
+                total,
+                "UNSUBSCRIBE"
+            );
             serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
         }
         "LIST_SUBSCRIPTIONS" => {
-            let guard = filter.read().await;
-            serde_json::json!({ "result": guard.list(), "id": id }).to_string()
+            let list = filter.read().await.list();
+            info!(client_id, count = list.len(), "LIST_SUBSCRIPTIONS");
+            serde_json::json!({ "result": list, "id": id }).to_string()
         }
-        other => serde_json::json!({
-            "error": format!("unknown method {other:?}; expected SUBSCRIBE, UNSUBSCRIBE, or LIST_SUBSCRIPTIONS"),
-            "id": id,
-        })
-        .to_string(),
+        other => {
+            warn!(client_id, method = %other, "unknown WebSocket method");
+            serde_json::json!({
+                "error": format!("unknown method {other:?}; expected SUBSCRIBE, UNSUBSCRIBE, or LIST_SUBSCRIPTIONS"),
+                "id": id,
+            })
+            .to_string()
+        }
     }
 }
 
@@ -1306,6 +1389,7 @@ mod filter_tests {
     async fn subscribe_command_adds_entries() {
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
         let reply = super::handle_subscription_command(
+            0,
             &filter,
             r#"{"method":"SUBSCRIBE","params":["solana-mainnet@swaps","ethereum-mainnet@transfers"],"id":7}"#,
         )
@@ -1330,6 +1414,7 @@ mod filter_tests {
         start.add(StreamId::parse("ethereum-mainnet@transfers").unwrap());
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(start));
         let reply = super::handle_subscription_command(
+            0,
             &filter,
             r#"{"method":"UNSUBSCRIBE","params":["solana-mainnet@swaps"],"id":12}"#,
         )
@@ -1348,6 +1433,7 @@ mod filter_tests {
         start.add(StreamId::parse("solana-mainnet@swaps").unwrap());
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(start));
         let reply = super::handle_subscription_command(
+            0,
             &filter,
             r#"{"method":"LIST_SUBSCRIPTIONS","id":3}"#,
         )
@@ -1361,7 +1447,7 @@ mod filter_tests {
     async fn unknown_method_returns_error() {
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
         let reply =
-            super::handle_subscription_command(&filter, r#"{"method":"DESTROY","id":99}"#).await;
+            super::handle_subscription_command(0, &filter, r#"{"method":"DESTROY","id":99}"#).await;
         let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(value["id"], 99);
         assert!(value["error"].as_str().unwrap().contains("unknown method"));
@@ -1370,7 +1456,7 @@ mod filter_tests {
     #[tokio::test]
     async fn invalid_json_returns_error() {
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
-        let reply = super::handle_subscription_command(&filter, "not json").await;
+        let reply = super::handle_subscription_command(0, &filter, "not json").await;
         let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert!(value["error"].as_str().unwrap().contains("invalid command"));
     }
