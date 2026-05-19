@@ -3,13 +3,18 @@
 # credentials, auth URL) are read from environment variables or CLI flags so
 # that secrets stay in .env and the TOML only describes the streams to run.
 #
-# Each [[streams]] entry is identified by the (network, name) pair. The same
-# `name` can appear multiple times as long as each entry targets a different
-# network. `name` is a user-defined display string with no effect on decoding —
-# WebSocket subscribers register against (network, name).
+# Stream identity is derived at startup from the loaded `.spkg`:
+#   (network, package_name, package_version, module_hash)
+#
+# `package_name` and `package_version` come from the spkg's `Package.package_meta[0]`
+# (the same fields you see with `substreams info <spkg>`). There is no
+# operator-supplied `name` — WebSocket clients subscribe by `<network>@<table>`,
+# where `<table>` is the DatabaseChanges table emitted by the spkg's `db_out`
+# module (`swaps`, `transfers`, `spl_transfers`, etc.).
+#
+# Cursor + replay files are named `<network>-<package_name>@<package_version>-<module_hash>.{cursor,jsonl}`.
 #
 # Required per-stream fields:
-#   name        — display label, free-form string.
 #   network     — chain identifier (e.g. "solana-mainnet", "ethereum-mainnet").
 #   endpoint    — Substreams gRPC endpoint URL.
 #   manifest    — local path or HTTPS URL of the .spkg.
@@ -24,25 +29,21 @@
 #   params      — list of "module=value" Substreams parameters.
 
 [[streams]]
-name = "swaps"
 network = "solana-mainnet"
 endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg"
 
 [[streams]]
-name = "transfers"
 network = "solana-mainnet"
 endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/svm-transfers-v0.3.0.spkg"
 
 [[streams]]
-name = "swaps"
 network = "ethereum-mainnet"
 endpoint = "https://eth.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg"
 
 [[streams]]
-name = "transfers"
 network = "ethereum-mainnet"
 endpoint = "https://eth.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-evm/releases/download/evm-transfers-v0.4.0/evm-transfers-v0.4.0.spkg"

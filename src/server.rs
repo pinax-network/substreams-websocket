@@ -64,17 +64,13 @@ struct AppState {
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct StreamMeta {
-    #[serde(rename = "stream")]
-    name: String,
     network: String,
     module: String,
     manifest: String,
     module_hash: String,
-    /// Top-level spkg name from Package.package_meta[0].name, when present.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// Top-level spkg name from Package.package_meta[0].name. Required.
     package_name: String,
-    /// Top-level spkg version from Package.package_meta[0].version, when present.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// Top-level spkg version from Package.package_meta[0].version. Required.
     package_version: String,
     /// Package description sourced from PackageMetadata.description or PackageMetadata.doc.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -229,7 +225,6 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
     let network = stream.substreams.network.clone().unwrap_or_default();
     let manifest = stream.substreams.manifest.clone();
     let module = stream.substreams.module.clone();
-    let name = stream.name.clone();
 
     let make_meta = |module_hash: String,
                      pkg: Option<&crate::substreams::pb::sf::substreams::v1::Package>|
@@ -249,7 +244,6 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
             })
             .unwrap_or_default();
         StreamMeta {
-            name: name.clone(),
             network: network.clone(),
             module: module.clone(),
             manifest: manifest.clone(),
@@ -280,6 +274,24 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
             error: Some("package contains no modules".to_owned()),
         };
     };
+
+    // Require non-empty package_name + package_version so cursor + replay
+    // file naming is unambiguous. Without these, two unrelated spkgs could
+    // collide on `<network>-@-<hash>` and trash each other's state.
+    let pkg_meta = package.package_meta.first();
+    let pkg_name = pkg_meta.map(|m| m.name.as_str()).unwrap_or("");
+    let pkg_version = pkg_meta.map(|m| m.version.as_str()).unwrap_or("");
+    if pkg_name.is_empty() || pkg_version.is_empty() {
+        return PreparedStream {
+            config: stream,
+            meta: make_meta(String::new(), Some(&package)),
+            package: None,
+            error: Some(
+                "package metadata must include both name and version (Package.package_meta[0])"
+                    .to_owned(),
+            ),
+        };
+    }
 
     let module_def = modules_pb.modules.iter().find(|m| m.name == module);
     let output_type = module_def
@@ -337,6 +349,25 @@ fn spawn_streams(
 const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(15);
 
+/// Runtime identity for one Substreams source. Used for cursor / replay
+/// file naming and as the spkg-side breadcrumb in lifecycle messages.
+#[derive(Debug, Clone)]
+struct StreamIdentity {
+    network: String,
+    package_name: String,
+    package_version: String,
+    module_hash: String,
+}
+
+impl StreamIdentity {
+    fn display(&self) -> String {
+        format!(
+            "{}-{}@{}-{}",
+            self.network, self.package_name, self.package_version, self.module_hash
+        )
+    }
+}
+
 async fn run_substream(
     prep: PreparedStream,
     clients: ClientRegistry,
@@ -349,17 +380,17 @@ async fn run_substream(
         package,
         error,
     } = prep;
-    let network = meta.network.clone();
-    let module_hash = meta.module_hash.clone();
+    let identity = StreamIdentity {
+        network: meta.network.clone(),
+        package_name: meta.package_name.clone(),
+        package_version: meta.package_version.clone(),
+        module_hash: meta.module_hash.clone(),
+    };
 
     if let Some(error) = error {
-        error!(stream = %config.name, error, "stream preparation failed");
+        error!(stream = %identity.display(), error, "stream preparation failed");
         clients
-            .broadcast_matching(
-                &network,
-                &config.name,
-                stream_status(&config, &module_hash, "error", error),
-            )
+            .broadcast_lifecycle(stream_status(&identity, "error", error))
             .await;
         return;
     }
@@ -370,12 +401,18 @@ async fn run_substream(
     loop {
         // Reload cursor from disk on every retry so we resume from the latest
         // persisted position, not whatever the previous run started with.
-        match cursors.load(&network, &module_hash).await {
+        match cursors
+            .load(
+                &identity.network,
+                &identity.package_name,
+                &identity.package_version,
+                &identity.module_hash,
+            )
+            .await
+        {
             Ok(Some(cursor)) => {
                 info!(
-                    stream = %config.name,
-                    network = %network,
-                    module_hash = %module_hash,
+                    stream = %identity.display(),
                     cursor_len = cursor.len(),
                     "resuming Substreams read from persisted cursor"
                 );
@@ -385,16 +422,14 @@ async fn run_substream(
                 config.substreams.start_cursor = None;
             }
             Err(error) => {
-                warn!(stream = %config.name, network = %network, %error, "failed to load cursor; starting from configured block");
+                warn!(stream = %identity.display(), %error, "failed to load cursor; starting from configured block");
                 config.substreams.start_cursor = None;
             }
         }
 
         info!(
-            stream = %config.name,
-            network = %network,
+            stream = %identity.display(),
             module = %config.substreams.module,
-            module_hash = %module_hash,
             manifest = %config.substreams.manifest,
             start_block = ?config.substreams.start_block,
             has_cursor = config.substreams.start_cursor.is_some(),
@@ -406,13 +441,9 @@ async fn run_substream(
             Ok(substream) => substream,
             Err(error) => {
                 let msg = error.to_string();
-                error!(stream = %config.name, %error, backoff_secs = backoff.as_secs(), "Substreams read failed to start; will retry");
+                error!(stream = %identity.display(), %error, backoff_secs = backoff.as_secs(), "Substreams read failed to start; will retry");
                 clients
-                    .broadcast_matching(
-                        &network,
-                        &config.name,
-                        stream_status(&config, &module_hash, "error", msg),
-                    )
+                    .broadcast_lifecycle(stream_status(&identity, "error", msg))
                     .await;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
@@ -421,49 +452,29 @@ async fn run_substream(
         };
 
         clients
-            .broadcast_matching(
-                &network,
-                &config.name,
-                stream_status(&config, &module_hash, "started", String::new()),
-            )
+            .broadcast_lifecycle(stream_status(&identity, "started", String::new()))
             .await;
 
-        let outcome = read_loop(
-            &config,
-            &clients,
-            &cursors,
-            &replay,
-            &module_hash,
-            &mut substream,
-        )
-        .await;
+        let outcome = read_loop(&identity, &clients, &cursors, &replay, &mut substream).await;
         match outcome {
             ReadOutcome::Completed => {
-                info!(stream = %config.name, "Substreams read completed");
+                info!(stream = %identity.display(), "Substreams read completed");
                 clients
-                    .broadcast_matching(
-                        &network,
-                        &config.name,
-                        stream_status(&config, &module_hash, "completed", String::new()),
-                    )
+                    .broadcast_lifecycle(stream_status(&identity, "completed", String::new()))
                     .await;
                 return;
             }
             ReadOutcome::ProducedBlock => {
                 // We made progress this attempt: reset backoff before the next retry.
                 backoff = RESTART_BACKOFF_MIN;
-                error!(stream = %config.name, "Substreams read stream ended unexpectedly; will retry");
+                error!(stream = %identity.display(), "Substreams read stream ended unexpectedly; will retry");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
             ReadOutcome::Errored(err) => {
-                error!(stream = %config.name, error = %err, backoff_secs = backoff.as_secs(), "Substreams read failed; will retry");
+                error!(stream = %identity.display(), error = %err, backoff_secs = backoff.as_secs(), "Substreams read failed; will retry");
                 clients
-                    .broadcast_matching(
-                        &network,
-                        &config.name,
-                        stream_status(&config, &module_hash, "error", err),
-                    )
+                    .broadcast_lifecycle(stream_status(&identity, "error", err))
                     .await;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
@@ -483,11 +494,10 @@ enum ReadOutcome {
 }
 
 async fn read_loop(
-    config: &StreamConfig,
+    identity: &StreamIdentity,
     clients: &ClientRegistry,
     cursors: &CursorStore,
     replay: &ReplayLog,
-    module_hash: &str,
     substream: &mut crate::substreams::SubstreamsStream,
 ) -> ReadOutcome {
     let mut produced_any = false;
@@ -497,7 +507,7 @@ async fn read_loop(
                 if matches!(event, StreamEvent::Block { .. }) {
                     produced_any = true;
                 }
-                handle_substream_event(config, clients, cursors, replay, module_hash, event).await;
+                handle_substream_event(identity, clients, cursors, replay, event).await;
             }
             Ok(None) => {
                 return if produced_any {
@@ -512,16 +522,12 @@ async fn read_loop(
 }
 
 async fn handle_substream_event(
-    config: &StreamConfig,
+    identity: &StreamIdentity,
     clients: &ClientRegistry,
     cursors: &CursorStore,
     replay: &ReplayLog,
-    module_hash: &str,
     event: StreamEvent,
 ) {
-    let network = config.substreams.network.clone().unwrap_or_default();
-    let stream_name = config.name.as_str();
-
     match event {
         StreamEvent::Block {
             number,
@@ -535,62 +541,86 @@ async fn handle_substream_event(
                 block_num: number,
                 block_hash: id,
                 timestamp,
-                network: network.clone(),
-                module_hash: module_hash.to_owned(),
+                network: identity.network.clone(),
+                module_hash: identity.module_hash.clone(),
             };
-            let decoded = match decode_database_changes(&config.name, &payload, context) {
+            let decoded = match decode_database_changes(&payload, context) {
                 Ok(decoded) => decoded,
                 Err(error) => {
-                    warn!(stream = %config.name, %error, "failed to decode Substreams block output");
+                    warn!(stream = %identity.display(), %error, "failed to decode Substreams block output");
                     clients
-                        .broadcast_matching(
-                            &network,
-                            &config.name,
-                            stream_status(config, module_hash, "decode_error", error.to_string()),
-                        )
+                        .broadcast_lifecycle(stream_status(
+                            identity,
+                            "decode_error",
+                            error.to_string(),
+                        ))
                         .await;
                     return;
                 }
             };
 
-            // Skip empty-block broadcasts. Cursor is still persisted so resume
-            // continues from this block on restart.
             if !decoded.events.is_empty() {
                 let block_num = decoded.block_num;
-                let event_count = decoded.events.len();
-                let json = match serde_json::to_value(decoded) {
+                let total_events = decoded.events.len();
+                let block_value = match serde_json::to_value(&decoded) {
                     Ok(value) => value,
                     Err(error) => {
-                        warn!(stream = %config.name, %error, "failed to serialize decoded block");
+                        warn!(stream = %identity.display(), %error, "failed to serialize decoded block");
                         return;
                     }
                 };
-                let payload_text = json.to_string();
-                if let Err(error) = replay.append(&network, &config.name, &payload_text).await {
-                    warn!(stream = %config.name, %error, "failed to append replay log");
+
+                // Persist the whole block (mixed tables) keyed by spkg
+                // provenance. Replay readers split per-table at scan time.
+                if let Err(error) = replay
+                    .append(
+                        &identity.network,
+                        &identity.package_name,
+                        &identity.package_version,
+                        &identity.module_hash,
+                        &block_value.to_string(),
+                    )
+                    .await
+                {
+                    warn!(stream = %identity.display(), %error, "failed to append replay log");
                 }
-                let delivered = clients.broadcast_block(&network, &config.name, json).await;
-                debug!(
-                    stream = %config.name,
-                    network = %network,
-                    block_num,
-                    events = event_count,
-                    delivered,
-                    "broadcast block"
-                );
+
+                // Group events by @table and broadcast one per-table payload
+                // per group. Clients subscribed to (network, table) match.
+                let groups = group_events_by_table(&decoded);
+                for (table, events) in &groups {
+                    let per_table = build_table_payload(&decoded, table, events);
+                    let delivered = clients
+                        .broadcast_block(&identity.network, table, per_table)
+                        .await;
+                    debug!(
+                        stream = %identity.display(),
+                        table,
+                        block_num,
+                        events = events.len(),
+                        delivered,
+                        "broadcast table payload"
+                    );
+                }
+                let _ = total_events; // surfaced via per-table debug above
             }
 
-            if let Err(error) = cursors.save(&network, module_hash, &cursor).await {
-                warn!(stream = %config.name, %error, "failed to persist Substreams cursor");
+            if let Err(error) = cursors
+                .save(
+                    &identity.network,
+                    &identity.package_name,
+                    &identity.package_version,
+                    &identity.module_hash,
+                    &cursor,
+                )
+                .await
+            {
+                warn!(stream = %identity.display(), %error, "failed to persist Substreams cursor");
             }
         }
         StreamEvent::Fatal { message } => {
             clients
-                .broadcast_matching(
-                    &network,
-                    &config.name,
-                    stream_status(config, module_hash, "fatal", message),
-                )
+                .broadcast_lifecycle(stream_status(identity, "fatal", message))
                 .await;
         }
         StreamEvent::Undo {
@@ -598,30 +628,39 @@ async fn handle_substream_event(
             last_valid_cursor,
         } => {
             clients
-                .broadcast_matching(
-                    &network,
-                    &config.name,
-                    serde_json::json!({
-                        "type": "stream",
-                        "status": "undo",
-                        "stream": stream_name,
-                        "network": network,
-                        "module_hash": module_hash,
-                        "last_valid_block": last_valid_block,
-                    }),
-                )
+                .broadcast_lifecycle(serde_json::json!({
+                    "type": "stream",
+                    "status": "undo",
+                    "network": identity.network,
+                    "package_name": identity.package_name,
+                    "package_version": identity.package_version,
+                    "module_hash": identity.module_hash,
+                    "last_valid_block": last_valid_block,
+                }))
                 .await;
             if let Err(error) = cursors
-                .save(&network, module_hash, &last_valid_cursor)
+                .save(
+                    &identity.network,
+                    &identity.package_name,
+                    &identity.package_version,
+                    &identity.module_hash,
+                    &last_valid_cursor,
+                )
                 .await
             {
-                warn!(stream = %config.name, %error, "failed to persist last-valid cursor");
+                warn!(stream = %identity.display(), %error, "failed to persist last-valid cursor");
             }
             if let Err(error) = replay
-                .truncate_after(&network, &config.name, last_valid_block)
+                .truncate_after(
+                    &identity.network,
+                    &identity.package_name,
+                    &identity.package_version,
+                    &identity.module_hash,
+                    last_valid_block,
+                )
                 .await
             {
-                warn!(stream = %config.name, %error, "failed to truncate replay log after reorg");
+                warn!(stream = %identity.display(), %error, "failed to truncate replay log after reorg");
             }
         }
         StreamEvent::Session { .. }
@@ -632,18 +671,57 @@ async fn handle_substream_event(
     }
 }
 
-fn stream_status(
-    config: &StreamConfig,
-    module_hash: &str,
-    status: &str,
-    message: String,
+/// Group decoded events by their `@table` field. Returns an order-preserving
+/// list of `(table_name, events)` pairs — events keep the order they had in
+/// the original block, only the per-table grouping is added.
+fn group_events_by_table(
+    decoded: &crate::DatabaseChangesBlockMessage,
+) -> Vec<(String, Vec<&serde_json::Map<String, serde_json::Value>>)> {
+    let mut groups: Vec<(String, Vec<&serde_json::Map<String, serde_json::Value>>)> = Vec::new();
+    for event in &decoded.events {
+        let Some(table) = event.get("@table").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        match groups.iter_mut().find(|(t, _)| t == table) {
+            Some((_, vec)) => vec.push(event),
+            None => groups.push((table.to_owned(), vec![event])),
+        }
+    }
+    groups
+}
+
+/// Build the per-table broadcast payload. Drops the per-event `@table`
+/// prefix since the whole payload is now scoped to one table.
+fn build_table_payload(
+    decoded: &crate::DatabaseChangesBlockMessage,
+    table: &str,
+    events: &[&serde_json::Map<String, serde_json::Value>],
 ) -> serde_json::Value {
+    let mut out_events = Vec::with_capacity(events.len());
+    for event in events {
+        let mut stripped = (*event).clone();
+        stripped.remove("@table");
+        out_events.push(serde_json::Value::Object(stripped));
+    }
+    serde_json::json!({
+        "network": decoded.network,
+        "table": table,
+        "block_num": decoded.block_num,
+        "block_hash": decoded.block_hash,
+        "timestamp": decoded.timestamp,
+        "module_hash": decoded.module_hash,
+        "events": out_events,
+    })
+}
+
+fn stream_status(identity: &StreamIdentity, status: &str, message: String) -> serde_json::Value {
     let mut value = serde_json::json!({
         "type": "stream",
         "status": status,
-        "stream": config.name,
-        "network": config.substreams.network.clone().unwrap_or_default(),
-        "module_hash": module_hash,
+        "network": identity.network,
+        "package_name": identity.package_name,
+        "package_version": identity.package_version,
+        "module_hash": identity.module_hash,
     });
 
     if !message.is_empty() {
@@ -830,14 +908,15 @@ async fn replay_for_client(
     }
 
     for entry in &filter.entries {
-        let (Some(network), Some(stream)) = (entry.network.as_deref(), entry.stream.as_deref())
+        let (Some(network), Some(table)) = (entry.network.as_deref(), entry.stream.as_deref())
         else {
-            // Wildcards skipped — no concrete log file to scan.
+            // Wildcards skipped — no single `(network, table)` to resume on.
             continue;
         };
+        let stream = table;
 
         let result = replay
-            .read_from(network, stream, from_block)
+            .read_from(Some(network), Some(stream), from_block)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -1323,63 +1402,39 @@ impl ClientRegistry {
         }
     }
 
-    /// Send `value` to every client whose filter accepts `(network, stream)`.
-    /// Clients with `wrap_envelope = true` get the message wrapped in
-    /// `{"stream":"<network>@<stream>","data":<value>}`; otherwise the raw
-    /// value is sent.
-    async fn broadcast_matching(
-        &self,
-        network: &str,
-        stream: &str,
-        value: serde_json::Value,
-    ) -> usize {
-        self.broadcast_matching_text(network, stream, value.to_string())
-            .await
-    }
-
-    async fn broadcast_matching_text(
-        &self,
-        network: &str,
-        stream: &str,
-        raw_text: String,
-    ) -> usize {
-        let wrapped_text = format!(r#"{{"stream":"{network}@{stream}","data":{raw_text}}}"#);
-        let payload_bytes = raw_text.len();
-        let raw_message = Message::Text(raw_text.into());
-        let wrapped_message = Message::Text(wrapped_text.into());
+    /// Lifecycle messages (`started`, `error`, `completed`, `decode_error`,
+    /// `fatal`, `undo`, `gap`) are delivered to **every** connected client
+    /// regardless of stream subscription. They carry spkg provenance
+    /// (`package_name`, `package_version`, `module_hash`) so clients can
+    /// route on their own. Per-connection envelope wrapping is respected.
+    async fn broadcast_lifecycle(&self, value: serde_json::Value) -> usize {
+        let raw_text = value.to_string();
         let clients = self.clients.read().await;
         let mut delivered: usize = 0;
-
         for (client_id, client) in clients.iter() {
             let filter = client.filter.read().await;
-            if !filter.matches(network, stream) {
-                continue;
-            }
-            let msg = if filter.wrap_envelope {
-                wrapped_message.clone()
+            // Lifecycle messages don't have a stream selector — wrap with a
+            // synthetic key `<network>@__lifecycle__` when wrapping is on, so
+            // demux-style clients can route on the `stream` field.
+            let text = if filter.wrap_envelope {
+                let network = value
+                    .get("network")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                format!(r#"{{"stream":"{network}@__lifecycle__","data":{raw_text}}}"#)
             } else {
-                raw_message.clone()
+                raw_text.clone()
             };
             drop(filter);
-            if client.tx.try_send(msg).is_err() {
+            if client.tx.try_send(Message::Text(text.into())).is_err() {
                 warn!(
                     client_id,
-                    "dropping broadcast message for slow WebSocket client"
+                    "dropping lifecycle message for slow WebSocket client"
                 );
             } else {
                 delivered += 1;
             }
         }
-
-        trace!(
-            network,
-            stream,
-            payload_bytes,
-            delivered,
-            total_clients = clients.len(),
-            "broadcast"
-        );
-
         delivered
     }
 
@@ -2070,7 +2125,10 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&text).expect("welcome json");
         assert_eq!(body["type"], "session");
         assert_eq!(body["status"], "connected");
-        assert_eq!(body["streams"][0]["stream"], "swaps");
+        assert!(
+            body["streams"][0].get("stream").is_none(),
+            "welcome streams entries no longer carry a `stream` name"
+        );
         assert_eq!(body["streams"][0]["module"], "db_out");
         assert_eq!(body["streams"][0]["network"], "solana-mainnet");
         assert_eq!(body["streams"][0]["manifest"], "./demo.spkg");
@@ -2235,16 +2293,14 @@ mod tests {
         let mut payload = Vec::new();
         changes.encode(&mut payload).expect("events encode");
 
-        let stream_config = server.config.streams[0].clone();
         let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
         let cursors = CursorStore::new(cursors_dir.path());
         let replay = ReplayLog::disabled();
         handle_substream_event(
-            &stream_config,
+            &test_identity(),
             &server.clients,
             &cursors,
             &replay,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             StreamEvent::Block {
                 number: 999,
                 id: "block-999".to_owned(),
@@ -2267,10 +2323,10 @@ mod tests {
         };
 
         let envelope: serde_json::Value = serde_json::from_str(&text).expect("decoded json");
-        // `/stream?streams=*@*` wraps in {"stream":"<network>@<stream>","data":...}
+        // `/stream?streams=*@*` wraps in {"stream":"<network>@<table>","data":...}
         assert_eq!(envelope["stream"], "solana-mainnet@swaps");
         let body = &envelope["data"];
-        assert_eq!(body["stream"], "swaps");
+        assert_eq!(body["table"], "swaps");
         assert_eq!(body["network"], "solana-mainnet");
         assert_eq!(body["block_num"], 999);
         assert_eq!(body["block_hash"], "block-999");
@@ -2282,7 +2338,10 @@ mod tests {
         assert!(body.get("block").is_none(), "no nested 'block' object");
         assert!(body.get("type").is_none());
         assert!(body.get("changes").is_none());
-        assert_eq!(body["events"][0]["@table"], "swaps");
+        assert!(
+            body["events"][0].get("@table").is_none(),
+            "@table is stripped now that the parent payload carries `table`"
+        );
         assert_eq!(body["events"][0]["input_amount"], "1287000000");
         // block_num stripped because it duplicates top-level block_num
         assert!(body["events"][0].get("block_num").is_none());
@@ -2306,15 +2365,20 @@ mod tests {
 
         for n in 100..105u64 {
             let payload = serde_json::json!({
-                "stream": "swaps",
                 "network": "solana-mainnet",
                 "block_num": n,
-                "events": [],
+                "events": [{ "@table": "swaps", "user": format!("u{n}") }],
             })
             .to_string();
             server
                 .replay
-                .append("solana-mainnet", "swaps", &payload)
+                .append(
+                    "solana-mainnet",
+                    "svm_swaps",
+                    "v0.1.0",
+                    "deadbeef",
+                    &payload,
+                )
                 .await
                 .expect("seed replay");
         }
@@ -2364,15 +2428,20 @@ mod tests {
 
         for n in 500..505u64 {
             let payload = serde_json::json!({
-                "stream": "swaps",
                 "network": "solana-mainnet",
                 "block_num": n,
-                "events": [],
+                "events": [{ "@table": "swaps", "user": format!("u{n}") }],
             })
             .to_string();
             server
                 .replay
-                .append("solana-mainnet", "swaps", &payload)
+                .append(
+                    "solana-mainnet",
+                    "svm_swaps",
+                    "v0.1.0",
+                    "deadbeef",
+                    &payload,
+                )
                 .await
                 .expect("seed replay");
         }
@@ -2554,16 +2623,15 @@ mod tests {
     }
 
     async fn deliver_block(server: &TestServer, payload: Vec<u8>) {
-        let stream_config = server.config.streams[0].clone();
+        let _ = server;
         let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
         let cursors = CursorStore::new(cursors_dir.path());
         let replay = ReplayLog::disabled();
         super::handle_substream_event(
-            &stream_config,
+            &test_identity(),
             &server.clients,
             &cursors,
             &replay,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             StreamEvent::Block {
                 number: 999,
                 id: "block-999".to_owned(),
@@ -2574,6 +2642,15 @@ mod tests {
             },
         )
         .await;
+    }
+
+    fn test_identity() -> super::StreamIdentity {
+        super::StreamIdentity {
+            network: "solana-mainnet".to_owned(),
+            package_name: "svm_swaps".to_owned(),
+            package_version: "v0.1.0".to_owned(),
+            module_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned(),
+        }
     }
 
     #[tokio::test]
@@ -2663,7 +2740,6 @@ mod tests {
                     .streams
                     .iter()
                     .map(|s| StreamMeta {
-                        name: s.name.clone(),
                         network: s.substreams.network.clone().unwrap_or_default(),
                         module: s.substreams.module.clone(),
                         manifest: s.substreams.manifest.clone(),
@@ -2742,7 +2818,6 @@ mod tests {
     fn config() -> Config {
         Config {
             streams: vec![StreamConfig {
-                name: "swaps".to_owned(),
                 substreams: SubstreamsConfig {
                     manifest: "./demo.spkg".to_owned(),
                     module: "db_out".to_owned(),

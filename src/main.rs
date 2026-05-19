@@ -378,7 +378,6 @@ struct FileConfig {
 
 #[derive(Debug, Deserialize)]
 struct FileStreamConfig {
-    name: String,
     network: String,
     endpoint: String,
     manifest: String,
@@ -397,7 +396,6 @@ struct FileStreamConfig {
 impl FileStreamConfig {
     fn into_config(self, defaults: &SubstreamsServeDefaults) -> StreamConfig {
         StreamConfig {
-            name: self.name,
             substreams: SubstreamsConfig {
                 manifest: self.manifest,
                 module: self.module,

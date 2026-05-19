@@ -1,10 +1,10 @@
 # substreams-websocket
 
-Stream decoded Substreams `DatabaseChanges` block outputs over a single WebSocket fan-out server. Configure one or more `(network, name)` streams in TOML, point them at any `db_out`-style Substreams package, every connected client receives flattened JSON for every block — SVM, EVM, any chain emitting `sf.substreams.sink.database.v1.DatabaseChanges`.
+Stream decoded Substreams `DatabaseChanges` block outputs over a single WebSocket fan-out server. Configure one or more Substreams sources in TOML, point them at any `db_out`-style package; every connected client receives per-table JSON for every block — SVM, EVM, any chain emitting `sf.substreams.sink.database.v1.DatabaseChanges`. Clients subscribe by `<network>@<table>`.
 
 - **One generic decoder** for every supported chain.
 - **Resume on restart** — per-stream cursors persisted to disk.
-- **Cross-chain identity** — streams addressed by `(network, stream-name)`.
+- **Cross-chain identity** — clients subscribe by `(network, table)`; same table name on different chains coexists cleanly.
 - **JWT auth** built in for Pinax/StreamingFast endpoints.
 - **Prebuilt tarballs** for Linux x86_64/aarch64, macOS x86_64/aarch64.
 
@@ -100,18 +100,16 @@ Auth modes (api-key→JWT, raw bearer, header passthrough): [`docs/auth.md`](doc
 
 ### `streams.toml`
 
-Array of streams. No global block, no secrets.
+Array of Substreams sources. No global block, no secrets, **no operator-supplied name** — stream identity is derived from the loaded `.spkg` (`package_name` + `package_version` from `Package.package_meta[0]`, plus the canonical `module_hash`). Clients subscribe by `<network>@<table>` where `<table>` is the DatabaseChanges table emitted by `db_out`.
 
 ```toml
 [[streams]]
-name = "swaps"
 network = "solana-mainnet"
 endpoint = "https://solana.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg"
 # module defaults to "db_out"
 
 [[streams]]
-name = "swaps"               # same name on a different network -- fine
 network = "ethereum-mainnet"
 endpoint = "https://eth.substreams.pinax.network:443"
 manifest = "https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg"
@@ -119,23 +117,24 @@ manifest = "https://github.com/pinax-network/substreams-evm/releases/download/ev
 
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
-| `name` | yes | -- | Display string. `(network, name)` is identity. |
 | `network` | yes | -- | Chain id (`solana-mainnet`, `ethereum-mainnet`, ...). |
 | `endpoint` | yes | -- | Substreams gRPC URL. |
-| `manifest` | yes | -- | Local path or HTTPS URL of `.spkg`. |
+| `manifest` | yes | -- | Local path or HTTPS URL of `.spkg`. The spkg's `package_meta[0].name` + `version` are required (used for cursor + replay file naming). |
 | `module` | no | `db_out` | Must emit `proto:sf.substreams.sink.database.v1.DatabaseChanges`. |
 | `start_block` | no | `"-1"` | Negative = relative to head. Persisted cursor wins on resume. |
 | `stop_block` | no | `"0"` | `"0"` = indefinite. |
 | `params` | no | `[]` | `"module=value"` strings. |
 | `token` / `api_key` / `api_key_header` / `auth_url` | no | from `.env` | Per-stream overrides. |
 
-Validation refuses duplicate `(network, name)` pairs. Non-DatabaseChanges output broadcasts a `stream` `error` and task exits.
+Validation refuses duplicate `(network, manifest, module)` triples. Non-DatabaseChanges output or missing `package_meta` fails fast at startup.
+
+Cursor + replay files are named `<network>-<package_name>@<package_version>-<module_hash>.{cursor,jsonl}`.
 
 ---
 
 ## WebSocket API
 
-URL conventions mirror Binance market streams. Selectors: `<network>@<stream>` (`solana-mainnet@swaps`). `*` wildcard on either side.
+URL conventions mirror Binance market streams. Selectors: `<network>@<table>` (`solana-mainnet@swaps`). `*` wildcard on either side. `<table>` is the DatabaseChanges table emitted by the spkg's `db_out` module.
 
 ```
 ws://host:8080/ws/solana-mainnet@swaps                # single, raw

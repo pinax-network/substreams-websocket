@@ -38,11 +38,12 @@ On connect, the server sends a single `session` message describing every configu
   "client_id": 1,
   "streams": [
     {
-      "stream": "swaps",
       "network": "solana-mainnet",
       "module": "db_out",
       "manifest": "https://.../svm-dex-v0.5.1.spkg",
-      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797"
+      "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797",
+      "package_name": "svm_dex",
+      "package_version": "v0.5.1"
     }
   ],
   "subscriptions": ["solana-mainnet@swaps"],
@@ -50,25 +51,24 @@ On connect, the server sends a single `session` message describing every configu
 }
 ```
 
-- `streams` lists every stream the server knows about.
-- `subscriptions` is what this connection will actually receive (filtered set).
+- `streams` lists every Substreams source the server reads. Each entry is identified by `(network, package_name, package_version, module_hash)` — there is no operator-defined name.
+- `subscriptions` is what this connection will actually receive (filtered set). Selectors are `<network>@<table>` where `<table>` is a DatabaseChanges table emitted by the spkg's `db_out`.
 - `wrap_envelope` tells you whether subsequent payloads are wrapped in `{"stream","data"}` or sent raw.
 
 ## Block payload shape
 
-One message per non-empty block. Empty blocks are skipped.
+One message per `(network, table)` group per block. A spkg that emits both `swaps` and `transfers` produces **two** per-table broadcasts per block.
 
 ```json
 {
-  "stream": "swaps",
   "network": "solana-mainnet",
+  "table": "swaps",
   "block_num": 350000000,
   "block_hash": "Gsk6...",
   "timestamp": "2026-05-13 17:00:00",
   "module_hash": "bd388f2e...",
   "events": [
     {
-      "@table": "swaps",
       "input_amount": "1287000000",
       "input_mint": "So11111111111111111111111111111111111111112",
       "output_amount": "6848381008732",
@@ -82,10 +82,10 @@ One message per non-empty block. Empty blocks are skipped.
 
 Field reference:
 
-- `stream` / `network` — together identify which stream this block belongs to.
-- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`. `block_num` is also the resume key for reconnects (see "Reconnects and replay" below).
+- `network` + `table` — together identify the subscription channel.
+- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`. `block_num` is also the resume key for reconnects.
 - `module_hash` — canonical 40-hex SHA-1 of the Substreams output module. Use it to detect spkg upgrades.
-- `events` — array of `TableChange` rows, in source order. Each event has `@table` (DB table name; prefixed to avoid collision with a column literally called `table`) plus the column `name → value` pairs.
+- `events` — array of rows for this table only, in source order. The per-event `@table` prefix is dropped since the parent payload already names the table.
 - All values inside `events[*]` are strings on the wire (per DatabaseChanges proto). Numeric types are stringified; the agent must parse.
 - The keys `block_num`, `block_hash`, `timestamp`, `minute` are stripped from each event because they duplicate top-level meta.
 - Upstream `ordinal`, `operation`, `pk`/`composite_pk`, `update_op` are dropped — never surfaced.
@@ -98,10 +98,10 @@ When `wrap_envelope` is `true`, the same object is delivered nested under `data`
 
 ## Stream lifecycle messages
 
-Same connection, separate envelope identified by `"type": "stream"`. Filtered the same way as block payloads.
+Same connection, separate envelope identified by `"type": "stream"`. Lifecycle messages are delivered to **every** connected client regardless of stream subscription — they carry spkg provenance (`package_name`, `package_version`, `module_hash`) so clients can route on their own.
 
 ```
-{ "type": "stream", "status": "started",   "stream": "...", "network": "...", "module_hash": "..." }
+{ "type": "stream", "status": "started",   "network": "...", "package_name": "...", "package_version": "...", "module_hash": "..." }
 { "type": "stream", "status": "completed", ... }
 { "type": "stream", "status": "error",     ..., "message": "..." }
 { "type": "stream", "status": "fatal",     ..., "message": "..." }

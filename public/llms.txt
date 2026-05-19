@@ -8,28 +8,30 @@
 
 ## Connecting
 
-- `wss://<host>/ws/<network>@<stream>` — single stream, raw payloads.
-- `wss://<host>/ws/<a>/<b>/...` — multi stream, payloads wrapped as `{"stream":"<id>","data":<raw>}`.
+- `wss://<host>/ws/<network>@<table>` — single channel, raw payloads.
+- `wss://<host>/ws/<a>/<b>/...` — multi channel, payloads wrapped as `{"stream":"<id>","data":<raw>}`.
 - `wss://<host>/stream?streams=<a>/<b>/...` — query mode, always wrapped.
-- Bare `/ws` returns HTTP 400; use `/ws/*@*` to subscribe to every stream.
+- Bare `/ws` returns HTTP 400; use `/ws/*@*` to subscribe to every (network, table) channel.
+
+Clients subscribe by `<network>@<table>` where `<table>` is a DatabaseChanges table emitted by the spkg's `db_out` module (`swaps`, `transfers`, `spl_transfers`, ...).
 
 ## Block payload
 
 ```
 {
-  "stream":      "swaps",
   "network":     "solana-mainnet",
+  "table":       "swaps",
   "block_num":   350000000,
   "block_hash":  "Gsk6...",
   "timestamp":   "2026-05-13 17:00:00",
   "module_hash": "bd388f2e...",
   "events": [
-    { "@table": "swaps", "input_amount": "1287000000", ... }
+    { "input_amount": "1287000000", ... }
   ]
 }
 ```
 
-All event field values are strings on the wire. `@table` identifies the source DB table per row. On reconnect, pass `?from_block=<n>` to receive every retained block with `block_num > n`. Default retention is 1000 blocks per stream; outside that window the server emits a `gap` lifecycle message and clients must backfill via Substreams gRPC directly.
+One payload per `(network, table)` group per block. All event field values are strings on the wire. The per-event `@table` prefix is dropped because the parent payload already carries `table` at the top level. On reconnect, pass `?from_block=<n>` to receive every retained block with `block_num > n`. Default retention is 1000 blocks per spkg; outside that window the server emits a `gap` lifecycle message and clients must backfill via Substreams gRPC directly.
 
 ## Live commands
 
