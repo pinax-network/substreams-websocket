@@ -198,6 +198,18 @@ Test suite injects a synthesized `DatabaseChanges` block through the broadcast p
 
 Design decisions log: [`docs/decisions.md`](docs/decisions.md).
 
+### Log levels
+
+Set `SUBSTREAMS_WEBSOCKET_LOG_LEVEL` (or `--log-level`). Accepts any [`tracing` `EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) string. Default `info`.
+
+| Level | What you see |
+|-------|--------------|
+| `info` (default) | Server lifecycle, client connect/disconnect (with duration), `SUBSCRIBE` / `UNSUBSCRIBE` / `LIST_SUBSCRIPTIONS` commands, Substreams stream start/restart/error, cursor resume. |
+| `debug` | Above + one line per block broadcast (`stream`, `network`, `block_num`, `events`, `delivered`). |
+| `trace` | Above + raw payload size and delivery counts per broadcast for stream-status messages too. |
+
+Per-module overrides: `SUBSTREAMS_WEBSOCKET_LOG_LEVEL=info,substreams_websocket::server=debug`.
+
 ---
 
 ## Known limitations
