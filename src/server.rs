@@ -151,10 +151,10 @@ fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-const LANDING_HTML: &str = include_str!("../index.html");
-const SKILL_MD: &str = include_str!("../SKILL.md");
-const LLMS_TXT: &str = include_str!("../llms.txt");
-const FAVICON_PNG: &[u8] = include_bytes!("../favicon.png");
+const LANDING_HTML: &str = include_str!("../public/index.html");
+const SKILL_MD: &str = include_str!("../public/SKILL.md");
+const LLMS_TXT: &str = include_str!("../public/llms.txt");
+const FAVICON_PNG: &[u8] = include_bytes!("../public/favicon.png");
 
 async fn landing_html() -> impl IntoResponse {
     ([("content-type", "text/html; charset=utf-8")], LANDING_HTML)
