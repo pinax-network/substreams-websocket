@@ -65,7 +65,6 @@ One message per non-empty block. Empty blocks are skipped.
   "block_num": 350000000,
   "block_hash": "Gsk6...",
   "timestamp": "2026-05-13 17:00:00",
-  "cursor": "Mloz_-WpoBoZ...",
   "module_hash": "bd388f2e...",
   "events": [
     {
@@ -84,8 +83,7 @@ One message per non-empty block. Empty blocks are skipped.
 Field reference:
 
 - `stream` / `network` — together identify which stream this block belongs to.
-- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`.
-- `cursor` — opaque Substreams cursor. Persist it if you want to backfill from this exact position via a direct Substreams gRPC client. The server itself does not replay.
+- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`. `block_num` is also the resume key for reconnects (see "Reconnects and replay" below).
 - `module_hash` — canonical 40-hex SHA-1 of the Substreams output module. Use it to detect spkg upgrades.
 - `events` — array of `TableChange` rows, in source order. Each event has `@table` (DB table name; prefixed to avoid collision with a column literally called `table`) plus the column `name → value` pairs.
 - All values inside `events[*]` are strings on the wire (per DatabaseChanges proto). Numeric types are stringified; the agent must parse.
@@ -155,9 +153,9 @@ Invalid commands do **not** close the connection.
 - `wrap_envelope` is fixed at upgrade time. To change envelope mode, reconnect.
 - `SUBSCRIBE` does not push a snapshot. Only future blocks are delivered.
 
-## Cursors and exact resume
+## Reconnects and replay
 
-Every block payload includes `cursor`. If you want exactly-once consumption across reconnects, persist the last cursor you successfully processed and reconnect to the upstream Substreams source directly (not this WebSocket — this server has no replay buffer). The cursor is opaque to consumers.
+Every block payload includes `block_num`. The server has no replay buffer today: if the connection drops, blocks broadcast during the gap are lost unless you backfill from Substreams gRPC directly (using `block_num + 1` as `start_block`). Cursor handling stays internal to the server — clients do not see or persist cursors.
 
 ## Heartbeats
 
@@ -202,7 +200,7 @@ Compare each broadcast's `module_hash` with the one you saw in the welcome messa
 
 ## What this server does NOT do
 
-- **No replay buffer.** Disconnected clients miss broadcasts during the gap. Use the `cursor` field to reconnect upstream directly for backfill.
+- **No replay buffer.** Disconnected clients miss broadcasts during the gap. Use `block_num + 1` as `start_block` against Substreams gRPC directly for backfill.
 - **No payload transformation.** Field values are pass-through strings from the source DatabaseChanges. Numeric parsing, decimal handling, base58 / hex encoding are the consumer's responsibility.
 - **No authentication.** The server itself is open; access control is the operator's deploy concern.
 - **No persistence of historical messages.** Once a block is broadcast, it's gone unless a connected subscriber received it.
@@ -215,6 +213,6 @@ Good fit:
 - Cross-chain consumption from a unified URL pattern
 
 Bad fit:
-- Historical backfill (use Substreams gRPC directly with the cursor)
+- Historical backfill (use Substreams gRPC directly with a `start_block`)
 - Snapshotting / point-in-time queries (use a SQL sink instead)
 - Anything other than `sf.substreams.sink.database.v1.DatabaseChanges` outputs

@@ -595,7 +595,7 @@
 
   <div class="group">
     <div class="group-title">Operating</div>
-    <a href="#cursors">Cursors</a>
+    <a href="#reconnect">Reconnects</a>
     <a href="#heartbeats">Heartbeats</a>
     <a href="#limits">Limits</a>
   </div>
@@ -624,7 +624,7 @@
       </div>
       <div class="feature">
         <h3>Reorg-aware</h3>
-        <p>Every payload carries a Substreams <code>cursor</code> and <code>module_hash</code>. <code>undo</code> messages fire on chain reorganizations so subscribers can roll back deterministically.</p>
+        <p>Every payload carries <code>block_num</code> and <code>module_hash</code>. <code>undo</code> messages fire on chain reorganizations so subscribers can roll back deterministically.</p>
       </div>
     </div>
 
@@ -694,14 +694,13 @@
 
   <section id="block">
     <h2>Block payload</h2>
-    <p>One message per non-empty block. Empty blocks are skipped; their cursor is still persisted server-side.</p>
+    <p>One message per non-empty block. Empty blocks are skipped; server-side cursor still advances.</p>
 <pre>{
   "stream":      "swaps",
   "network":     "solana-mainnet",
   "block_num":   350000000,
   "block_hash":  "Gsk6...",
   "timestamp":   "2026-05-13 17:00:00",
-  "cursor":      "Mloz_-WpoBoZ...",
   "module_hash": "bd388f2e...",
   "events": [
     {
@@ -772,9 +771,9 @@
     <p>Insertion order preserved. Wildcards returned verbatim, not expanded.</p>
   </section>
 
-  <section id="cursors">
-    <h2>Cursors</h2>
-    <p>Every block payload includes <code>cursor</code>. To resume from an exact position across reconnects, persist the last cursor you processed and reconnect to a Substreams gRPC endpoint directly with it — this server has no replay buffer.</p>
+  <section id="reconnect">
+    <h2>Reconnects</h2>
+    <p>This server has no replay buffer today. If your connection drops, blocks broadcast during the gap are lost. Track <code>block_num</code> on every payload; on reconnect, use <code>block_num + 1</code> as <code>start_block</code> against Substreams gRPC directly to backfill the gap. Substreams cursors stay internal — clients deal in block numbers only.</p>
   </section>
 
   <section id="heartbeats">

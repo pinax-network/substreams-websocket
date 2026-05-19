@@ -493,7 +493,6 @@ async fn handle_substream_event(
                 block_hash: id,
                 timestamp,
                 network: network.clone(),
-                cursor: cursor.clone(),
                 module_hash: module_hash.to_owned(),
             };
             let decoded = match decode_database_changes(&config.name, &payload, context) {
@@ -1725,7 +1724,10 @@ mod tests {
         assert_eq!(body["block_num"], 999);
         assert_eq!(body["block_hash"], "block-999");
         assert_eq!(body["timestamp"], "2026-05-13 17:30:00");
-        assert_eq!(body["cursor"], "abc123");
+        assert!(
+            body.get("cursor").is_none(),
+            "cursor must not be surfaced on broadcast payloads"
+        );
         assert!(body.get("block").is_none(), "no nested 'block' object");
         assert!(body.get("type").is_none());
         assert!(body.get("changes").is_none());
