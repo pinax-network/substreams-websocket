@@ -91,6 +91,8 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.toml
 | Server | `SUBSTREAMS_WEBSOCKET_CURSORS_DIR` | `./cursors` | Cursor file directory. |
 | Server | `SUBSTREAMS_WEBSOCKET_REPLAY_BLOCKS` | `1000` | Recent blocks retained per stream as JSONL for client reconnect replay. `0` disables. |
 | Server | `SUBSTREAMS_WEBSOCKET_REPLAY_DIR` | `./replay` | Directory for per-stream JSONL replay logs. |
+| Server | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` | `16` | Max keys in one client-supplied event filter. |
+| Server | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` | `64` | Max total string values across one event filter. |
 
 Every variable has a matching CLI flag. `substreams-websocket serve --help` for full list.
 

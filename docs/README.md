@@ -11,6 +11,7 @@ Reference material that is **not** loaded at runtime or compile time. Audience: 
 | [`auth.md`](auth.md) | Pinax JWT exchange and alternative auth modes |
 | [`cursors-and-resume.md`](cursors-and-resume.md) | Cursor persistence semantics and what "exact resume" means here |
 | [`replay.md`](replay.md) | Per-stream JSONL replay log for client reconnects (`?from_block=<n>`) |
+| [`filters.md`](filters.md) | Per-subscription event filters (`?filter=`, `SET_FILTER`, `CLEAR_FILTER`, `LIST_FILTERS`) |
 | [`graceful-shutdown.md`](graceful-shutdown.md) | SIGTERM drain protocol — clean `Close` to every client before exit |
 | [`envoy.md`](envoy.md) | Running behind Envoy (or any reverse proxy) — health-check, idle timeout, buffer sizing |
 | [`decisions.md`](decisions.md) | Log of significant design decisions made during dev |

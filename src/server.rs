@@ -28,8 +28,9 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    BlockContext, Config, CursorStore, ReplayLog, SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent,
-    SubstreamsClient, compute_module_hash_hex, decode_database_changes, substreams::load_package,
+    BlockContext, Config, CursorStore, EventFilter, EventFilterSet, ReplayLog,
+    SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent, SubstreamsClient, apply_filter_in_place,
+    compute_module_hash_hex, decode_database_changes, substreams::load_package,
 };
 
 type ClientId = u64;
@@ -568,9 +569,7 @@ async fn handle_substream_event(
                 if let Err(error) = replay.append(&network, &config.name, &payload_text).await {
                     warn!(stream = %config.name, %error, "failed to append replay log");
                 }
-                let delivered = clients
-                    .broadcast_matching_text(&network, &config.name, payload_text)
-                    .await;
+                let delivered = clients.broadcast_block(&network, &config.name, json).await;
                 debug!(
                     stream = %config.name,
                     network = %network,
@@ -714,10 +713,20 @@ async fn websocket_path(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+    let event_filters = match parse_filter_query(
+        raw_query.as_deref(),
+        &entries,
+        state.config.websocket.max_filter_fields,
+        state.config.websocket.max_filter_values,
+    ) {
+        Ok(v) => v,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
     let wrap_envelope = entries.len() > 1;
     let filter = StreamFilter {
         entries,
         wrap_envelope,
+        event_filters,
     };
     ws.on_upgrade(move |socket| handle_socket(state, filter, from_block, socket))
         .into_response()
@@ -753,12 +762,54 @@ async fn websocket_stream_query(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+    let event_filters = match parse_filter_query(
+        Some(&raw),
+        &entries,
+        state.config.websocket.max_filter_fields,
+        state.config.websocket.max_filter_values,
+    ) {
+        Ok(v) => v,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
     let filter = StreamFilter {
         entries,
         wrap_envelope: true,
+        event_filters,
     };
     ws.on_upgrade(move |socket| handle_socket(state, filter, from_block, socket))
         .into_response()
+}
+
+/// Parse `?filter=<url-encoded-json>` on the WS upgrade URL. The filter
+/// object is applied to every explicit `network@stream` entry in the URL
+/// (wildcards are skipped — they always pass every event through).
+/// Returns an empty `EventFilterSet` when `?filter=` is absent.
+fn parse_filter_query(
+    raw_query: Option<&str>,
+    entries: &[StreamId],
+    max_fields: usize,
+    max_values: usize,
+) -> Result<EventFilterSet, String> {
+    let Some(raw) = raw_query else {
+        return Ok(EventFilterSet::default());
+    };
+    let Some((_, value)) = url_query_pairs(raw).find(|(k, _)| k == "filter") else {
+        return Ok(EventFilterSet::default());
+    };
+    if value.is_empty() {
+        return Ok(EventFilterSet::default());
+    }
+    let filter = EventFilter::from_str(&value, max_fields, max_values)
+        .map_err(|e| format!("invalid `filter` query: {e}"))?;
+    let mut set = EventFilterSet::default();
+    for entry in entries {
+        let (Some(network), Some(stream)) = (entry.network.as_deref(), entry.stream.as_deref())
+        else {
+            continue;
+        };
+        set.set(format!("{network}@{stream}"), filter.clone());
+    }
+    Ok(set)
 }
 
 /// Replay buffered blocks for every explicit `network@stream` selector with
@@ -829,16 +880,37 @@ async fn replay_for_client(
             continue;
         }
 
-        let replayed = result.blocks.len();
+        let selector = format!("{network}@{stream}");
+        let event_filter = filter.event_filters.get(&selector);
+        let mut replayed: usize = 0;
         for (_block_num, raw_text) in result.blocks {
+            let payload_text = match event_filter {
+                Some(f) if !f.is_empty() => {
+                    let mut block = match serde_json::from_str::<serde_json::Value>(&raw_text) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            // Skip unparseable replay lines rather than fail the whole
+                            // replay; logged at the producer side already.
+                            continue;
+                        }
+                    };
+                    let remaining = apply_filter_in_place(&mut block, f);
+                    if remaining == 0 {
+                        continue;
+                    }
+                    block.to_string()
+                }
+                _ => raw_text,
+            };
             let text = if filter.wrap_envelope {
-                format!(r#"{{"stream":"{network}@{stream}","data":{raw_text}}}"#)
+                format!(r#"{{"stream":"{selector}","data":{payload_text}}}"#)
             } else {
-                raw_text
+                payload_text
             };
             if outbound.send(Message::Text(text.into())).await.is_err() {
                 return Err("outbound channel closed during replay".to_owned());
             }
+            replayed += 1;
         }
 
         if replayed > 0 {
@@ -952,7 +1024,14 @@ async fn handle_socket(
                 match message {
                     Ok(Message::Text(text)) => {
                         debug!(client_id, %text, "received WebSocket text message");
-                        let reply = handle_subscription_command(client_id, &filter_handle, text.as_str()).await;
+                        let reply = handle_subscription_command(
+                            client_id,
+                            &filter_handle,
+                            state.config.websocket.max_filter_fields,
+                            state.config.websocket.max_filter_values,
+                            text.as_str(),
+                        )
+                        .await;
                         if outbound.send(Message::Text(reply.into())).await.is_err() {
                             break;
                         }
@@ -1049,6 +1128,10 @@ struct StreamFilter {
     /// Set by the route (`/stream` always wraps; `/ws/<one>` does not; `/ws`
     /// with multiple path segments does).
     wrap_envelope: bool,
+    /// Optional per-selector event filter. Keyed by explicit
+    /// `network@stream` selector (no wildcards). Wildcard subscriptions
+    /// always pass every event through.
+    event_filters: EventFilterSet,
 }
 
 impl StreamFilter {
@@ -1299,6 +1382,74 @@ impl ClientRegistry {
 
         delivered
     }
+
+    /// Block-payload broadcast that respects per-client event filters. For
+    /// each matching client without a filter, the original serialized JSON
+    /// is reused. For each matching client with a filter, the block is
+    /// cloned, `events[]` is filtered in place, and re-serialized. If the
+    /// filter drops every event, that client is skipped entirely (no
+    /// zero-event broadcasts).
+    async fn broadcast_block(
+        &self,
+        network: &str,
+        stream: &str,
+        block: serde_json::Value,
+    ) -> usize {
+        let selector = format!("{network}@{stream}");
+        let unfiltered_text = block.to_string();
+        let unfiltered_wrapped = format!(r#"{{"stream":"{selector}","data":{unfiltered_text}}}"#);
+        let clients = self.clients.read().await;
+        let mut delivered: usize = 0;
+
+        for (client_id, client) in clients.iter() {
+            let filter = client.filter.read().await;
+            if !filter.matches(network, stream) {
+                continue;
+            }
+            let text = match filter.event_filters.get(&selector) {
+                Some(event_filter) if !event_filter.is_empty() => {
+                    let mut block_copy = block.clone();
+                    let remaining = apply_filter_in_place(&mut block_copy, event_filter);
+                    if remaining == 0 {
+                        continue;
+                    }
+                    let filtered_text = block_copy.to_string();
+                    if filter.wrap_envelope {
+                        format!(r#"{{"stream":"{selector}","data":{filtered_text}}}"#)
+                    } else {
+                        filtered_text
+                    }
+                }
+                _ => {
+                    if filter.wrap_envelope {
+                        unfiltered_wrapped.clone()
+                    } else {
+                        unfiltered_text.clone()
+                    }
+                }
+            };
+            drop(filter);
+            let msg = Message::Text(text.into());
+            if client.tx.try_send(msg).is_err() {
+                warn!(
+                    client_id,
+                    "dropping broadcast message for slow WebSocket client"
+                );
+            } else {
+                delivered += 1;
+            }
+        }
+
+        trace!(
+            network,
+            stream,
+            delivered,
+            total_clients = clients.len(),
+            "broadcast block"
+        );
+
+        delivered
+    }
 }
 
 #[derive(Clone)]
@@ -1337,16 +1488,21 @@ impl std::fmt::Display for DisconnectReason {
 /// - `SUBSCRIBE`           — params: `["network@stream", ...]`
 /// - `UNSUBSCRIBE`         — params: `["network@stream", ...]`
 /// - `LIST_SUBSCRIPTIONS`  — no params, returns the current subscriptions
+/// - `SET_FILTER`          — params: `["network@stream", { "field": "value" | [...] }]`
+/// - `CLEAR_FILTER`        — params: `["network@stream"]`
+/// - `LIST_FILTERS`        — no params, returns the current filter map
 async fn handle_subscription_command(
     client_id: ClientId,
     filter: &Arc<RwLock<StreamFilter>>,
+    max_filter_fields: usize,
+    max_filter_values: usize,
     text: &str,
 ) -> String {
     #[derive(serde::Deserialize)]
     struct Command {
         method: String,
         #[serde(default)]
-        params: Vec<String>,
+        params: Vec<serde_json::Value>,
         id: Option<serde_json::Value>,
     }
 
@@ -1364,16 +1520,35 @@ async fn handle_subscription_command(
 
     let id = cmd.id.unwrap_or(serde_json::Value::Null);
 
+    // Extract string params for selector-only methods. Returns error reply
+    // when any param is not a string.
+    fn string_params(params: &[serde_json::Value]) -> Result<Vec<String>, String> {
+        let mut out = Vec::with_capacity(params.len());
+        for p in params {
+            let Some(s) = p.as_str() else {
+                return Err("params must be strings".to_owned());
+            };
+            out.push(s.to_owned());
+        }
+        Ok(out)
+    }
+
     match cmd.method.as_str() {
         "SUBSCRIBE" => {
-            let mut parsed = Vec::with_capacity(cmd.params.len());
-            for p in &cmd.params {
+            let raw = match string_params(&cmd.params) {
+                Ok(v) => v,
+                Err(error) => {
+                    return serde_json::json!({ "error": error, "id": id }).to_string();
+                }
+            };
+            let mut parsed = Vec::with_capacity(raw.len());
+            for p in &raw {
                 match StreamId::parse(p) {
                     Ok(id) => parsed.push(id),
                     Err(error) => {
                         warn!(
                             client_id,
-                            params = ?cmd.params,
+                            params = ?raw,
                             %error,
                             "SUBSCRIBE rejected: invalid selector"
                         );
@@ -1392,7 +1567,7 @@ async fn handle_subscription_command(
             };
             info!(
                 client_id,
-                params = ?cmd.params,
+                params = ?raw,
                 added,
                 total,
                 "SUBSCRIBE"
@@ -1400,14 +1575,20 @@ async fn handle_subscription_command(
             serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
         }
         "UNSUBSCRIBE" => {
-            let mut parsed = Vec::with_capacity(cmd.params.len());
-            for p in &cmd.params {
+            let raw = match string_params(&cmd.params) {
+                Ok(v) => v,
+                Err(error) => {
+                    return serde_json::json!({ "error": error, "id": id }).to_string();
+                }
+            };
+            let mut parsed = Vec::with_capacity(raw.len());
+            for p in &raw {
                 match StreamId::parse(p) {
                     Ok(id) => parsed.push(id),
                     Err(error) => {
                         warn!(
                             client_id,
-                            params = ?cmd.params,
+                            params = ?raw,
                             %error,
                             "UNSUBSCRIBE rejected: invalid selector"
                         );
@@ -1426,7 +1607,7 @@ async fn handle_subscription_command(
             };
             info!(
                 client_id,
-                params = ?cmd.params,
+                params = ?raw,
                 removed,
                 total,
                 "UNSUBSCRIBE"
@@ -1438,10 +1619,92 @@ async fn handle_subscription_command(
             info!(client_id, count = list.len(), "LIST_SUBSCRIPTIONS");
             serde_json::json!({ "result": list, "id": id }).to_string()
         }
+        "SET_FILTER" => {
+            if cmd.params.len() != 2 {
+                return serde_json::json!({
+                    "error": "SET_FILTER expects [selector, filter-object]",
+                    "id": id,
+                })
+                .to_string();
+            }
+            let Some(selector) = cmd.params[0].as_str() else {
+                return serde_json::json!({
+                    "error": "SET_FILTER param[0] must be a `network@stream` selector",
+                    "id": id,
+                })
+                .to_string();
+            };
+            // Reject wildcard selectors: filters only apply to explicit pairs.
+            if let Ok(parsed) = StreamId::parse(selector)
+                && (parsed.network.is_none() || parsed.stream.is_none())
+            {
+                return serde_json::json!({
+                    "error": "SET_FILTER does not support wildcard selectors",
+                    "id": id,
+                })
+                .to_string();
+            }
+            if StreamId::parse(selector).is_err() {
+                return serde_json::json!({
+                    "error": format!("invalid selector {selector:?}"),
+                    "id": id,
+                })
+                .to_string();
+            }
+            let parsed_filter = match EventFilter::from_json(
+                &cmd.params[1],
+                max_filter_fields,
+                max_filter_values,
+            ) {
+                Ok(f) => f,
+                Err(error) => {
+                    warn!(client_id, selector, %error, "SET_FILTER rejected");
+                    return serde_json::json!({
+                        "error": error.to_string(),
+                        "id": id,
+                    })
+                    .to_string();
+                }
+            };
+            {
+                let mut guard = filter.write().await;
+                guard.event_filters.set(selector.to_owned(), parsed_filter);
+            }
+            info!(client_id, selector, "SET_FILTER");
+            serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
+        }
+        "CLEAR_FILTER" => {
+            let raw = match string_params(&cmd.params) {
+                Ok(v) => v,
+                Err(error) => {
+                    return serde_json::json!({ "error": error, "id": id }).to_string();
+                }
+            };
+            if raw.is_empty() {
+                return serde_json::json!({
+                    "error": "CLEAR_FILTER expects at least one selector",
+                    "id": id,
+                })
+                .to_string();
+            }
+            {
+                let mut guard = filter.write().await;
+                for selector in &raw {
+                    guard.event_filters.remove(selector);
+                }
+            }
+            info!(client_id, params = ?raw, "CLEAR_FILTER");
+            serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
+        }
+        "LIST_FILTERS" => {
+            let list = filter.read().await.event_filters.list();
+            info!(client_id, count = list.len(), "LIST_FILTERS");
+            serde_json::json!({ "result": list, "id": id }).to_string()
+        }
         other => {
             warn!(client_id, method = %other, "unknown WebSocket method");
             serde_json::json!({
-                "error": format!("unknown method {other:?}; expected SUBSCRIBE, UNSUBSCRIBE, or LIST_SUBSCRIPTIONS"),
+                "error": format!("unknown method {other:?}; expected SUBSCRIBE, UNSUBSCRIBE, LIST_SUBSCRIPTIONS, SET_FILTER, CLEAR_FILTER, or LIST_FILTERS"),
                 "id": id,
             })
             .to_string()
@@ -1517,6 +1780,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod filter_tests {
     use super::{StreamFilter, StreamId, parse_stream_list};
+    use crate::EventFilterSet;
 
     fn id(network: Option<&str>, stream: Option<&str>) -> StreamId {
         StreamId {
@@ -1537,6 +1801,7 @@ mod filter_tests {
         let f = StreamFilter {
             entries: vec![id],
             wrap_envelope: false,
+            event_filters: EventFilterSet::default(),
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("anything", "anywhere"));
@@ -1547,6 +1812,7 @@ mod filter_tests {
         let f = StreamFilter {
             entries: vec![id(Some("solana-mainnet"), Some("swaps"))],
             wrap_envelope: false,
+            event_filters: EventFilterSet::default(),
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(!f.matches("solana-mainnet", "transfers"));
@@ -1558,6 +1824,7 @@ mod filter_tests {
         let f = StreamFilter {
             entries: vec![id(None, Some("swaps"))],
             wrap_envelope: false,
+            event_filters: EventFilterSet::default(),
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("ethereum-mainnet", "swaps"));
@@ -1569,6 +1836,7 @@ mod filter_tests {
         let f = StreamFilter {
             entries: vec![id(Some("solana-mainnet"), None)],
             wrap_envelope: false,
+            event_filters: EventFilterSet::default(),
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("solana-mainnet", "transfers"));
@@ -1583,6 +1851,7 @@ mod filter_tests {
                 id(Some("ethereum-mainnet"), Some("transfers")),
             ],
             wrap_envelope: false,
+            event_filters: EventFilterSet::default(),
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("ethereum-mainnet", "transfers"));
@@ -1657,6 +1926,8 @@ mod filter_tests {
         let reply = super::handle_subscription_command(
             0,
             &filter,
+            16,
+            64,
             r#"{"method":"SUBSCRIBE","params":["solana-mainnet@swaps","ethereum-mainnet@transfers"],"id":7}"#,
         )
         .await;
@@ -1682,6 +1953,8 @@ mod filter_tests {
         let reply = super::handle_subscription_command(
             0,
             &filter,
+            16,
+            64,
             r#"{"method":"UNSUBSCRIBE","params":["solana-mainnet@swaps"],"id":12}"#,
         )
         .await;
@@ -1701,6 +1974,8 @@ mod filter_tests {
         let reply = super::handle_subscription_command(
             0,
             &filter,
+            16,
+            64,
             r#"{"method":"LIST_SUBSCRIPTIONS","id":3}"#,
         )
         .await;
@@ -1712,8 +1987,14 @@ mod filter_tests {
     #[tokio::test]
     async fn unknown_method_returns_error() {
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
-        let reply =
-            super::handle_subscription_command(0, &filter, r#"{"method":"DESTROY","id":99}"#).await;
+        let reply = super::handle_subscription_command(
+            0,
+            &filter,
+            16,
+            64,
+            r#"{"method":"DESTROY","id":99}"#,
+        )
+        .await;
         let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(value["id"], 99);
         assert!(value["error"].as_str().unwrap().contains("unknown method"));
@@ -1722,7 +2003,7 @@ mod filter_tests {
     #[tokio::test]
     async fn invalid_json_returns_error() {
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
-        let reply = super::handle_subscription_command(0, &filter, "not json").await;
+        let reply = super::handle_subscription_command(0, &filter, 16, 64, "not json").await;
         let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert!(value["error"].as_str().unwrap().contains("invalid command"));
     }
@@ -2124,6 +2405,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filter_query_drops_non_matching_events_on_broadcast() {
+        let server = TestServer::start(config()).await;
+
+        // Build a block with three events, two protocols.
+        let payload = build_swap_payload(&[
+            ("raydium_cpmm", "user_a"),
+            ("pump_fun", "user_b"),
+            ("raydium_cpmm", "user_c"),
+        ]);
+
+        // Connect with ?filter=protocol=raydium_cpmm
+        let filter_param = urlencoding::encode(r#"{"protocol":"raydium_cpmm"}"#).to_string();
+        let url = format!(
+            "ws://{}/ws/solana-mainnet@swaps?filter={}",
+            server.addr, filter_param
+        );
+        let (mut socket, _) = connect_async(&url).await.expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("ok");
+
+        // Push the synthesized block through the broadcast pipeline.
+        deliver_block(&server, payload).await;
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("block arrives")
+            .expect("open")
+            .expect("frame");
+        let text = match msg {
+            TungsteniteMessage::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        let events = value["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["user"], "user_a");
+        assert_eq!(events[1]["user"], "user_c");
+
+        socket.close(None).await.expect("clean close");
+    }
+
+    #[tokio::test]
+    async fn filter_query_skips_block_when_no_events_match() {
+        let server = TestServer::start(config()).await;
+        let payload = build_swap_payload(&[("pump_fun", "user_a"), ("meteora", "user_b")]);
+
+        let filter_param = urlencoding::encode(r#"{"protocol":"raydium_cpmm"}"#).to_string();
+        let url = format!(
+            "ws://{}/ws/solana-mainnet@swaps?filter={}",
+            server.addr, filter_param
+        );
+        let (mut socket, _) = connect_async(&url).await.expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("ok");
+
+        deliver_block(&server, payload).await;
+
+        // Block should be skipped entirely. Verify by sending a heartbeat or
+        // by relying on timeout: no frame arrives within a short window.
+        let result = tokio::time::timeout(Duration::from_millis(300), socket.next()).await;
+        assert!(
+            result.is_err(),
+            "block with no matching events must not be delivered"
+        );
+
+        socket.close(None).await.expect("clean close");
+    }
+
+    #[tokio::test]
+    async fn set_filter_command_takes_effect_on_next_block() {
+        let server = TestServer::start(config()).await;
+
+        let (mut socket, _) =
+            connect_async(format!("ws://{}/ws/solana-mainnet@swaps", server.addr))
+                .await
+                .expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("ok");
+
+        // Apply SET_FILTER live.
+        socket
+            .send(TungsteniteMessage::Text(
+                r#"{"method":"SET_FILTER","params":["solana-mainnet@swaps",{"user":"user_b"}],"id":1}"#
+                    .into(),
+            ))
+            .await
+            .expect("send SET_FILTER");
+        let reply = socket.next().await.expect("reply").expect("ok");
+        let reply_text = match reply {
+            TungsteniteMessage::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let reply_value: serde_json::Value = serde_json::from_str(&reply_text).expect("reply json");
+        assert_eq!(reply_value["id"], 1);
+        assert!(reply_value["result"].is_null());
+
+        let payload = build_swap_payload(&[
+            ("raydium_cpmm", "user_a"),
+            ("raydium_cpmm", "user_b"),
+            ("raydium_cpmm", "user_c"),
+        ]);
+        deliver_block(&server, payload).await;
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("block arrives")
+            .expect("open")
+            .expect("frame");
+        let text = match msg {
+            TungsteniteMessage::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        let events = value["events"].as_array().expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["user"], "user_b");
+
+        socket.close(None).await.expect("clean close");
+    }
+
+    /// Build a synthesized DatabaseChanges payload with the given
+    /// `(protocol, user)` pairs as `swaps` table rows.
+    fn build_swap_payload(rows: &[(&str, &str)]) -> Vec<u8> {
+        let changes = DatabaseChanges {
+            table_changes: rows
+                .iter()
+                .map(|(protocol, user)| TableChange {
+                    table: "swaps".to_owned(),
+                    ordinal: 0,
+                    operation: 1,
+                    fields: vec![
+                        Field {
+                            name: "protocol".to_owned(),
+                            value: (*protocol).to_owned(),
+                            update_op: 1,
+                        },
+                        Field {
+                            name: "user".to_owned(),
+                            value: (*user).to_owned(),
+                            update_op: 1,
+                        },
+                    ],
+                    primary_key: None,
+                })
+                .collect(),
+        };
+        let mut payload = Vec::new();
+        changes.encode(&mut payload).expect("encode");
+        payload
+    }
+
+    async fn deliver_block(server: &TestServer, payload: Vec<u8>) {
+        let stream_config = server.config.streams[0].clone();
+        let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
+        let cursors = CursorStore::new(cursors_dir.path());
+        let replay = ReplayLog::disabled();
+        super::handle_substream_event(
+            &stream_config,
+            &server.clients,
+            &cursors,
+            &replay,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            StreamEvent::Block {
+                number: 999,
+                id: "block-999".to_owned(),
+                timestamp: "2026-05-13 17:30:00".to_owned(),
+                output_type_url: String::new(),
+                payload,
+                cursor: "abc123".to_owned(),
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn health_returns_503_during_drain() {
         let mut cfg = config();
         cfg.websocket.shutdown_drain_timeout = Duration::from_secs(5);
@@ -2320,6 +2773,8 @@ mod tests {
                 max_clients: 16,
                 client_buffer_size: 16,
                 shutdown_drain_timeout: Duration::from_secs(1),
+                max_filter_fields: 16,
+                max_filter_values: 64,
             },
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
             replay: ReplayConfig {
