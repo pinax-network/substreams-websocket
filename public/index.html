@@ -164,57 +164,63 @@
     line-height: 1.5;
   }
 
-  .streams-list {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    margin: 6px 0 18px;
-  }
-  .streams-list .stream-card {
+  .streams-list { margin: 6px 0 18px; }
+  .streams-list .network-group {
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 12px 14px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
     background: var(--code-bg);
+  }
+  .streams-list .network-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg);
+    margin: 0 0 10px;
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+  }
+  .streams-list .table-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
     cursor: pointer;
-    transition: border-color 120ms, transform 120ms;
     position: relative;
   }
-  .streams-list .stream-card:hover { border-color: var(--accent); }
-  .streams-list .stream-card.copied { border-color: var(--good); }
-  .streams-list .stream-id {
+  .streams-list .table-row:first-of-type { border-top: 0; padding-top: 0; }
+  .streams-list .table-row:hover .table-id { color: var(--accent); }
+  .streams-list .table-row.copied .table-id { color: var(--good); }
+  .streams-list .table-row.discovery { cursor: default; }
+  .streams-list .table-row.discovery .table-id { color: var(--muted); font-style: italic; }
+  .streams-list .table-id {
     font-family: var(--mono);
     font-size: 13px;
     font-weight: 600;
     color: var(--fg);
-    margin-bottom: 4px;
-    word-break: break-all;
+    flex: 0 0 auto;
+    transition: color 120ms;
   }
-  .streams-list .stream-desc {
-    font-size: 12px;
-    color: var(--muted);
-    line-height: 1.5;
-    margin: 0 0 6px;
-  }
-  .streams-list .stream-meta {
+  .streams-list .table-source {
     font-family: var(--mono);
     font-size: 11px;
     color: var(--muted);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 14px;
+    margin-left: auto;
+    text-align: right;
   }
-  .streams-list .stream-meta span code { background: transparent; padding: 0; }
-  .streams-list .stream-copied {
+  .streams-list .table-copied {
     position: absolute;
-    top: 8px;
-    right: 12px;
-    font-size: 11px;
+    right: 0;
+    top: -16px;
+    font-size: 10px;
     color: var(--good);
     opacity: 0;
     transition: opacity 120ms;
     font-family: var(--mono);
   }
-  .streams-list .stream-card.copied .stream-copied { opacity: 1; }
+  .streams-list .table-row.copied .table-copied { opacity: 1; }
   .method {
     display: inline-block;
     font-family: var(--mono);
@@ -1444,11 +1450,10 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   });
 
   // Populate the "Available streams" section by fetching /streams.
-  // Each spkg entry from /streams declares which DatabaseChanges tables it
-  // emits via `tables: [...]`. We render one card per `(network, table)`
-  // pair so subscribers can copy a working `<network>@<table>` selector
-  // directly. Spkgs with no declared tables fall back to a single
-  // discovery-pending card.
+  // Render one network group per `network`, listing every `(network, table)`
+  // channel underneath. Each table row carries the spkg `name v0.X.Y` that
+  // backs it (multiple spkgs feeding the same channel are joined with `,`).
+  // Tables not declared in streams.toml render as a discovery placeholder.
   (function loadStreams() {
     var host = document.getElementById('streams-list');
     if (!host) return;
@@ -1460,84 +1465,93 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
           return;
         }
 
-        // Flatten spkg → per-table channels. Dedup `(network, table)` since
-        // multiple spkgs can feed the same channel (e.g. two swap-emitting
-        // spkgs on solana-mainnet); the card lists every contributing spkg.
-        var channels = {};
+        // networks: { network: { tables: { table: [{name, version}, ...] }, discovery: [{name, version}, ...] } }
+        var networks = {};
         streams.forEach(function (s) {
           var network = s.network || '*';
-          var tables = Array.isArray(s.tables) && s.tables.length > 0 ? s.tables : [null];
-          tables.forEach(function (t) {
-            var id = network + '@' + (t || '?');
-            if (!channels[id]) channels[id] = { id: id, network: network, table: t, sources: [] };
-            channels[id].sources.push(s);
-          });
+          if (!networks[network]) networks[network] = { tables: {}, discovery: [] };
+          var src = {
+            name: s.package_name || '',
+            version: s.package_version || '',
+          };
+          if (Array.isArray(s.tables) && s.tables.length > 0) {
+            s.tables.forEach(function (t) {
+              if (!networks[network].tables[t]) networks[network].tables[t] = [];
+              networks[network].tables[t].push(src);
+            });
+          } else {
+            networks[network].discovery.push(src);
+          }
         });
 
-        var sortedIds = Object.keys(channels).sort();
+        var fmtSource = function (src) {
+          return (src.name || '?') + (src.version ? ' ' + src.version : '');
+        };
+
         host.innerHTML = '';
-        sortedIds.forEach(function (id) {
-          var ch = channels[id];
-          var card = document.createElement('div');
-          card.className = 'stream-card';
-          card.setAttribute('data-id', id);
-          card.title = ch.table
-            ? 'Click to copy ' + id
-            : 'Tables not declared by spkg — discovered at runtime';
+        Object.keys(networks).sort().forEach(function (network) {
+          var group = document.createElement('div');
+          group.className = 'network-group';
 
-          var idEl = document.createElement('div');
-          idEl.className = 'stream-id';
-          idEl.textContent = ch.table ? id : ch.network + '@?';
-          card.appendChild(idEl);
+          var heading = document.createElement('div');
+          heading.className = 'network-name';
+          heading.textContent = network;
+          group.appendChild(heading);
 
-          // Render description from the first source spkg that has one.
-          var description = ch.sources.map(function (s) { return s.description; }).filter(Boolean)[0];
-          if (description) {
-            var desc = document.createElement('p');
-            desc.className = 'stream-desc';
-            desc.textContent = description;
-            card.appendChild(desc);
-          }
+          var tables = Object.keys(networks[network].tables).sort();
+          tables.forEach(function (table) {
+            var id = network + '@' + table;
+            var row = document.createElement('div');
+            row.className = 'table-row';
+            row.title = 'Click to copy ' + id;
 
-          var meta = document.createElement('div');
-          meta.className = 'stream-meta';
-          var parts = [];
-          var names    = ch.sources.map(function (s) { return s.package_name; }).filter(Boolean);
-          var versions = ch.sources.map(function (s) { return s.package_version; }).filter(Boolean);
-          if (names.length)              parts.push({ k: 'name',    v: names.join(', ') });
-          if (versions.length)           parts.push({ k: 'version', v: versions.join(', ') });
-          if (ch.sources[0].module)      parts.push({ k: 'module',  v: ch.sources[0].module });
-          if (ch.sources[0].module_hash) parts.push({ k: 'hash',    v: ch.sources[0].module_hash.slice(0, 12) + '…' });
-          if (!ch.table)                 parts.push({ k: 'tables',  v: 'discovered at runtime' });
-          parts.forEach(function (p) {
-            var span = document.createElement('span');
-            span.innerHTML = p.k + ' <code>' + escapeHtml(p.v) + '</code>';
-            meta.appendChild(span);
-          });
-          card.appendChild(meta);
+            var idEl = document.createElement('div');
+            idEl.className = 'table-id';
+            idEl.textContent = id;
+            row.appendChild(idEl);
 
-          var copied = document.createElement('span');
-          copied.className = 'stream-copied';
-          copied.textContent = '✓ copied';
-          card.appendChild(copied);
+            var sourceEl = document.createElement('div');
+            sourceEl.className = 'table-source';
+            sourceEl.textContent = networks[network].tables[table].map(fmtSource).join(', ');
+            row.appendChild(sourceEl);
 
-          if (ch.table) {
-            card.addEventListener('click', function () {
-              var text = id;
+            var copied = document.createElement('span');
+            copied.className = 'table-copied';
+            copied.textContent = '✓ copied';
+            row.appendChild(copied);
+
+            row.addEventListener('click', function () {
               var done = function () {
-                card.classList.add('copied');
-                setTimeout(function () { card.classList.remove('copied'); }, 1200);
+                row.classList.add('copied');
+                setTimeout(function () { row.classList.remove('copied'); }, 1200);
               };
               if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(done, done);
+                navigator.clipboard.writeText(id).then(done, done);
               } else {
                 done();
               }
             });
-          } else {
-            card.style.cursor = 'default';
-          }
-          host.appendChild(card);
+            group.appendChild(row);
+          });
+
+          // Discovery placeholder — spkgs in this network with no declared tables.
+          networks[network].discovery.forEach(function (src) {
+            var row = document.createElement('div');
+            row.className = 'table-row discovery';
+
+            var idEl = document.createElement('div');
+            idEl.className = 'table-id';
+            idEl.textContent = network + '@? (discovered at runtime)';
+            row.appendChild(idEl);
+
+            var sourceEl = document.createElement('div');
+            sourceEl.className = 'table-source';
+            sourceEl.textContent = fmtSource(src);
+            row.appendChild(sourceEl);
+            group.appendChild(row);
+          });
+
+          host.appendChild(group);
         });
       })
       .catch(function (err) {
