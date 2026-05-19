@@ -1330,7 +1330,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   // exploring the API, not long-running ingest. A live block stream can fire
   // hundreds of payloads per second; without this cap the browser runs out
   // of memory rendering them. Server-to-server clients have no such cap.
-  var AUTO_DISCONNECT_MS = 5000;
+  var AUTO_DISCONNECT_MS = 15000;
   var autoTimer = null;
   var countdownTimer = null;
   var autoDeadline = 0;
