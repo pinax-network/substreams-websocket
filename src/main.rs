@@ -230,6 +230,22 @@ struct WebSocketArgs {
         default_value_t = 10
     )]
     shutdown_drain_secs: u64,
+
+    /// Maximum keys allowed in a single client-supplied event filter.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS",
+        default_value_t = 16
+    )]
+    max_filter_fields: usize,
+
+    /// Maximum total string values across one event filter.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES",
+        default_value_t = 64
+    )]
+    max_filter_values: usize,
 }
 
 impl WebSocketArgs {
@@ -245,6 +261,8 @@ impl WebSocketArgs {
             max_clients: self.max_clients,
             client_buffer_size: self.client_buffer_size,
             shutdown_drain_timeout: Duration::from_secs(self.shutdown_drain_secs),
+            max_filter_fields: self.max_filter_fields,
+            max_filter_values: self.max_filter_values,
         }
     }
 }

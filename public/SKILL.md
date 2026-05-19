@@ -153,6 +153,24 @@ Invalid commands do **not** close the connection.
 - `wrap_envelope` is fixed at upgrade time. To change envelope mode, reconnect.
 - `SUBSCRIBE` does not push a snapshot. Only future blocks are delivered.
 
+## Event filters
+
+Reduce bandwidth by asking the server to drop non-matching events before delivery. Pass `?filter=<url-encoded-json>` on the WebSocket upgrade, or use the live `SET_FILTER` / `CLEAR_FILTER` / `LIST_FILTERS` JSON commands. Filters are scoped per explicit `network@stream` selector. Wildcards always pass everything through.
+
+```
+ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%7D
+```
+
+```json
+{ "method": "SET_FILTER",
+  "params": ["solana-mainnet@swaps", { "protocol": "raydium_cpmm", "user": ["a","b"] }],
+  "id": 1 }
+```
+
+Semantics: string equality only; fields are AND'd; values within a field are OR'd; events missing the filtered field are dropped. If every event of a block is dropped, the block is skipped for that client. Top-level fields (`block_num`, `network`, `module_hash`) are not filterable.
+
+See [`docs/filters.md`](https://github.com/pinax-network/substreams-websocket/blob/main/docs/filters.md) for full reference + common filter shapes per stream type.
+
 ## Reconnects and replay
 
 The server retains the last N blocks per stream on disk (default 1000, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_BLOCKS`). On reconnect, pass `?from_block=<n>` to receive every block with `block_num > n` from the on-disk window before the live stream resumes.

@@ -591,6 +591,14 @@
     <a href="#subscribe"><span class="chip">WS</span>SUBSCRIBE</a>
     <a href="#unsubscribe"><span class="chip">WS</span>UNSUBSCRIBE</a>
     <a href="#list"><span class="chip">WS</span>LIST_SUBSCRIPTIONS</a>
+    <a href="#set-filter"><span class="chip">WS</span>SET_FILTER</a>
+    <a href="#clear-filter"><span class="chip">WS</span>CLEAR_FILTER</a>
+    <a href="#list-filters"><span class="chip">WS</span>LIST_FILTERS</a>
+  </div>
+
+  <div class="group">
+    <div class="group-title">Filters</div>
+    <a href="#filters">Event filters</a>
   </div>
 
   <div class="group">
@@ -769,6 +777,76 @@
 // reply
 { "result": ["solana-mainnet@swaps", "ethereum-mainnet@*"], "id": 3 }</pre>
     <p>Insertion order preserved. Wildcards returned verbatim, not expanded.</p>
+  </section>
+
+  <section id="set-filter">
+    <h2>SET_FILTER</h2>
+    <p>Drop non-matching events from the wire for the given selector. String equality only; fields AND, values OR; missing field on an event is a miss. Wildcard selectors rejected.</p>
+<pre>// request
+{ "method": "SET_FILTER",
+  "params": ["solana-mainnet@swaps", { "protocol": "raydium_cpmm", "user": ["a","b"] }],
+  "id": 1 }
+
+// reply
+{ "result": null, "id": 1 }</pre>
+    <p>Replaces any existing filter for that selector. <code>{}</code> is valid and matches every event (effectively no-op). Top-level fields (<code>block_num</code>, <code>network</code>, <code>module_hash</code>) are not filterable — only keys inside <code>events[*]</code>.</p>
+  </section>
+
+  <section id="clear-filter">
+    <h2>CLEAR_FILTER</h2>
+    <p>Drop the filter for the listed selectors.</p>
+<pre>// request
+{ "method": "CLEAR_FILTER", "params": ["solana-mainnet@swaps"], "id": 2 }
+
+// reply
+{ "result": null, "id": 2 }</pre>
+    <p>Silently ignores selectors without a filter.</p>
+  </section>
+
+  <section id="list-filters">
+    <h2>LIST_FILTERS</h2>
+    <p>Inspect the current filter map for this connection.</p>
+<pre>// request
+{ "method": "LIST_FILTERS", "id": 3 }
+
+// reply
+{ "result": { "solana-mainnet@swaps": { "protocol": "raydium_cpmm" } }, "id": 3 }</pre>
+    <p>Keys sorted alphabetically.</p>
+  </section>
+
+  <section id="filters">
+    <h2>Event filters</h2>
+    <p>Per-subscription filters drop events from <code>events[]</code> before delivery. Pass <code>?filter=&lt;url-encoded-json&gt;</code> on connect, or use the live <code>SET_FILTER</code> / <code>CLEAR_FILTER</code> / <code>LIST_FILTERS</code> commands.</p>
+<pre>ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%7D</pre>
+    <p>Semantics:</p>
+    <ul>
+      <li><strong>String equality only.</strong> No regex, range, substring.</li>
+      <li><strong>Field-level AND.</strong> Every key must match.</li>
+      <li><strong>Value-level OR.</strong> A value can be a string (exact) or an array of strings (any of). Empty array matches nothing.</li>
+      <li><strong>Missing field = miss.</strong> Events without the filtered key are dropped.</li>
+      <li><strong>Schema-agnostic.</strong> Server doesn't know swap / transfer schemas. Any column name works.</li>
+      <li><strong>Top-level fields not filterable.</strong> Only keys inside <code>events[*]</code>.</li>
+      <li><strong>Zero matches = block skipped</strong> for that client. No zero-event broadcasts.</li>
+      <li><strong>Wildcards skip filtering.</strong> <code>*@swaps</code> and <code>solana-mainnet@*</code> always pass every event through.</li>
+    </ul>
+    <p>Bounds:</p>
+<pre>SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS=16   # max keys per filter
+SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values</pre>
+    <p>Common filter shapes per stream — server does not enforce these, just operator-friendly examples matching commonly-present columns:</p>
+<pre>// SVM swaps
+{ "protocol": "raydium_cpmm",
+  "amm_pool": "8ZT5BBW3WRpvCwPiadE6jiocQfriMjW7DSfXR2pF6YcT",
+  "user":     "F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8",
+  "input_mint":  "So11111111111111111111111111111111111111112",
+  "output_mint": "13muFYDBUvgNpyDQSZ4eQTVHNoWaGhykonvyZWdGbonk" }
+
+// SVM SPL transfers
+{ "source": "&lt;wallet&gt;", "destination": "&lt;wallet&gt;", "mint": "&lt;mint&gt;" }
+
+// SVM system transfers
+{ "program_id": "11111111111111111111111111111111", "fee_payer": "&lt;wallet&gt;" }</pre>
+    <p>Replay log (see Reconnects) applies the client's current filter to each replayed block. Clients can change filters between disconnect and reconnect; replay respects the new filter.</p>
+    <p>Full spec: <a href="https://github.com/pinax-network/substreams-websocket/blob/main/docs/filters.md"><code>docs/filters.md</code></a>.</p>
   </section>
 
   <section id="reconnect">

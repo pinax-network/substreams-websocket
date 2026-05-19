@@ -62,6 +62,10 @@ pub struct WebSocketConfig {
     /// wait up to this long for the registry to drain before axum stops
     /// accepting and the process exits.
     pub shutdown_drain_timeout: Duration,
+    /// Maximum number of keys in a single client-supplied event filter.
+    pub max_filter_fields: usize,
+    /// Maximum total string values across every key of one event filter.
+    pub max_filter_values: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -218,6 +222,8 @@ mod tests {
             max_clients: 16,
             client_buffer_size: 16,
             shutdown_drain_timeout: Duration::from_secs(1),
+            max_filter_fields: 16,
+            max_filter_values: 64,
         }
     }
 
