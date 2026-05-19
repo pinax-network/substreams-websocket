@@ -1585,8 +1585,11 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 name = "substreams-websocket"
 version = "0.2.2"
 dependencies = [
+ "anyhow",
  "axum",
  "bs58",
+ "clap",
+ "dotenvy",
  "futures-util",
  "http",
  "prost",
@@ -1599,27 +1602,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "toml",
  "tonic",
  "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
  "tower-http",
  "tracing",
- "zstd",
-]
-
-[[package]]
-name = "substreams-websocket-cli"
-version = "0.2.2"
-dependencies = [
- "anyhow",
- "clap",
- "dotenvy",
- "serde",
- "substreams-websocket",
- "tokio",
- "toml",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
