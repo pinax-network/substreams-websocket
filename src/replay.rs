@@ -47,6 +47,11 @@ struct ReplayInner {
 
 struct StreamState {
     path: PathBuf,
+    /// Persistent append-mode handle. Opened once when this spkg first
+    /// appends and kept alive for the lifetime of the process. Closed +
+    /// reopened after `rewrite_lines` so the rename target is the file the
+    /// handle points at.
+    file: File,
     newest_ts: i64,
     oldest_ts: i64,
 }
@@ -135,10 +140,12 @@ impl ReplayLog {
                 tokio::fs::create_dir_all(&inner.dir).await?;
                 let path = inner.dir.join(format!("{key}.jsonl"));
                 let (oldest_ts, newest_ts) = scan_timestamp_bounds(&path).await?;
+                let file = open_append(&path).await?;
                 guard.insert(
                     key.clone(),
                     StreamState {
                         path: path.clone(),
+                        file,
                         oldest_ts,
                         newest_ts,
                     },
@@ -147,14 +154,14 @@ impl ReplayLog {
             }
         };
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&state.path)
-            .await?;
-        file.write_all(payload.as_bytes()).await?;
-        file.write_all(b"\n").await?;
-        file.flush().await?;
+        // Single open per spkg — reuse the persistent file handle for every
+        // append. Avoids the open/close churn that was burning fds (and
+        // exposing us to "background task failed" from the blocking pool
+        // when the OS pushed back on file ops).
+        state.file.write_all(payload.as_bytes()).await?;
+        state.file.write_all(b"\n").await?;
+        state.file.flush().await?;
+
         if state.newest_ts == 0 || timestamp_seconds > state.newest_ts {
             state.newest_ts = timestamp_seconds;
         }
@@ -169,7 +176,10 @@ impl ReplayLog {
         let trim_threshold = inner.max_seconds + inner.trim_headroom_seconds;
         if window >= trim_threshold {
             let cutoff = state.newest_ts - inner.max_seconds as i64;
+            // Rewrite renames a tmp file over the live path; reopen our
+            // persistent handle so subsequent writes target the new file.
             let new_oldest = trim_older_than(&state.path, cutoff).await?;
+            state.file = open_append(&state.path).await?;
             state.oldest_ts = new_oldest.unwrap_or(state.newest_ts);
         }
         Ok(())
@@ -215,6 +225,9 @@ impl ReplayLog {
             let (oldest, newest) = bounds_of(&kept);
             state.oldest_ts = oldest;
             state.newest_ts = newest;
+            // Reopen the persistent handle so it points at the post-rename
+            // file. Old handle is dropped (closed) here.
+            state.file = open_append(&state.path).await?;
         }
         Ok(())
     }
@@ -334,6 +347,14 @@ pub struct ReadResult {
     /// Smallest `timestamp_seconds` seen across every scanned file before
     /// the from-filter was applied. `None` if no files matched.
     pub oldest: Option<i64>,
+}
+
+async fn open_append(path: &Path) -> Result<File, io::Error> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
 }
 
 async fn scan_timestamp_bounds(path: &Path) -> Result<(i64, i64), io::Error> {
