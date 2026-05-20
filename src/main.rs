@@ -247,6 +247,17 @@ struct WebSocketArgs {
         default_value_t = 64
     )]
     max_filter_values: usize,
+
+    /// Force-close a WebSocket client after this many consecutive
+    /// `try_send` drops on a saturated outbound buffer. `0` disables —
+    /// frames are still dropped per-send but the connection is never
+    /// killed for backpressure. Default 100.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_SLOW_CLIENT_DROP_LIMIT",
+        default_value_t = 100
+    )]
+    slow_client_drop_limit: u64,
 }
 
 impl WebSocketArgs {
@@ -264,6 +275,7 @@ impl WebSocketArgs {
             shutdown_drain_timeout: Duration::from_secs(self.shutdown_drain_secs),
             max_filter_fields: self.max_filter_fields,
             max_filter_values: self.max_filter_values,
+            slow_client_drop_limit: self.slow_client_drop_limit,
         }
     }
 }
