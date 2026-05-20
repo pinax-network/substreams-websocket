@@ -196,6 +196,14 @@ struct WebSocketArgs {
     )]
     health_path: String,
 
+    /// HTTP path that serves Prometheus metrics. Empty disables the endpoint.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_METRICS_PATH",
+        default_value = "/metrics"
+    )]
+    metrics_path: String,
+
     #[arg(
         long,
         env = "SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS",
@@ -266,6 +274,7 @@ impl WebSocketArgs {
             listen: self.listen,
             ws_path: self.ws_path,
             stream_path: self.stream_path,
+            metrics_path: self.metrics_path,
             health_path: self.health_path,
             heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
             heartbeat_timeout: Duration::from_secs(self.heartbeat_timeout_secs),
