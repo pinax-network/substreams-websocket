@@ -6,6 +6,7 @@ Stream decoded Substreams `DatabaseChanges` block outputs over a single WebSocke
 - **Resume on restart** — per-stream cursors persisted to disk.
 - **Cross-chain identity** — clients subscribe by `(network, table)`; same table name on different chains coexists cleanly.
 - **JWT auth** built in for Pinax/StreamingFast endpoints.
+- **Prometheus metrics** on `/metrics` covering connections, broadcasts, Substreams reader, replay log.
 - **Prebuilt tarballs** for Linux x86_64/aarch64, macOS x86_64/aarch64.
 
 Extended reference docs live under [`docs/`](docs/). On-wire message shape: [`public/SKILL.md`](public/SKILL.md).
@@ -216,6 +217,21 @@ Set `SUBSTREAMS_WEBSOCKET_LOG_LEVEL` (or `--log-level`). Accepts any [`tracing` 
 | `trace` | Above + raw payload size and delivery counts per broadcast for stream-status messages too. |
 
 Per-module overrides: `SUBSTREAMS_WEBSOCKET_LOG_LEVEL=info,substreams_websocket::server=debug`.
+
+---
+
+## Metrics
+
+The server exposes Prometheus metrics on `/metrics` (configurable via `SUBSTREAMS_WEBSOCKET_METRICS_PATH`; set empty to disable). All metrics are namespaced `substreams_websocket_*` and cover connections, subscription commands, broadcasts, Substreams reader, replay log, cursor saves, and shutdown drain.
+
+```
+GET /metrics
+# substreams_websocket_active_connections 4
+# substreams_websocket_broadcast_blocks_total{network="solana-mainnet",table="swaps"} 1234
+# ...
+```
+
+Full catalog + recommended PromQL queries: [`docs/metrics.md`](docs/metrics.md). Cardinality is bounded — `module_hash` and `client_id` are deliberately not labels.
 
 ---
 

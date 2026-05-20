@@ -47,6 +47,10 @@ Cursor files are small (~200 bytes each), one per stream. A 100 MB volume is ove
 
 Set Healthcheck Path in the service's Settings → Networking to `/healthz`. Default heartbeat semantics from `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` apply — the endpoint returns 200 as long as the server process is up. It does not assert upstream Substreams health.
 
+## Metrics
+
+Prometheus scrape lives at `/metrics` on the same listener (configurable via `SUBSTREAMS_WEBSOCKET_METRICS_PATH`). Point any Prometheus / Grafana Cloud / VictoriaMetrics agent at `<your-service>.up.railway.app/metrics`. See [`metrics.md`](metrics.md) for the metric catalog.
+
 ## Image source
 
 Two options:

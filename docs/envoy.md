@@ -13,6 +13,7 @@ Operational notes for running this server behind [Envoy](https://www.envoyproxy.
 - **WebSocket upgrade.** Envoy proxies `Connection: Upgrade` + `Upgrade: websocket` transparently when the HTTP filter has `upgrade_configs: [{ upgrade_type: websocket }]`. The server's `/ws/<...>` and `/stream` routes work unchanged.
 - **`Close` frame propagation.** Envoy forwards WS Close frames in both directions. The graceful-shutdown `Close(1001, "server shutting down")` reaches downstream clients verbatim.
 - **`?from_timestamp=<n>` resume.** Query string is preserved through the proxy.
+- **`/metrics` Prometheus scrape.** Plain HTTP GET, served on the same listener. Route Envoy normally; no upgrade headers needed.
 
 ## What needs Envoy-side config
 
