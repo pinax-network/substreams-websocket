@@ -174,14 +174,14 @@ See [`docs/filters.md`](https://github.com/pinax-network/substreams-websocket/bl
 
 ## Reconnects and replay
 
-The server retains the last N blocks per stream on disk (default 1000, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_BLOCKS`). On reconnect, pass `?from_block=<n>` to receive every block with `block_num > n` from the on-disk window before the live stream resumes.
+The server retains a recent time window per spkg on disk (default 600 seconds, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS`). On reconnect, pass `?from_timestamp=<n>` (Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`) to receive every block with `timestamp_seconds > n` from the on-disk window before the live stream resumes.
 
 ```
-ws://host/ws/solana-mainnet@swaps?from_block=350000123
-ws://host/stream?streams=solana-mainnet@swaps&from_block=350000123
+ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
+ws://host/stream?streams=solana-mainnet@swaps&from_timestamp=2026-05-13T17:00:00Z
 ```
 
-If `from_block` falls below the oldest retained block, the server emits a `gap` lifecycle message instead and continues live:
+If `from_timestamp` falls below the oldest retained timestamp, the server emits a `gap` lifecycle message instead and continues live:
 
 ```json
 { "type": "stream", "status": "gap",
@@ -236,7 +236,7 @@ Compare each broadcast's `module_hash` with the one you saw in the welcome messa
 
 ## What this server does NOT do
 
-- **Bounded replay only.** The on-disk replay log holds the last `REPLAY_BLOCKS` per stream (default 1000). For older history, use Substreams gRPC directly with the desired `start_block`.
+- **Bounded replay only.** The on-disk replay log holds a `REPLAY_SECONDS` window per spkg (default 600s). For older history, use Substreams gRPC directly with the desired `start_block`.
 - **No payload transformation.** Field values are pass-through strings from the source DatabaseChanges. Numeric parsing, decimal handling, base58 / hex encoding are the consumer's responsibility.
 - **No authentication.** The server itself is open; access control is the operator's deploy concern.
 - **No persistence of historical messages.** Once a block is broadcast, it's gone unless a connected subscriber received it.

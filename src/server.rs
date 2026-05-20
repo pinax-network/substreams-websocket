@@ -103,7 +103,7 @@ pub async fn serve_with_shutdown(
             .collect::<Vec<_>>(),
     );
 
-    let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_blocks);
+    let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_seconds);
 
     let state = AppState {
         config: config.clone(),
@@ -540,6 +540,7 @@ async fn handle_substream_event(
             number,
             id,
             timestamp,
+            timestamp_seconds,
             output_type_url: _,
             payload,
             cursor,
@@ -548,6 +549,7 @@ async fn handle_substream_event(
                 block_num: number,
                 block_hash: id,
                 timestamp,
+                timestamp_seconds,
                 network: identity.network.clone(),
                 module_hash: identity.module_hash.clone(),
             };
@@ -585,6 +587,7 @@ async fn handle_substream_event(
                         &identity.package_name,
                         &identity.package_version,
                         &identity.module_hash,
+                        decoded.timestamp_seconds,
                         &block_value.to_string(),
                     )
                     .await
@@ -658,7 +661,7 @@ async fn handle_substream_event(
                 warn!(stream = %identity.display(), %error, "failed to persist last-valid cursor");
             }
             if let Err(error) = replay
-                .truncate_after(
+                .truncate_after_block(
                     &identity.network,
                     &identity.package_name,
                     &identity.package_version,
@@ -725,6 +728,7 @@ fn build_table_payload(
         "block_num": decoded.block_num,
         "block_hash": decoded.block_hash,
         "timestamp": decoded.timestamp,
+        "timestamp_seconds": decoded.timestamp_seconds,
         "module_hash": decoded.module_hash,
         "events": out_events,
     })
@@ -803,10 +807,11 @@ async fn websocket_path(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let from_block = match parse_from_block(raw_query.as_deref()) {
+    let from_timestamp = match parse_from_timestamp(raw_query.as_deref()) {
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+
     let event_filters = match parse_filter_query(
         raw_query.as_deref(),
         &entries,
@@ -822,7 +827,7 @@ async fn websocket_path(
         wrap_envelope,
         event_filters,
     };
-    ws.on_upgrade(move |socket| handle_socket(state, filter, from_block, socket))
+    ws.on_upgrade(move |socket| handle_socket(state, filter, from_timestamp, socket))
         .into_response()
 }
 
@@ -852,7 +857,7 @@ async fn websocket_stream_query(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let from_block = match parse_from_block(Some(&raw)) {
+    let from_timestamp = match parse_from_timestamp(Some(&raw)) {
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
@@ -870,7 +875,7 @@ async fn websocket_stream_query(
         wrap_envelope: true,
         event_filters,
     };
-    ws.on_upgrade(move |socket| handle_socket(state, filter, from_block, socket))
+    ws.on_upgrade(move |socket| handle_socket(state, filter, from_timestamp, socket))
         .into_response()
 }
 
@@ -905,16 +910,16 @@ fn parse_filter_query(
     Ok(set)
 }
 
-/// Replay buffered blocks for every explicit `network@stream` selector with
-/// `block_num > from_block`. Wildcard selectors are skipped — they have no
-/// concrete file to scan and cannot resume from a single window. For each
+/// Replay buffered blocks for every explicit `<network>@<table>` selector
+/// with `timestamp_seconds > from_timestamp`. Wildcard selectors are skipped
+/// — replay is anchored to a single `(network, table)` pair. For each
 /// explicit selector with at least one retained block, either replay matching
-/// blocks (oldest first) or emit a `gap` lifecycle message when `from_block`
-/// falls below the oldest retained block.
+/// blocks (oldest first) or emit a `gap` lifecycle message when
+/// `from_timestamp` falls below the oldest retained timestamp.
 async fn replay_for_client(
     replay: &ReplayLog,
     filter: &StreamFilter,
-    from_block: u64,
+    from_timestamp: i64,
     client_id: ClientId,
     outbound: &mpsc::Sender<Message>,
 ) -> Result<(), String> {
@@ -931,7 +936,7 @@ async fn replay_for_client(
         let stream = table;
 
         let result = replay
-            .read_from(Some(network), Some(stream), from_block)
+            .read_from(Some(network), Some(stream), from_timestamp)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -940,17 +945,17 @@ async fn replay_for_client(
             None => continue,
         };
 
-        if from_block + 1 < oldest {
+        if from_timestamp < oldest {
             // Resume point below the retained window — tell client there is a
             // gap and continue with live stream only.
             let gap = serde_json::json!({
                 "type": "stream",
                 "status": "gap",
-                "stream": stream,
                 "network": network,
-                "requested_block": from_block,
-                "oldest_buffered_block": oldest,
-                "reason": "requested block outside replay window",
+                "table": stream,
+                "requested_timestamp": from_timestamp,
+                "oldest_buffered_timestamp": oldest,
+                "reason": "requested timestamp outside replay window",
             });
             let text = if filter.wrap_envelope {
                 format!(
@@ -967,8 +972,8 @@ async fn replay_for_client(
                 client_id,
                 network,
                 stream,
-                from_block,
-                oldest_buffered_block = oldest,
+                from_timestamp,
+                oldest_buffered_timestamp = oldest,
                 "replay gap"
             );
             continue;
@@ -977,7 +982,7 @@ async fn replay_for_client(
         let selector = format!("{network}@{stream}");
         let matching_filters = filter.event_filters.matching(network, stream);
         let mut replayed: usize = 0;
-        for (_block_num, raw_text) in result.blocks {
+        for (_ts, raw_text) in result.blocks {
             let payload_text = if !matching_filters.is_empty() {
                 let mut block = match serde_json::from_str::<serde_json::Value>(&raw_text) {
                     Ok(v) => v,
@@ -1011,7 +1016,7 @@ async fn replay_for_client(
         if replayed > 0 {
             info!(
                 client_id,
-                network, stream, from_block, replayed, "replay delivered"
+                network, stream, from_timestamp, replayed, "replay delivered"
             );
         }
     }
@@ -1019,26 +1024,76 @@ async fn replay_for_client(
     Ok(())
 }
 
-fn parse_from_block(raw_query: Option<&str>) -> Result<Option<u64>, &'static str> {
+/// Parse `?from_timestamp=<n>`. Accepts a Unix epoch seconds integer or an
+/// ISO 8601 / RFC 3339 UTC timestamp string (subset: `YYYY-MM-DD HH:MM:SS`,
+/// `YYYY-MM-DDTHH:MM:SS`, optional trailing `Z`).
+fn parse_from_timestamp(raw_query: Option<&str>) -> Result<Option<i64>, String> {
     let Some(raw) = raw_query else {
         return Ok(None);
     };
-    let Some((_, value)) = url_query_pairs(raw).find(|(k, _)| k == "from_block") else {
+    let Some((_, value)) = url_query_pairs(raw).find(|(k, _)| k == "from_timestamp") else {
         return Ok(None);
     };
     if value.is_empty() {
         return Ok(None);
     }
-    value
-        .parse::<u64>()
-        .map(Some)
-        .map_err(|_| "from_block must be a non-negative integer")
+    if let Ok(n) = value.parse::<i64>() {
+        return Ok(Some(n));
+    }
+    parse_iso_timestamp(&value).map(Some).ok_or_else(|| {
+        format!("from_timestamp must be epoch seconds or `YYYY-MM-DD HH:MM:SS` UTC; got {value:?}")
+    })
+}
+
+/// Tiny UTC timestamp parser. Accepts the formats we actually emit:
+///   `YYYY-MM-DD HH:MM:SS`
+///   `YYYY-MM-DDTHH:MM:SS`
+///   either form with a trailing `Z`
+/// Returns `None` on any deviation. Fractional seconds are not supported.
+fn parse_iso_timestamp(raw: &str) -> Option<i64> {
+    let s = raw.trim().trim_end_matches('Z');
+    let bytes = s.as_bytes();
+    if bytes.len() != 19 {
+        return None;
+    }
+    let sep = bytes[10] as char;
+    if sep != ' ' && sep != 'T' {
+        return None;
+    }
+    let year: i32 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    let minute: u32 = s.get(14..16)?.parse().ok()?;
+    let second: u32 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour >= 24
+        || minute >= 60
+        || second >= 60
+    {
+        return None;
+    }
+    Some(epoch_seconds_utc(year, month, day, hour, minute, second))
+}
+
+/// Days from civil date (Howard Hinnant's algorithm). Output is days since
+/// `1970-01-01`. UTC-only — no leap-second handling.
+fn epoch_seconds_utc(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
+    let year = if m <= 2 { y - 1 } else { y };
+    let era = year.div_euclid(400);
+    let yoe = (year - era * 400) as u32;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era as i64 * 146_097 + doe as i64 - 719_468;
+    days * 86_400 + (hh as i64) * 3600 + (mm as i64) * 60 + ss as i64
 }
 
 async fn handle_socket(
     state: AppState,
     filter: StreamFilter,
-    from_block: Option<u64>,
+    from_timestamp: Option<i64>,
     socket: WebSocket,
 ) {
     let Some((client, filter_handle)) = state.clients.register(&state.config, filter.clone()).await
@@ -1102,7 +1157,7 @@ async fn handle_socket(
         return;
     }
 
-    if let Some(from) = from_block
+    if let Some(from) = from_timestamp
         && let Err(reason) =
             replay_for_client(&state.replay, &filter, from, client_id, &outbound).await
     {
@@ -2324,6 +2379,7 @@ mod tests {
                 number: 999,
                 id: "block-999".to_owned(),
                 timestamp: "2026-05-13 17:30:00".to_owned(),
+                timestamp_seconds: 1_778_772_600,
                 output_type_url: String::new(),
                 payload,
                 cursor: "abc123".to_owned(),
@@ -2373,20 +2429,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_replays_blocks_above_from_block() {
+    async fn websocket_replays_blocks_above_from_timestamp() {
         let replay_dir = tempfile::tempdir().expect("replay tempdir");
         let mut cfg = config();
         cfg.replay = ReplayConfig {
-            max_blocks: 100,
+            max_seconds: 3600,
             dir: replay_dir.path().to_path_buf(),
         };
         let server = TestServer::start(cfg).await;
 
-        for n in 100..105u64 {
+        for n in 0..5i64 {
+            let ts = 1_000_000 + n;
             let payload = serde_json::json!({
                 "network": "solana-mainnet",
-                "block_num": n,
-                "events": [{ "@table": "swaps", "user": format!("u{n}") }],
+                "block_num": 100 + n as u64,
+                "timestamp_seconds": ts,
+                "events": [{ "@table": "swaps", "user": format!("u{ts}") }],
             })
             .to_string();
             server
@@ -2396,6 +2454,7 @@ mod tests {
                     "svm_swaps",
                     "v0.1.0",
                     "deadbeef",
+                    ts,
                     &payload,
                 )
                 .await
@@ -2403,7 +2462,7 @@ mod tests {
         }
 
         let (mut socket, _) = connect_async(format!(
-            "ws://{}/ws/solana-mainnet@swaps?from_block=101",
+            "ws://{}/ws/solana-mainnet@swaps?from_timestamp=1000001",
             server.addr
         ))
         .await
@@ -2428,28 +2487,34 @@ mod tests {
                 other => panic!("expected text, got {other:?}"),
             };
             let value: serde_json::Value = serde_json::from_str(&text).expect("json");
-            got.push(value["block_num"].as_u64().expect("block_num"));
+            got.push(
+                value["timestamp_seconds"]
+                    .as_i64()
+                    .expect("timestamp_seconds"),
+            );
         }
-        assert_eq!(got, vec![102, 103, 104]);
+        assert_eq!(got, vec![1_000_002, 1_000_003, 1_000_004]);
 
         socket.close(None).await.expect("clean close");
     }
 
     #[tokio::test]
-    async fn websocket_emits_gap_when_from_block_below_window() {
+    async fn websocket_emits_gap_when_from_timestamp_below_window() {
         let replay_dir = tempfile::tempdir().expect("replay tempdir");
         let mut cfg = config();
         cfg.replay = ReplayConfig {
-            max_blocks: 100,
+            max_seconds: 3600,
             dir: replay_dir.path().to_path_buf(),
         };
         let server = TestServer::start(cfg).await;
 
-        for n in 500..505u64 {
+        for n in 0..5i64 {
+            let ts = 5_000_000 + n;
             let payload = serde_json::json!({
                 "network": "solana-mainnet",
-                "block_num": n,
-                "events": [{ "@table": "swaps", "user": format!("u{n}") }],
+                "block_num": 500 + n as u64,
+                "timestamp_seconds": ts,
+                "events": [{ "@table": "swaps", "user": format!("u{ts}") }],
             })
             .to_string();
             server
@@ -2459,6 +2524,7 @@ mod tests {
                     "svm_swaps",
                     "v0.1.0",
                     "deadbeef",
+                    ts,
                     &payload,
                 )
                 .await
@@ -2466,7 +2532,7 @@ mod tests {
         }
 
         let (mut socket, _) = connect_async(format!(
-            "ws://{}/ws/solana-mainnet@swaps?from_block=10",
+            "ws://{}/ws/solana-mainnet@swaps?from_timestamp=10",
             server.addr
         ))
         .await
@@ -2486,8 +2552,8 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).expect("json");
         assert_eq!(value["type"], "stream");
         assert_eq!(value["status"], "gap");
-        assert_eq!(value["requested_block"], 10);
-        assert_eq!(value["oldest_buffered_block"], 500);
+        assert_eq!(value["requested_timestamp"], 10);
+        assert_eq!(value["oldest_buffered_timestamp"], 5_000_000);
 
         socket.close(None).await.expect("clean close");
     }
@@ -2655,6 +2721,7 @@ mod tests {
                 number: 999,
                 id: "block-999".to_owned(),
                 timestamp: "2026-05-13 17:30:00".to_owned(),
+                timestamp_seconds: 1_778_772_600,
                 output_type_url: String::new(),
                 payload,
                 cursor: "abc123".to_owned(),
@@ -2770,7 +2837,7 @@ mod tests {
                     })
                     .collect::<Vec<_>>(),
             );
-            let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_blocks);
+            let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_seconds);
             let draining = Arc::new(AtomicBool::new(false));
             let state = AppState {
                 config: Arc::new(config),
@@ -2874,7 +2941,7 @@ mod tests {
             },
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
             replay: ReplayConfig {
-                max_blocks: 0,
+                max_seconds: 0,
                 dir: std::path::PathBuf::from("/tmp/replay-test"),
             },
         }

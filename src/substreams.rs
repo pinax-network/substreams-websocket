@@ -137,6 +137,10 @@ pub enum StreamEvent {
         number: u64,
         id: String,
         timestamp: String,
+        /// Unix epoch seconds of the block timestamp. Used as the
+        /// chain-agnostic resume key for `?from_timestamp=` and for the
+        /// per-stream replay log's time-windowed retention.
+        timestamp_seconds: i64,
         output_type_url: String,
         payload: Vec<u8>,
         cursor: String,
@@ -223,6 +227,7 @@ impl From<Response> for StreamEvent {
             Some(response::Message::BlockScopedData(data)) => {
                 let cursor = data.cursor.clone();
                 let clock = data.clock.unwrap_or_default();
+                let timestamp_seconds = clock.timestamp.as_ref().map(|t| t.seconds).unwrap_or(0);
                 let timestamp = format_clickhouse_timestamp(clock.timestamp);
                 let output = data.output.and_then(|output| output.map_output);
                 let output_type_url = output
@@ -235,6 +240,7 @@ impl From<Response> for StreamEvent {
                     number: clock.number,
                     id: clock.id,
                     timestamp,
+                    timestamp_seconds,
                     output_type_url,
                     payload,
                     cursor,

@@ -34,6 +34,9 @@ pub struct BlockContext {
     pub block_num: u64,
     pub block_hash: String,
     pub timestamp: String,
+    /// Unix epoch seconds for the block timestamp. Used as the chain-agnostic
+    /// resume key (`?from_timestamp=`) and for replay log time-window trim.
+    pub timestamp_seconds: i64,
     pub network: String,
     pub module_hash: String,
 }
@@ -57,6 +60,9 @@ pub struct DatabaseChangesBlockMessage {
     pub block_num: u64,
     pub block_hash: String,
     pub timestamp: String,
+    /// Unix epoch seconds. Same value as `timestamp` but in a machine-friendly
+    /// integer form. Used by `?from_timestamp=` reconnect and the replay log.
+    pub timestamp_seconds: i64,
     /// Canonical Substreams module hash of the configured output module.
     /// Subscribers can use it to detect spkg upgrades.
     pub module_hash: String,
@@ -106,6 +112,7 @@ pub fn normalize_database_changes(
         block_num: context.block_num,
         block_hash: context.block_hash,
         timestamp: context.timestamp,
+        timestamp_seconds: context.timestamp_seconds,
         module_hash: context.module_hash,
         events,
     }
@@ -125,6 +132,7 @@ mod tests {
             block_num: 350_000_000,
             block_hash: "block-hash".to_owned(),
             timestamp: "2026-05-13 17:00:00".to_owned(),
+            timestamp_seconds: 1_778_770_800,
             network: "solana-mainnet".to_owned(),
             module_hash: "deadbeef".to_owned(),
         }

@@ -10,9 +10,11 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct ReplayConfig {
-    /// Number of recent blocks retained per spkg as JSONL on disk.
-    /// `0` disables the replay log entirely.
-    pub max_blocks: usize,
+    /// Time window (seconds) retained per spkg as JSONL on disk. The trim
+    /// keeps every block whose `timestamp_seconds` is within
+    /// `[newest_seen - max_seconds, newest_seen]`. `0` disables the replay
+    /// log entirely.
+    pub max_seconds: u64,
     pub dir: std::path::PathBuf,
 }
 
@@ -243,7 +245,7 @@ mod tests {
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
             replay: ReplayConfig {
-                max_blocks: 0,
+                max_seconds: 0,
                 dir: std::path::PathBuf::from("/tmp/replay-test"),
             },
         }

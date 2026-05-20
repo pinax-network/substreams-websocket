@@ -89,8 +89,8 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.toml
 | Server | `SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE` | `1024` | Per-client outbound buffer. |
 | Server | `SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS` | `10` | On SIGTERM/SIGINT, send `Close` to every client and wait up to this long for them to disconnect before exiting. |
 | Server | `SUBSTREAMS_WEBSOCKET_CURSORS_DIR` | `./cursors` | Cursor file directory. |
-| Server | `SUBSTREAMS_WEBSOCKET_REPLAY_BLOCKS` | `1000` | Recent blocks retained per stream as JSONL for client reconnect replay. `0` disables. |
-| Server | `SUBSTREAMS_WEBSOCKET_REPLAY_DIR` | `./replay` | Directory for per-stream JSONL replay logs. |
+| Server | `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS` | `600` | Retention window per spkg in seconds. `?from_timestamp=` replay reads from this log. `0` disables. |
+| Server | `SUBSTREAMS_WEBSOCKET_REPLAY_DIR` | `./replay` | Directory for per-spkg JSONL replay logs. |
 | Server | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` | `16` | Max keys in one client-supplied event filter. |
 | Server | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` | `64` | Max total string values across one event filter. |
 

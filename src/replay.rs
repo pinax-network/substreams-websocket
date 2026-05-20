@@ -12,8 +12,6 @@ use tokio::{
     sync::Mutex,
 };
 
-const TRIM_HEADROOM_FRACTION: f32 = 0.10;
-
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
     #[error("replay I/O failed: {0}")]
@@ -22,14 +20,16 @@ pub enum ReplayError {
     #[error("replay payload is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("replay payload missing required block_num field")]
-    MissingBlockNum,
+    #[error("replay payload missing required timestamp_seconds field")]
+    MissingTimestamp,
 }
 
 /// One append-only JSONL file per `(network, package_name, package_version,
 /// module_hash)`. Each line is the **whole** block JSON (network, block_num,
-/// timestamp, module_hash, events). On resume, callers filter events by
-/// table at read time, since one block may carry events for multiple tables.
+/// timestamp, timestamp_seconds, module_hash, events). On resume, callers
+/// filter events by `@table` at read time, since one block may carry events
+/// for multiple tables. Trim is time-windowed: blocks older than
+/// `max_seconds` relative to the newest line are dropped lazily.
 #[derive(Clone)]
 pub struct ReplayLog {
     inner: Option<Arc<ReplayInner>>,
@@ -37,14 +37,18 @@ pub struct ReplayLog {
 
 struct ReplayInner {
     dir: PathBuf,
-    max_blocks: usize,
-    trim_threshold: usize,
+    max_seconds: u64,
+    /// Trim hysteresis. Trim fires only when the oldest line lags the newest
+    /// by more than `max_seconds + trim_headroom_seconds` so we don't rewrite
+    /// the file on every append.
+    trim_headroom_seconds: u64,
     streams: Mutex<HashMap<String, StreamState>>,
 }
 
 struct StreamState {
     path: PathBuf,
-    line_count: usize,
+    newest_ts: i64,
+    oldest_ts: i64,
 }
 
 /// File-name key derived from spkg provenance + network.
@@ -81,17 +85,19 @@ impl ReplayLog {
         Self { inner: None }
     }
 
-    pub fn new(dir: impl Into<PathBuf>, max_blocks: usize) -> Self {
-        if max_blocks == 0 {
+    pub fn new(dir: impl Into<PathBuf>, max_seconds: u64) -> Self {
+        if max_seconds == 0 {
             return Self::disabled();
         }
-        let max_blocks_f = max_blocks as f32;
-        let headroom = (max_blocks_f * TRIM_HEADROOM_FRACTION).ceil() as usize;
+        // 10% headroom — Solana at ~400ms/block means trim fires once per ~60s
+        // window at the default 600s retention. Ethereum at ~12s/block trims
+        // roughly the same number of times because the file grows slower.
+        let trim_headroom_seconds = (max_seconds as f32 * 0.10).ceil() as u64;
         Self {
             inner: Some(Arc::new(ReplayInner {
                 dir: dir.into(),
-                max_blocks,
-                trim_threshold: max_blocks + headroom.max(1),
+                max_seconds,
+                trim_headroom_seconds: trim_headroom_seconds.max(1),
                 streams: Mutex::new(HashMap::new()),
             })),
         }
@@ -101,17 +107,20 @@ impl ReplayLog {
         self.inner.is_some()
     }
 
-    pub fn max_blocks(&self) -> usize {
-        self.inner.as_ref().map(|i| i.max_blocks).unwrap_or(0)
+    pub fn max_seconds(&self) -> u64 {
+        self.inner.as_ref().map(|i| i.max_seconds).unwrap_or(0)
     }
 
     /// Append one block payload to the spkg-provenance-keyed JSONL file.
+    /// `timestamp_seconds` is the block's Unix epoch; the replay window is
+    /// computed against this value, not the wall clock.
     pub async fn append(
         &self,
         network: &str,
         package_name: &str,
         package_version: &str,
         module_hash_hex: &str,
+        timestamp_seconds: i64,
         payload: &str,
     ) -> Result<(), ReplayError> {
         let Some(inner) = &self.inner else {
@@ -125,12 +134,13 @@ impl ReplayLog {
             None => {
                 tokio::fs::create_dir_all(&inner.dir).await?;
                 let path = inner.dir.join(format!("{key}.jsonl"));
-                let line_count = count_lines(&path).await?;
+                let (oldest_ts, newest_ts) = scan_timestamp_bounds(&path).await?;
                 guard.insert(
                     key.clone(),
                     StreamState {
                         path: path.clone(),
-                        line_count,
+                        oldest_ts,
+                        newest_ts,
                     },
                 );
                 guard.get_mut(&key).expect("just inserted")
@@ -145,17 +155,29 @@ impl ReplayLog {
         file.write_all(payload.as_bytes()).await?;
         file.write_all(b"\n").await?;
         file.flush().await?;
-        state.line_count += 1;
+        if state.newest_ts == 0 || timestamp_seconds > state.newest_ts {
+            state.newest_ts = timestamp_seconds;
+        }
+        if state.oldest_ts == 0 {
+            state.oldest_ts = timestamp_seconds;
+        }
 
-        if state.line_count >= inner.trim_threshold {
-            trim_to(&state.path, inner.max_blocks).await?;
-            state.line_count = inner.max_blocks;
+        // Lazy trim. Threshold = max_seconds + headroom_seconds. When the
+        // window grows past it, rewrite the file dropping any line older than
+        // `newest_ts - max_seconds`.
+        let window = state.newest_ts.saturating_sub(state.oldest_ts) as u64;
+        let trim_threshold = inner.max_seconds + inner.trim_headroom_seconds;
+        if window >= trim_threshold {
+            let cutoff = state.newest_ts - inner.max_seconds as i64;
+            let new_oldest = trim_older_than(&state.path, cutoff).await?;
+            state.oldest_ts = new_oldest.unwrap_or(state.newest_ts);
         }
         Ok(())
     }
 
     /// Truncate the spkg log at the first row with `block_num > last_valid_block`.
-    pub async fn truncate_after(
+    /// Used on `BlockUndoSignal` so replay never serves undone forks.
+    pub async fn truncate_after_block(
         &self,
         network: &str,
         package_name: &str,
@@ -190,23 +212,23 @@ impl ReplayLog {
 
         let mut guard = inner.streams.lock().await;
         if let Some(state) = guard.get_mut(&key) {
-            state.line_count = kept.len();
+            let (oldest, newest) = bounds_of(&kept);
+            state.oldest_ts = oldest;
+            state.newest_ts = newest;
         }
         Ok(())
     }
 
-    /// Read every retained block with `block_num > from_block` that carries at
-    /// least one event whose `@table == target_table` (or any table when
-    /// `target_table` is `None`). Scans every `.jsonl` file in the directory
-    /// whose name starts with `<network>-` (or all files when `network_filter`
-    /// is `None`). Returns per-table sub-blocks: each entry holds the
-    /// filtered block JSON with `events[]` restricted to rows matching the
-    /// target table.
+    /// Read every retained block with `timestamp_seconds > from_timestamp`
+    /// that carries at least one event whose `@table == target_table`.
+    /// Scans every `.jsonl` file in the directory whose name starts with
+    /// `<network>-` (or all files when `network_filter` is `None`). Returns
+    /// per-table sub-blocks ordered by `timestamp_seconds`.
     pub async fn read_from(
         &self,
         network_filter: Option<&str>,
         target_table: Option<&str>,
-        from_block: u64,
+        from_timestamp: i64,
     ) -> Result<ReadResult, ReplayError> {
         let Some(inner) = &self.inner else {
             return Ok(ReadResult::default());
@@ -230,8 +252,8 @@ impl ReplayLog {
             matched_files.push(entry.path());
         }
 
-        let mut blocks: Vec<(u64, String)> = Vec::new();
-        let mut oldest: Option<u64> = None;
+        let mut blocks: Vec<(i64, String)> = Vec::new();
+        let mut oldest: Option<i64> = None;
 
         for path in matched_files {
             let file = File::open(&path).await?;
@@ -241,14 +263,14 @@ impl ReplayLog {
                     continue;
                 }
                 let mut value: Value = serde_json::from_str(&line)?;
-                let block_num = value
-                    .get("block_num")
-                    .and_then(Value::as_u64)
-                    .ok_or(ReplayError::MissingBlockNum)?;
-                if oldest.map_or(true, |o| block_num < o) {
-                    oldest = Some(block_num);
+                let ts = value
+                    .get("timestamp_seconds")
+                    .and_then(Value::as_i64)
+                    .ok_or(ReplayError::MissingTimestamp)?;
+                if oldest.map_or(true, |o| ts < o) {
+                    oldest = Some(ts);
                 }
-                if block_num <= from_block {
+                if ts <= from_timestamp {
                     continue;
                 }
                 if let Some(table) = target_table {
@@ -267,11 +289,11 @@ impl ReplayLog {
                         obj.insert("table".to_owned(), Value::String(table.to_owned()));
                     }
                 }
-                blocks.push((block_num, value.to_string()));
+                blocks.push((ts, value.to_string()));
             }
         }
 
-        blocks.sort_by_key(|(n, _)| *n);
+        blocks.sort_by_key(|(ts, _)| *ts);
         Ok(ReadResult { blocks, oldest })
     }
 }
@@ -307,37 +329,67 @@ fn filter_events_by_table(block: &mut Value, target_table: &str) {
 
 #[derive(Default, Debug)]
 pub struct ReadResult {
-    pub blocks: Vec<(u64, String)>,
-    pub oldest: Option<u64>,
+    /// `(timestamp_seconds, raw_json)` ordered ascending by timestamp.
+    pub blocks: Vec<(i64, String)>,
+    /// Smallest `timestamp_seconds` seen across every scanned file before
+    /// the from-filter was applied. `None` if no files matched.
+    pub oldest: Option<i64>,
 }
 
-async fn count_lines(path: &Path) -> Result<usize, io::Error> {
+async fn scan_timestamp_bounds(path: &Path) -> Result<(i64, i64), io::Error> {
     if !path.exists() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let file = File::open(path).await?;
     let mut reader = BufReader::new(file).lines();
-    let mut count = 0usize;
+    let mut oldest: i64 = 0;
+    let mut newest: i64 = 0;
     while let Some(line) = reader.next_line().await? {
-        if !line.is_empty() {
-            count += 1;
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            if let Some(ts) = value.get("timestamp_seconds").and_then(Value::as_i64) {
+                if oldest == 0 || ts < oldest {
+                    oldest = ts;
+                }
+                if ts > newest {
+                    newest = ts;
+                }
+            }
         }
     }
-    Ok(count)
+    Ok((oldest, newest))
 }
 
-async fn trim_to(path: &Path, keep: usize) -> Result<(), io::Error> {
+/// Rewrite `path` keeping only lines whose `timestamp_seconds >= cutoff`.
+/// Returns the smallest retained timestamp, or `None` if the file is empty
+/// after trim.
+async fn trim_older_than(path: &Path, cutoff: i64) -> Result<Option<i64>, io::Error> {
     let file = File::open(path).await?;
     let mut reader = BufReader::new(file).lines();
-    let mut all = Vec::new();
+    let mut kept = Vec::new();
+    let mut smallest: Option<i64> = None;
     while let Some(line) = reader.next_line().await? {
-        if !line.is_empty() {
-            all.push(line);
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let ts = value
+            .get("timestamp_seconds")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if ts >= cutoff {
+            if smallest.map_or(true, |s| ts < s) {
+                smallest = Some(ts);
+            }
+            kept.push(line);
         }
     }
-    let drop_n = all.len().saturating_sub(keep);
-    let tail = &all[drop_n..];
-    rewrite_lines(path, tail).await
+    rewrite_lines(path, &kept).await?;
+    Ok(smallest)
 }
 
 async fn rewrite_lines(path: &Path, lines: &[String]) -> Result<(), io::Error> {
@@ -359,10 +411,25 @@ async fn rewrite_lines(path: &Path, lines: &[String]) -> Result<(), io::Error> {
 
 fn parse_block_num(line: &str) -> Result<u64, ReplayError> {
     let value: Value = serde_json::from_str(line)?;
-    value
-        .get("block_num")
-        .and_then(Value::as_u64)
-        .ok_or(ReplayError::MissingBlockNum)
+    Ok(value.get("block_num").and_then(Value::as_u64).unwrap_or(0))
+}
+
+fn bounds_of(lines: &[String]) -> (i64, i64) {
+    let mut oldest: i64 = 0;
+    let mut newest: i64 = 0;
+    for line in lines {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            if let Some(ts) = value.get("timestamp_seconds").and_then(Value::as_i64) {
+                if oldest == 0 || ts < oldest {
+                    oldest = ts;
+                }
+                if ts > newest {
+                    newest = ts;
+                }
+            }
+        }
+    }
+    (oldest, newest)
 }
 
 #[cfg(test)]
@@ -373,14 +440,15 @@ mod tests {
     const VER: &str = "v0.1.0";
     const HASH: &str = "deadbeef";
 
-    fn block_with_tables(block_num: u64, tables: &[&str]) -> String {
+    fn block_with_tables(timestamp_seconds: i64, block_num: u64, tables: &[&str]) -> String {
         let events: Vec<serde_json::Value> = tables
             .iter()
-            .map(|t| serde_json::json!({ "@table": *t, "id": format!("evt-{block_num}-{t}") }))
+            .map(|t| serde_json::json!({ "@table": *t, "id": format!("evt-{timestamp_seconds}-{t}") }))
             .collect();
         serde_json::json!({
             "network": "solana-mainnet",
             "block_num": block_num,
+            "timestamp_seconds": timestamp_seconds,
             "events": events,
         })
         .to_string()
@@ -402,76 +470,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_by_table_returns_filtered_blocks_above_from_block() {
+    async fn read_by_table_returns_filtered_blocks_above_from_timestamp() {
         let dir = tmpdir("by_table");
-        let log = ReplayLog::new(&dir, 100);
-        for n in 100..110 {
+        let log = ReplayLog::new(&dir, 600);
+        for n in 0..10 {
+            let ts = 1_000_000 + n;
             log.append(
                 "solana-mainnet",
                 PKG,
                 VER,
                 HASH,
-                &block_with_tables(n, &["swaps", "transfers"]),
+                ts,
+                &block_with_tables(ts, 100 + n as u64, &["swaps", "transfers"]),
             )
             .await
             .unwrap();
         }
         let result = log
-            .read_from(Some("solana-mainnet"), Some("swaps"), 105)
+            .read_from(Some("solana-mainnet"), Some("swaps"), 1_000_005)
             .await
             .unwrap();
         assert_eq!(result.blocks.len(), 4);
-        for (block_num, raw) in &result.blocks {
+        for (ts, raw) in &result.blocks {
             let v: Value = serde_json::from_str(raw).unwrap();
             assert_eq!(v["table"], "swaps");
             let events = v["events"].as_array().unwrap();
             assert_eq!(events.len(), 1);
             assert!(events[0].get("@table").is_none(), "@table must be stripped");
-            assert_eq!(events[0]["id"], format!("evt-{block_num}-swaps"));
+            assert_eq!(events[0]["id"], format!("evt-{ts}-swaps"));
         }
-        assert_eq!(result.oldest, Some(100));
+        assert_eq!(result.oldest, Some(1_000_000));
     }
 
     #[tokio::test]
-    async fn read_by_table_skips_blocks_without_matching_events() {
-        let dir = tmpdir("no_match");
-        let log = ReplayLog::new(&dir, 100);
-        // odd blocks carry only `transfers`, even blocks carry only `swaps`
-        for n in 100..104 {
-            let tables: &[&str] = if n % 2 == 0 {
-                &["swaps"]
-            } else {
-                &["transfers"]
-            };
+    async fn time_window_trim_drops_old_blocks() {
+        let dir = tmpdir("trim");
+        // 10s window. Append 30 blocks spaced 1s apart — expect only the last
+        // ~10–11s worth (with 10% headroom).
+        let log = ReplayLog::new(&dir, 10);
+        for n in 0..30 {
+            let ts = 2_000_000 + n;
             log.append(
                 "solana-mainnet",
                 PKG,
                 VER,
                 HASH,
-                &block_with_tables(n, tables),
+                ts,
+                &block_with_tables(ts, 100 + n as u64, &["swaps"]),
             )
             .await
             .unwrap();
         }
         let result = log
-            .read_from(Some("solana-mainnet"), Some("swaps"), 99)
+            .read_from(Some("solana-mainnet"), Some("swaps"), 0)
             .await
             .unwrap();
-        assert_eq!(result.blocks.len(), 2);
-        let block_nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
-        assert_eq!(block_nums, vec![100, 102]);
+        // Window allows up to 10s + 1s headroom; the trim cutoff is
+        // newest_ts - 10, so the oldest retained line is at most 10s old.
+        let oldest_kept = result.blocks.first().map(|(ts, _)| *ts).unwrap_or(0);
+        let newest_kept = result.blocks.last().map(|(ts, _)| *ts).unwrap_or(0);
+        assert!(
+            newest_kept - oldest_kept <= 11,
+            "expected window <= 11s, got {}",
+            newest_kept - oldest_kept
+        );
+        assert_eq!(newest_kept, 2_000_029);
     }
 
     #[tokio::test]
     async fn cross_file_scan_merges_two_spkgs_into_one_table_stream() {
         let dir = tmpdir("cross");
-        let log = ReplayLog::new(&dir, 100);
+        let log = ReplayLog::new(&dir, 600);
         log.append(
             "solana-mainnet",
             "svm_dex",
             "v0.5.0",
             "aaaa",
-            &block_with_tables(100, &["swaps"]),
+            1_000_000,
+            &block_with_tables(1_000_000, 100, &["swaps"]),
         )
         .await
         .unwrap();
@@ -480,7 +556,8 @@ mod tests {
             "svm_pump",
             "v0.2.0",
             "bbbb",
-            &block_with_tables(101, &["swaps"]),
+            1_000_001,
+            &block_with_tables(1_000_001, 100, &["swaps"]),
         )
         .await
         .unwrap();
@@ -488,34 +565,35 @@ mod tests {
             .read_from(Some("solana-mainnet"), Some("swaps"), 0)
             .await
             .unwrap();
-        let nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
-        assert_eq!(nums, vec![100, 101]);
+        let ts: Vec<i64> = result.blocks.iter().map(|(t, _)| *t).collect();
+        assert_eq!(ts, vec![1_000_000, 1_000_001]);
     }
 
     #[tokio::test]
-    async fn truncate_after_drops_blocks_above_last_valid() {
+    async fn truncate_after_block_drops_blocks_above_last_valid() {
         let dir = tmpdir("reorg");
-        let log = ReplayLog::new(&dir, 100);
-        for n in 100..110 {
+        let log = ReplayLog::new(&dir, 600);
+        for n in 0..10 {
+            let ts = 3_000_000 + n;
             log.append(
                 "solana-mainnet",
                 PKG,
                 VER,
                 HASH,
-                &block_with_tables(n, &["swaps"]),
+                ts,
+                &block_with_tables(ts, 100 + n as u64, &["swaps"]),
             )
             .await
             .unwrap();
         }
-        log.truncate_after("solana-mainnet", PKG, VER, HASH, 104)
+        log.truncate_after_block("solana-mainnet", PKG, VER, HASH, 104)
             .await
             .unwrap();
         let result = log
             .read_from(Some("solana-mainnet"), Some("swaps"), 0)
             .await
             .unwrap();
-        let nums: Vec<u64> = result.blocks.iter().map(|(n, _)| *n).collect();
-        assert_eq!(nums, vec![100, 101, 102, 103, 104]);
+        assert_eq!(result.blocks.len(), 5);
     }
 
     #[tokio::test]
@@ -527,7 +605,8 @@ mod tests {
             PKG,
             VER,
             HASH,
-            &block_with_tables(1, &["swaps"]),
+            1_000_000,
+            &block_with_tables(1_000_000, 100, &["swaps"]),
         )
         .await
         .unwrap();
