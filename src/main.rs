@@ -57,14 +57,15 @@ struct ServeArgs {
     )]
     cursors_dir: PathBuf,
 
-    /// Number of recent blocks retained per stream as JSONL for client
-    /// reconnect replay. `0` disables the replay log.
+    /// Replay log retention window in seconds. The server keeps every block
+    /// whose `timestamp_seconds` is within `[newest_seen - N, newest_seen]`
+    /// per spkg. Default 600s (10 minutes). `0` disables the replay log.
     #[arg(
         long,
-        env = "SUBSTREAMS_WEBSOCKET_REPLAY_BLOCKS",
-        default_value_t = 1000
+        env = "SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS",
+        default_value_t = 600
     )]
-    replay_blocks: usize,
+    replay_seconds: u64,
 
     /// Directory where per-stream JSONL replay logs are persisted.
     #[arg(
@@ -341,7 +342,7 @@ impl ServeArgs {
             websocket: self.websocket.into_config(),
             cursors_dir: self.cursors_dir,
             replay: substreams_websocket::config::ReplayConfig {
-                max_blocks: self.replay_blocks,
+                max_seconds: self.replay_seconds,
                 dir: self.replay_dir,
             },
         })
@@ -449,11 +450,12 @@ fn format_stream_event(event: StreamEvent) -> String {
             number,
             id,
             timestamp,
+            timestamp_seconds,
             output_type_url,
             payload,
             cursor,
         } => format!(
-            "block block_num={number} block_hash={id} timestamp={timestamp} output_type_url={output_type_url} payload_len={} cursor_len={}",
+            "block block_num={number} block_hash={id} timestamp={timestamp} timestamp_seconds={timestamp_seconds} output_type_url={output_type_url} payload_len={} cursor_len={}",
             payload.len(),
             cursor.len()
         ),

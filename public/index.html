@@ -895,9 +895,9 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values</pre>
 
   <section id="reconnect">
     <h2>Reconnects</h2>
-    <p>The server retains the last <code>REPLAY_BLOCKS</code> blocks per stream on disk (default 1000). On reconnect, pass <code>?from_block=&lt;n&gt;</code> on either URL mode:</p>
-<pre>ws://host/ws/solana-mainnet@swaps?from_block=350000123
-ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
+    <p>The server retains a <code>REPLAY_SECONDS</code> time window per spkg on disk (default 600s). On reconnect, pass <code>?from_timestamp=&lt;n&gt;</code> (Unix epoch seconds or UTC <code>YYYY-MM-DD HH:MM:SS</code>) on either URL mode:</p>
+<pre>ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
+ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:00:00Z</pre>
     <p>Every retained block with <code>block_num &gt; n</code> is replayed (oldest first) before the live stream resumes. If <code>n</code> falls below the oldest retained block, a <code>gap</code> lifecycle message is emitted instead and the client should backfill the hole via Substreams gRPC directly:</p>
 <pre>{ "type": "stream", "status": "gap",
   "network": "solana-mainnet",
@@ -915,7 +915,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
   <section id="limits">
     <h2>Limits</h2>
     <ul>
-      <li><strong>Bounded replay.</strong> The on-disk replay log holds the last <code>REPLAY_BLOCKS</code> per stream (default 1000). For older history, backfill via Substreams gRPC directly.</li>
+      <li><strong>Bounded replay.</strong> The on-disk replay log holds a <code>REPLAY_SECONDS</code> window per spkg (default 600s). For older history, backfill via Substreams gRPC directly.</li>
       <li><strong>One output type.</strong> Only <code>sf.substreams.sink.database.v1.DatabaseChanges</code>.</li>
       <li><strong>Per-connection client buffer.</strong> Slow consumers are dropped per-message rather than blocking the ingest loop. Defaults to 1024 messages, configurable via <code>SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE</code>.</li>
     </ul>
@@ -1640,7 +1640,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_block=350000123</pre>
       cmdEl.value = JSON.stringify(body);
 
       // Rewrite the URL field: strip any existing `?filter=` then append the
-      // new one. `?from_block=...` and other params are preserved.
+      // new one. `?from_timestamp=...` and other params are preserved.
       var raw = urlEl.value || '';
       var hashIdx = raw.indexOf('#');
       var hash = hashIdx === -1 ? '' : raw.slice(hashIdx);

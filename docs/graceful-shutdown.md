@@ -6,7 +6,7 @@ On `SIGTERM` or `SIGINT`, the server stops accepting new HTTP/WebSocket connecti
 
 Hard-kill of an in-process WebSocket connection looks like a TCP RST to the client — most libraries surface this as an opaque "connection reset" with no diagnostic info. A clean `Close` frame with code `1001` (`GOING_AWAY`) tells the client this was intentional, lets it skip its usual error-path retry/backoff, and reconnect immediately.
 
-Combined with [`replay.md`](replay.md), the reconnect-and-resume is near-seamless: client closes, reconnects in <1s with `?from_block=<last_seen>`, replay log fills the 1–2s gap.
+Combined with [`replay.md`](replay.md), the reconnect-and-resume is near-seamless: client closes, reconnects in <1s with `?from_timestamp=<last_seen>`, replay log fills the 1–2s gap.
 
 ## Sequence
 
@@ -40,7 +40,7 @@ The recommended client pattern:
 
 ```
 1. On Close frame (code 1001) or any disconnect:
-2.   reconnect with ?from_block=<last block_num seen>
+2.   reconnect with ?from_timestamp=<last timestamp_seconds seen>
 3.   server replays the gap, then live stream resumes
 ```
 
