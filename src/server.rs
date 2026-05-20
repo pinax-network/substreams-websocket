@@ -105,9 +105,12 @@ pub async fn serve_with_shutdown(
 
     let replay = ReplayLog::new(config.replay.dir.clone(), config.replay.max_seconds);
 
+    let clients = ClientRegistry::default();
+    clients.set_slow_client_drop_limit(config.websocket.slow_client_drop_limit);
+
     let state = AppState {
         config: config.clone(),
-        clients: ClientRegistry::default(),
+        clients,
         streams_meta,
         replay,
         draining: Arc::new(AtomicBool::new(false)),
@@ -1114,6 +1117,7 @@ async fn handle_socket(
     let mut messages = client.rx;
     let outbound = client.tx.clone();
     let client_id = client.name;
+    let total_drops = client.total_drops.clone();
     let connected_at = Instant::now();
     let last_pong_at = Arc::new(RwLock::new(connected_at));
     let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
@@ -1221,6 +1225,7 @@ async fn handle_socket(
     info!(
         client_id,
         duration_secs = connected_at.elapsed().as_secs(),
+        total_drops = total_drops.load(Ordering::Relaxed),
         "WebSocket client disconnected"
     );
 }
@@ -1388,9 +1393,19 @@ fn hex_digit(byte: u8) -> Option<u8> {
 struct ClientRegistry {
     next_id: Arc<AtomicU64>,
     clients: Arc<RwLock<HashMap<ClientId, ClientHandle>>>,
+    /// Mirror of `WebSocketConfig::slow_client_drop_limit` cached in an
+    /// atomic so broadcast hot-paths can read it without touching the
+    /// `Config` Arc.
+    slow_drop_limit: Arc<AtomicU64>,
 }
 
 impl ClientRegistry {
+    /// Cache the drop limit on the registry so hot broadcast paths read it
+    /// from an `AtomicU64` rather than walking the `Config` Arc.
+    fn set_slow_client_drop_limit(&self, limit: u64) {
+        self.slow_drop_limit.store(limit, Ordering::Relaxed);
+    }
+
     async fn register(
         &self,
         config: &Config,
@@ -1404,15 +1419,27 @@ impl ClientRegistry {
         let name = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel(config.websocket.client_buffer_size);
         let filter = Arc::new(RwLock::new(filter));
+        let consecutive_drops = Arc::new(AtomicU64::new(0));
+        let total_drops = Arc::new(AtomicU64::new(0));
         clients.insert(
             name,
             ClientHandle {
                 tx: tx.clone(),
                 filter: Arc::clone(&filter),
+                consecutive_drops: consecutive_drops.clone(),
+                total_drops: total_drops.clone(),
             },
         );
 
-        Some((RegisteredClient { name, tx, rx }, filter))
+        Some((
+            RegisteredClient {
+                name,
+                tx,
+                rx,
+                total_drops,
+            },
+            filter,
+        ))
     }
 
     async fn unregister(&self, name: ClientId) {
@@ -1480,32 +1507,34 @@ impl ClientRegistry {
     /// route on their own. Per-connection envelope wrapping is respected.
     async fn broadcast_lifecycle(&self, value: serde_json::Value) -> usize {
         let raw_text = value.to_string();
-        let clients = self.clients.read().await;
+        let mut slow_to_close: Vec<ClientId> = Vec::new();
         let mut delivered: usize = 0;
-        for (client_id, client) in clients.iter() {
-            let filter = client.filter.read().await;
-            // Lifecycle messages don't have a stream selector — wrap with a
-            // synthetic key `<network>@__lifecycle__` when wrapping is on, so
-            // demux-style clients can route on the `stream` field.
-            let text = if filter.wrap_envelope {
-                let network = value
-                    .get("network")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                format!(r#"{{"stream":"{network}@__lifecycle__","data":{raw_text}}}"#)
-            } else {
-                raw_text.clone()
-            };
-            drop(filter);
-            if client.tx.try_send(Message::Text(text.into())).is_err() {
-                warn!(
-                    client_id,
-                    "dropping lifecycle message for slow WebSocket client"
-                );
-            } else {
-                delivered += 1;
+        let limit = self.slow_client_drop_limit();
+        {
+            let clients = self.clients.read().await;
+            for (client_id, client) in clients.iter() {
+                let filter = client.filter.read().await;
+                let text = if filter.wrap_envelope {
+                    let network = value
+                        .get("network")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    format!(r#"{{"stream":"{network}@__lifecycle__","data":{raw_text}}}"#)
+                } else {
+                    raw_text.clone()
+                };
+                drop(filter);
+                let outcome =
+                    backpressured_send(*client_id, client, Message::Text(text.into()), limit);
+                if outcome.delivered {
+                    delivered += 1;
+                }
+                if outcome.must_close {
+                    slow_to_close.push(*client_id);
+                }
             }
         }
+        self.close_slow(&slow_to_close).await;
         delivered
     }
 
@@ -1524,8 +1553,10 @@ impl ClientRegistry {
         let selector = format!("{network}@{stream}");
         let unfiltered_text = block.to_string();
         let unfiltered_wrapped = format!(r#"{{"stream":"{selector}","data":{unfiltered_text}}}"#);
+        let limit = self.slow_client_drop_limit();
         let clients = self.clients.read().await;
         let mut delivered: usize = 0;
+        let mut slow_to_close: Vec<ClientId> = Vec::new();
 
         for (client_id, client) in clients.iter() {
             let filter = client.filter.read().await;
@@ -1559,14 +1590,12 @@ impl ClientRegistry {
                 unfiltered_text.clone()
             };
             drop(filter);
-            let msg = Message::Text(text.into());
-            if client.tx.try_send(msg).is_err() {
-                warn!(
-                    client_id,
-                    "dropping broadcast message for slow WebSocket client"
-                );
-            } else {
+            let outcome = backpressured_send(*client_id, client, Message::Text(text.into()), limit);
+            if outcome.delivered {
                 delivered += 1;
+            }
+            if outcome.must_close {
+                slow_to_close.push(*client_id);
             }
         }
 
@@ -1577,8 +1606,83 @@ impl ClientRegistry {
             total_clients = clients.len(),
             "broadcast block"
         );
+        drop(clients);
 
+        self.close_slow(&slow_to_close).await;
         delivered
+    }
+
+    fn slow_client_drop_limit(&self) -> u64 {
+        self.slow_drop_limit.load(Ordering::Relaxed)
+    }
+
+    /// Send a synthetic `Close(1013 "slow client backpressure")` to every
+    /// listed client and unregister them. Called once per broadcast pass
+    /// after the read lock is released. 1013 = "Try Again Later" — closest
+    /// standard code for "backend dropped you for being slow".
+    async fn close_slow(&self, ids: &[ClientId]) {
+        if ids.is_empty() {
+            return;
+        }
+        use axum::extract::ws::CloseFrame;
+        let close = Message::Close(Some(CloseFrame {
+            code: 1013,
+            reason: "slow client backpressure".to_owned().into(),
+        }));
+        let mut clients = self.clients.write().await;
+        for id in ids {
+            if let Some(client) = clients.remove(id) {
+                let total = client.total_drops.load(Ordering::Relaxed);
+                warn!(
+                    client_id = id,
+                    total_drops = total,
+                    "force-closing slow WebSocket client (backpressure limit reached)"
+                );
+                let _ = client.tx.try_send(close.clone());
+            }
+        }
+    }
+}
+
+/// Outcome of a single backpressured send: did the frame land on the
+/// per-client outbound channel, and did this drop push the client past the
+/// force-close threshold?
+struct SendOutcome {
+    delivered: bool,
+    must_close: bool,
+}
+
+fn backpressured_send(
+    client_id: ClientId,
+    client: &ClientHandle,
+    msg: Message,
+    drop_limit: u64,
+) -> SendOutcome {
+    match client.tx.try_send(msg) {
+        Ok(()) => {
+            client.consecutive_drops.store(0, Ordering::Relaxed);
+            SendOutcome {
+                delivered: true,
+                must_close: false,
+            }
+        }
+        Err(_) => {
+            let consecutive = client.consecutive_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            client.total_drops.fetch_add(1, Ordering::Relaxed);
+            // Log throttle — first drop, every 100th after that — so a
+            // saturated client doesn't flood the log between threshold
+            // crossings.
+            if consecutive == 1 || consecutive.is_multiple_of(100) {
+                warn!(
+                    client_id,
+                    consecutive, "dropping broadcast message for slow WebSocket client"
+                );
+            }
+            SendOutcome {
+                delivered: false,
+                must_close: drop_limit > 0 && consecutive >= drop_limit,
+            }
+        }
     }
 }
 
@@ -1586,12 +1690,20 @@ impl ClientRegistry {
 struct ClientHandle {
     tx: mpsc::Sender<Message>,
     filter: Arc<RwLock<StreamFilter>>,
+    /// Consecutive failed `try_send` calls. Reset to 0 on every success.
+    /// When this crosses `slow_client_drop_limit`, the broadcast site flags
+    /// the client for forced close to relieve backpressure on the bus.
+    consecutive_drops: Arc<AtomicU64>,
+    /// Total dropped frames over the lifetime of the connection. Surfaced
+    /// in the disconnect log so operators can see who was slow.
+    total_drops: Arc<AtomicU64>,
 }
 
 struct RegisteredClient {
     name: ClientId,
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
+    total_drops: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2805,6 +2917,86 @@ mod tests {
         assert_eq!(close.reason, "server shutting down");
     }
 
+    #[tokio::test]
+    async fn backpressured_send_flags_close_after_drop_limit() {
+        // Drive `backpressured_send` directly with a saturated 1-slot mpsc.
+        // First send lands; subsequent sends fail until the consecutive-
+        // drop counter crosses the limit, at which point `must_close` is
+        // returned.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
+        let consecutive_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let total_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
+        let client = super::ClientHandle {
+            tx,
+            filter,
+            consecutive_drops: consecutive_drops.clone(),
+            total_drops: total_drops.clone(),
+        };
+        let frame = || axum::extract::ws::Message::Text("payload".into());
+
+        // First send: fits in the 1-slot buffer.
+        let out = super::backpressured_send(1, &client, frame(), 3);
+        assert!(out.delivered, "first send must land");
+        assert!(!out.must_close);
+
+        // Next 2 sends saturate the buffer → drops, but below the limit.
+        for _ in 0..2 {
+            let out = super::backpressured_send(1, &client, frame(), 3);
+            assert!(!out.delivered);
+            assert!(!out.must_close);
+        }
+
+        // 3rd consecutive drop crosses the limit → must_close.
+        let out = super::backpressured_send(1, &client, frame(), 3);
+        assert!(!out.delivered);
+        assert!(
+            out.must_close,
+            "must_close should fire on the limit-th drop"
+        );
+        assert_eq!(
+            consecutive_drops.load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        assert_eq!(total_drops.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn backpressured_send_resets_consecutive_drops_on_success() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
+        let consecutive_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let total_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
+        let client = super::ClientHandle {
+            tx,
+            filter,
+            consecutive_drops: consecutive_drops.clone(),
+            total_drops: total_drops.clone(),
+        };
+        let frame = || axum::extract::ws::Message::Text("payload".into());
+
+        // Fill, then two drops, then drain so the next send succeeds.
+        assert!(super::backpressured_send(1, &client, frame(), 100).delivered);
+        for _ in 0..2 {
+            super::backpressured_send(1, &client, frame(), 100);
+        }
+        assert_eq!(
+            consecutive_drops.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+
+        // Drain the buffer; next try_send fits → counter resets to 0.
+        let _ = rx.try_recv();
+        let out = super::backpressured_send(1, &client, frame(), 100);
+        assert!(out.delivered);
+        assert_eq!(
+            consecutive_drops.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        // Total drops should still reflect the 2 misses earlier.
+        assert_eq!(total_drops.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
     struct TestServer {
         addr: SocketAddr,
         clients: ClientRegistry,
@@ -2938,6 +3130,7 @@ mod tests {
                 shutdown_drain_timeout: Duration::from_secs(1),
                 max_filter_fields: 16,
                 max_filter_values: 64,
+                slow_client_drop_limit: 0,
             },
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
             replay: ReplayConfig {

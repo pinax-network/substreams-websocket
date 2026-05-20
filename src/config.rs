@@ -70,6 +70,11 @@ pub struct WebSocketConfig {
     pub shutdown_drain_timeout: Duration,
     pub max_filter_fields: usize,
     pub max_filter_values: usize,
+    /// Number of consecutive failed `try_send` calls before a client is
+    /// force-closed with `Close(1013 "slow client backpressure")`. Set to
+    /// `0` to disable — clients then keep their connection forever and only
+    /// individual frames are dropped on a saturated buffer. Default 100.
+    pub slow_client_drop_limit: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -236,6 +241,7 @@ mod tests {
             shutdown_drain_timeout: Duration::from_secs(1),
             max_filter_fields: 16,
             max_filter_values: 64,
+            slow_client_drop_limit: 0,
         }
     }
 

@@ -87,6 +87,7 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.toml
 | Server | `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` | `600` | Disconnect after silence. |
 | Server | `SUBSTREAMS_WEBSOCKET_MAX_CLIENTS` | `1024` | Connection cap. |
 | Server | `SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE` | `1024` | Per-client outbound buffer. |
+| Server | `SUBSTREAMS_WEBSOCKET_SLOW_CLIENT_DROP_LIMIT` | `100` | Force-close a client after N consecutive `try_send` drops on a saturated buffer. `0` disables. |
 | Server | `SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS` | `10` | On SIGTERM/SIGINT, send `Close` to every client and wait up to this long for them to disconnect before exiting. |
 | Server | `SUBSTREAMS_WEBSOCKET_CURSORS_DIR` | `./cursors` | Cursor file directory. |
 | Server | `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS` | `600` | Retention window per spkg in seconds. `?from_timestamp=` replay reads from this log. `0` disables. |
