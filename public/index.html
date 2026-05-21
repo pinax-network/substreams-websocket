@@ -579,6 +579,22 @@
   .tryit .pill.ok  { background: rgba(52,199,89,0.15);  color: var(--good); }
   .tryit .pill.err { background: rgba(255,59,48,0.15);  color: var(--bad); }
   .tryit .pill.dim { background: var(--border); color: var(--muted); }
+  .tryit .jwt-row { align-items: center; }
+  .tryit .jwt-row label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    flex-shrink: 0;
+    align-self: center;
+  }
+  .tryit .jwt-row .jwt-hint {
+    font-size: 11px;
+    color: var(--muted);
+    align-self: center;
+    flex-shrink: 0;
+  }
+  .tryit .jwt-row .jwt-hint.saved { color: var(--good); }
   .tryit .tpl-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
   .tryit .tpl-row button { padding: 4px 10px; font-size: 12px; }
   .tryit-filter { margin-left: auto; display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -1153,6 +1169,22 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
         Try it
         <button class="tryit-close" id="tryit-close" type="button" aria-label="Close">×</button>
       </h2>
+      <div class="row jwt-row">
+        <label for="jwt-input">JWT</label>
+        <input id="jwt-input"
+               type="text"
+               name="ws-jwt-no-autofill"
+               placeholder="Bearer token (optional)"
+               autocomplete="off"
+               autocorrect="off"
+               autocapitalize="off"
+               spellcheck="false"
+               data-lpignore="true"
+               data-1p-ignore
+               data-form-type="other" />
+        <span class="jwt-hint" id="jwt-hint">empty</span>
+        <button type="button" id="jwt-clear" title="Clear stored JWT">Clear</button>
+      </div>
       <div class="row">
         <select id="stream-select" title="Pick a configured stream">
           <option value="">— pick a stream —</option>
@@ -1247,6 +1279,88 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
   var cmdEl = $('cmd');
   var ws = null;
   var counter = 0;
+
+  // --- JWT helpers ----------------------------------------------------------
+  // Optional Bearer token applied to HTTP fetches (Authorization header) and
+  // WebSocket connections (?token=<jwt> query param — browsers can't set
+  // headers on the WS upgrade, so the auth proxy in front needs to read the
+  // query and rewrite it to a header before forwarding upstream).
+  // Persisted to localStorage so the user only enters it once per browser.
+  var JWT_KEY = 'substreams-ws-ui-jwt';
+  function getJwt() {
+    try { return (localStorage.getItem(JWT_KEY) || '').trim(); } catch (_) { return ''; }
+  }
+  function setJwt(v) {
+    try {
+      if (v) localStorage.setItem(JWT_KEY, v);
+      else   localStorage.removeItem(JWT_KEY);
+    } catch (_) {}
+  }
+  function authFetch(url, opts) {
+    opts = opts || {};
+    var jwt = getJwt();
+    if (!jwt) return fetch(url, opts);
+    var headers = new Headers(opts.headers || {});
+    headers.set('Authorization', 'Bearer ' + jwt);
+    return fetch(url, Object.assign({}, opts, { headers: headers }));
+  }
+  // Returns `url` with `?token=<jwt>` appended (or replaces an existing token).
+  // Existing query params and hash are preserved. No-op when JWT is empty.
+  function withJwtParam(url) {
+    var jwt = getJwt();
+    if (!jwt) return url;
+    var hashIdx = url.indexOf('#');
+    var hash = hashIdx === -1 ? '' : url.slice(hashIdx);
+    var base = hashIdx === -1 ? url : url.slice(0, hashIdx);
+    var qIdx = base.indexOf('?');
+    var path = qIdx === -1 ? base : base.slice(0, qIdx);
+    var qs = qIdx === -1 ? '' : base.slice(qIdx + 1);
+    var pairs = qs.split('&').filter(function (p) { return p && p.split('=')[0] !== 'token'; });
+    pairs.push('token=' + encodeURIComponent(jwt));
+    return path + '?' + pairs.join('&') + hash;
+  }
+
+  // Wire up the Try It modal's JWT input.
+  (function bindJwtInput() {
+    var jwtInput  = $('jwt-input');
+    var jwtHint   = $('jwt-hint');
+    var jwtClear  = $('jwt-clear');
+    if (!jwtInput || !jwtHint) return;
+
+    function render() {
+      var v = jwtInput.value.trim();
+      if (v) {
+        jwtHint.className = 'jwt-hint saved';
+        jwtHint.textContent = 'saved · ' + v.length + ' chars';
+      } else {
+        jwtHint.className = 'jwt-hint';
+        jwtHint.textContent = 'empty';
+      }
+    }
+
+    function syncFromStorage() {
+      jwtInput.value = getJwt();
+      render();
+    }
+    syncFromStorage();
+    // Chrome / 1Password / LastPass sometimes write into the field *after*
+    // our script runs. Re-assert our value on the next animation frame and
+    // once more after a short delay so an autofill can't sneak in.
+    requestAnimationFrame(syncFromStorage);
+    setTimeout(syncFromStorage, 250);
+
+    jwtInput.addEventListener('input', function () {
+      setJwt(jwtInput.value.trim());
+      render();
+    });
+
+    if (jwtClear) jwtClear.addEventListener('click', function () {
+      jwtInput.value = '';
+      setJwt('');
+      render();
+      jwtInput.focus();
+    });
+  })();
 
   var scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   urlEl.value = scheme + '://' + location.host + '/ws/*@*';
@@ -1606,8 +1720,13 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
   function connect() {
     var url = urlEl.value.trim();
     if (!url) return;
+    // Browsers can't set Authorization on the WS upgrade; pass the JWT as
+    // ?token=<jwt> instead. The displayed URL field is left untouched so the
+    // token doesn't leak into screenshots when the user copies it.
+    var connectUrl = withJwtParam(url);
+    var hasJwt = connectUrl !== url;
     try {
-      ws = new WebSocket(url);
+      ws = new WebSocket(connectUrl);
     } catch (e) {
       append('sys', '!', 'WebSocket constructor failed: ' + e.message);
       return;
@@ -1617,7 +1736,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
     disconnectBtn.disabled = false;
     sendBtn.disabled = false;
     ws.onopen = function () {
-      append('sys', '*', 'connected: ' + url + ' (auto-disconnect in ' + (AUTO_DISCONNECT_MS / 1000) + 's)');
+      append('sys', '*', 'connected: ' + url + (hasJwt ? ' (with JWT)' : '') + ' (auto-disconnect in ' + (AUTO_DISCONNECT_MS / 1000) + 's)');
       if (autoTimer) clearTimeout(autoTimer);
       if (countdownTimer) clearInterval(countdownTimer);
       autoDeadline = Date.now() + AUTO_DISCONNECT_MS;

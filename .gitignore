@@ -22,5 +22,7 @@ replay
 #.idea/
 config.toml
 streams.toml
+config.yaml
+streams.yaml
 cursors/
 .env

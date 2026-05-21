@@ -28,27 +28,27 @@
 #                 Surfaced in the welcome message for client-side discovery.
 
 streams:
-  - network: solana-mainnet
+  - network: solana
     endpoint: https://solana.substreams.pinax.network:443
     manifest: https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg
     tables:
       - swaps
 
-  - network: solana-mainnet
+  - network: solana
     endpoint: https://solana.substreams.pinax.network:443
     manifest: https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/svm-transfers-v0.3.0.spkg
     tables:
       - spl_transfers
-      - system_transfers
+      - system_transfer
 
-  - network: ethereum-mainnet
+  - network: eth
     endpoint: https://eth.substreams.pinax.network:443
     manifest: https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg
     tables:
       - swaps
 
-  - network: ethereum-mainnet
+  - network: eth
     endpoint: https://eth.substreams.pinax.network:443
     manifest: https://github.com/pinax-network/substreams-evm/releases/download/evm-transfers-v0.4.0/evm-transfers-v0.4.0.spkg
     tables:
-      - transfers
+      - erc20_transfers
