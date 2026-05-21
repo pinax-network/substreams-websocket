@@ -3,6 +3,9 @@
 # credentials, auth URL) are read from environment variables or CLI flags so
 # that secrets stay in .env and the TOML only describes the streams to run.
 #
+# YAML is also supported — see streams.example.yaml. Pick whichever fits
+# your toolchain; the server detects the format from the file extension.
+#
 # Stream identity is derived at startup from the loaded `.spkg`:
 #   (network, package_name, package_version, module_hash)
 #

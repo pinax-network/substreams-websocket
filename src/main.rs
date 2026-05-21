@@ -27,8 +27,10 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    /// Path to the streams TOML file. The file contains only the
-    /// `[[streams]]` array — single-value settings come from env/flags.
+    /// Path to the streams config file (TOML or YAML). The file contains
+    /// only the `streams:` / `[[streams]]` array — single-value settings
+    /// come from env/flags. Format is detected from the extension
+    /// (`.toml` | `.yaml` | `.yml`).
     #[arg(
         short,
         long,
@@ -37,11 +39,16 @@ struct ServeArgs {
     )]
     streams: PathBuf,
 
-    /// Inline streams TOML content. When set, takes precedence over `--streams`
-    /// — useful for environments without a writable filesystem (e.g. Railway,
-    /// Fly.io, Heroku) where you can only inject configuration through env.
+    /// Inline streams TOML content. Wins over `--streams` when set.
+    /// Useful for env-only PaaS deploys (Railway, Fly, Heroku).
     #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAMS_TOML")]
     streams_toml: Option<String>,
+
+    /// Inline streams YAML content. Wins over `--streams` when set. Same
+    /// shape as the TOML form, just in YAML. If both `STREAMS_TOML` and
+    /// `STREAMS_YAML` are set, TOML takes precedence.
+    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAMS_YAML")]
+    streams_yaml: Option<String>,
 
     #[command(flatten)]
     websocket: WebSocketArgs,
@@ -321,37 +328,79 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Wire format of an inline / on-disk streams config.
+#[derive(Debug, Clone, Copy)]
+enum StreamsFormat {
+    Toml,
+    Yaml,
+}
+
+impl StreamsFormat {
+    fn from_path(path: &std::path::Path) -> Self {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("yaml") | Some("yml") => Self::Yaml,
+            _ => Self::Toml,
+        }
+    }
+
+    fn parse(self, raw: &str) -> anyhow::Result<FileConfig> {
+        match self {
+            Self::Toml => toml::from_str::<FileConfig>(raw).map_err(|e| anyhow::anyhow!(e)),
+            Self::Yaml => serde_yaml::from_str::<FileConfig>(raw).map_err(|e| anyhow::anyhow!(e)),
+        }
+    }
+}
+
 impl ServeArgs {
     async fn load_config(self) -> anyhow::Result<Config> {
-        // Inline TOML wins when present and non-empty (Railway/Heroku-style
-        // env-only deploys). An empty SUBSTREAMS_WEBSOCKET_STREAMS_TOML is
-        // treated as unset so operators can keep both env vars declared (one
-        // for local dev, one for PaaS) without one tripping the other.
-        let inline = self
+        // Inline content wins over the file path. TOML is checked first for
+        // backwards compatibility, then YAML. Both are trimmed first so an
+        // empty env var is treated as unset (lets operators keep both vars
+        // declared without one tripping the other on PaaS).
+        let inline_toml = self
             .streams_toml
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let inline_yaml = self
+            .streams_yaml
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
-        let (contents, source_label) = if let Some(inline) = inline {
+        let (contents, source_label, format) = if let Some(inline) = inline_toml {
             (
                 inline.to_owned(),
                 "SUBSTREAMS_WEBSOCKET_STREAMS_TOML".to_owned(),
+                StreamsFormat::Toml,
+            )
+        } else if let Some(inline) = inline_yaml {
+            (
+                inline.to_owned(),
+                "SUBSTREAMS_WEBSOCKET_STREAMS_YAML".to_owned(),
+                StreamsFormat::Yaml,
             )
         } else {
             let path = self.streams.clone();
+            let format = StreamsFormat::from_path(&path);
             let contents = tokio::fs::read_to_string(&path).await.with_context(|| {
                 format!(
                     "failed to read streams from {}. Set SUBSTREAMS_WEBSOCKET_STREAMS_TOML \
-                     to inject the stream list directly via env, or point \
-                     SUBSTREAMS_WEBSOCKET_STREAMS at a readable TOML file",
+                     or SUBSTREAMS_WEBSOCKET_STREAMS_YAML to inject the stream list directly \
+                     via env, or point SUBSTREAMS_WEBSOCKET_STREAMS at a readable file",
                     path.display()
                 )
             })?;
-            (contents, path.display().to_string())
+            (contents, path.display().to_string(), format)
         };
 
-        let file = toml::from_str::<FileConfig>(&contents)
+        let file = format
+            .parse(&contents)
             .with_context(|| format!("failed to parse streams from {source_label}"))?;
 
         Ok(Config {
@@ -499,5 +548,65 @@ fn format_stream_event(event: StreamEvent) -> String {
         ),
         StreamEvent::SnapshotComplete => "snapshot_complete".to_owned(),
         StreamEvent::Unknown => "unknown".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileConfig, StreamsFormat};
+
+    const TOML: &str = r#"
+[[streams]]
+network = "solana-mainnet"
+endpoint = "https://solana.substreams.pinax.network:443"
+manifest = "https://example.com/svm-dex-v0.5.1.spkg"
+tables = ["swaps"]
+"#;
+
+    const YAML: &str = r#"
+streams:
+  - network: solana-mainnet
+    endpoint: https://solana.substreams.pinax.network:443
+    manifest: https://example.com/svm-dex-v0.5.1.spkg
+    tables:
+      - swaps
+"#;
+
+    #[test]
+    fn parses_toml() {
+        let cfg: FileConfig = StreamsFormat::Toml.parse(TOML).expect("toml");
+        assert_eq!(cfg.streams.len(), 1);
+        assert_eq!(cfg.streams[0].network, "solana-mainnet");
+        assert_eq!(cfg.streams[0].tables, vec!["swaps".to_owned()]);
+    }
+
+    #[test]
+    fn parses_yaml() {
+        let cfg: FileConfig = StreamsFormat::Yaml.parse(YAML).expect("yaml");
+        assert_eq!(cfg.streams.len(), 1);
+        assert_eq!(cfg.streams[0].network, "solana-mainnet");
+        assert_eq!(cfg.streams[0].tables, vec!["swaps".to_owned()]);
+    }
+
+    #[test]
+    fn format_from_path_picks_yaml_for_yml_and_yaml() {
+        use std::path::Path;
+        assert!(matches!(
+            StreamsFormat::from_path(Path::new("./streams.yaml")),
+            StreamsFormat::Yaml
+        ));
+        assert!(matches!(
+            StreamsFormat::from_path(Path::new("./streams.yml")),
+            StreamsFormat::Yaml
+        ));
+        assert!(matches!(
+            StreamsFormat::from_path(Path::new("./streams.toml")),
+            StreamsFormat::Toml
+        ));
+        // Unknown / missing extension falls back to TOML.
+        assert!(matches!(
+            StreamsFormat::from_path(Path::new("./streams")),
+            StreamsFormat::Toml
+        ));
     }
 }

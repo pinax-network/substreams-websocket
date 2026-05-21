@@ -1,0 +1,54 @@
+# YAML alternative to streams.example.toml. Same shape — only the
+# serialization format differs. Pick whichever is more ergonomic for
+# your toolchain. The server detects the format from the file extension
+# (.toml | .yaml | .yml) or from the env var name
+# (SUBSTREAMS_WEBSOCKET_STREAMS_TOML vs SUBSTREAMS_WEBSOCKET_STREAMS_YAML).
+#
+# Stream identity is derived at startup from the loaded .spkg:
+#   (network, package_name, package_version, module_hash)
+#
+# `package_name` and `package_version` come from the spkg's
+# `Package.package_meta[0]` (the same fields you see with
+# `substreams info <spkg>`). There is no operator-supplied `name` —
+# WebSocket clients subscribe by `<network>@<table>`, where `<table>`
+# is the DatabaseChanges table emitted by the spkg's `db_out` module.
+#
+# Required per-stream fields:
+#   network     — chain identifier
+#   endpoint    — Substreams gRPC endpoint URL
+#   manifest    — local path or HTTPS URL of the .spkg
+#
+# Optional per-stream fields:
+#   module      — default "db_out". Must emit
+#                 proto:sf.substreams.sink.database.v1.DatabaseChanges.
+#   start_block — default "-1" (chain head). Persisted cursor wins on resume.
+#   stop_block  — default "0" (stream indefinitely).
+#   params      — list of "module=value" Substreams parameters.
+#   tables      — operator-declared DatabaseChanges tables this spkg emits.
+#                 Surfaced in the welcome message for client-side discovery.
+
+streams:
+  - network: solana-mainnet
+    endpoint: https://solana.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg
+    tables:
+      - swaps
+
+  - network: solana-mainnet
+    endpoint: https://solana.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-svm/releases/download/svm-transfers-v0.3.0/svm-transfers-v0.3.0.spkg
+    tables:
+      - spl_transfers
+      - system_transfers
+
+  - network: ethereum-mainnet
+    endpoint: https://eth.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg
+    tables:
+      - swaps
+
+  - network: ethereum-mainnet
+    endpoint: https://eth.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-evm/releases/download/evm-transfers-v0.4.0/evm-transfers-v0.4.0.spkg
+    tables:
+      - transfers

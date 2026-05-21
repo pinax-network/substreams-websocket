@@ -78,8 +78,9 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.toml
 | Runtime | `SUBSTREAMS_PRODUCTION_MODE` | `false` | Skip dev outputs. |
 | Runtime | `SUBSTREAMS_FINAL_BLOCKS_ONLY` | `false` | Skip un-finalized blocks. |
 | Runtime | `SUBSTREAMS_PLAINTEXT` / `SUBSTREAMS_INSECURE` | `false` | TLS toggles. |
-| Server | `SUBSTREAMS_WEBSOCKET_STREAMS` | `./streams.toml` | Path to streams TOML. |
+| Server | `SUBSTREAMS_WEBSOCKET_STREAMS` | `./streams.toml` | Path to streams config. Format detected from extension (`.toml` \| `.yaml` \| `.yml`). |
 | Server | `SUBSTREAMS_WEBSOCKET_STREAMS_TOML` | _(unset)_ | Inline TOML. Wins over file path. |
+| Server | `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` | _(unset)_ | Inline YAML. Same shape as the TOML form. TOML wins if both set. |
 | Server | `SUBSTREAMS_WEBSOCKET_LISTEN` | `127.0.0.1:8080` | HTTP/WS listen address. |
 | Server | `SUBSTREAMS_WEBSOCKET_WS_PATH` | `/ws` | WebSocket route. |
 | Server | `SUBSTREAMS_WEBSOCKET_STREAM_PATH` | `/stream` | Query-mode route. |
@@ -101,7 +102,11 @@ Every variable has a matching CLI flag. `substreams-websocket serve --help` for 
 
 Auth modes (api-key→JWT, raw bearer, header passthrough): [`docs/auth.md`](docs/auth.md).
 
-### `streams.toml`
+### `streams.toml` or `streams.yaml`
+
+Either format works. The server detects from the file extension (`.toml`, `.yaml`, `.yml`) or from the env var name (`STREAMS_TOML` vs `STREAMS_YAML`). Examples below are TOML; see [`streams.example.yaml`](streams.example.yaml) for the YAML equivalent.
+
+#### `streams.toml`
 
 Array of Substreams sources. No global block, no secrets, **no operator-supplied name** — stream identity is derived from the loaded `.spkg` (`package_name` + `package_version` from `Package.package_meta[0]`, plus the canonical `module_hash`). Clients subscribe by `<network>@<table>` where `<table>` is the DatabaseChanges table emitted by `db_out`.
 
