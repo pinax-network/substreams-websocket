@@ -92,6 +92,11 @@ pub async fn serve_with_shutdown(
 ) -> Result<(), ServerError> {
     let config = Arc::new(config);
 
+    // Install the Prometheus recorder before any code path increments a
+    // counter, so all metrics land in the same registry that `/metrics`
+    // renders. Safe to call repeatedly — first call wins.
+    crate::metrics::init();
+
     // Pre-load every Substreams package in parallel so the welcome message can
     // expose each stream's module_hash. Failed loads land as empty `StreamMeta`
     // here and re-fail inside the per-stream task with a clear error to clients.
@@ -142,7 +147,10 @@ pub async fn serve_with_shutdown(
         // mark this replica unhealthy and stop routing new connections to it
         // before we send Close frames.
         draining.store(true, Ordering::SeqCst);
+        metrics::counter!("substreams_websocket_drain_initiated_total").increment(1);
+        metrics::gauge!("substreams_websocket_draining").set(1.0);
         clients.drain("server shutting down", drain_timeout).await;
+        metrics::gauge!("substreams_websocket_draining").set(0.0);
     };
 
     let result = serve_listener(listener, app, ws_path, health_path, shutdown_with_drain).await;
@@ -166,7 +174,8 @@ fn build_app(state: AppState) -> Router {
     let ws_root = state.config.websocket.ws_path.clone();
     let ws_wildcard = format!("{}/{{*streams}}", ws_root.trim_end_matches('/'));
     let stream_path = state.config.websocket.stream_path.clone();
-    Router::new()
+    let metrics_path = state.config.websocket.metrics_path.clone();
+    let mut router = Router::new()
         .route("/", get(landing_html))
         .route("/streams", get(streams_json))
         .route("/SKILL.md", get(skill_md))
@@ -176,9 +185,18 @@ fn build_app(state: AppState) -> Router {
         .route(&state.config.websocket.health_path, get(health))
         .route(&ws_root, get(websocket_no_streams))
         .route(&ws_wildcard, get(websocket_path))
-        .route(&stream_path, get(websocket_stream_query))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .route(&stream_path, get(websocket_stream_query));
+    if !metrics_path.is_empty() {
+        router = router.route(&metrics_path, get(metrics_endpoint));
+    }
+    router.layer(TraceLayer::new_for_http()).with_state(state)
+}
+
+async fn metrics_endpoint() -> impl IntoResponse {
+    (
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        crate::metrics::render(),
+    )
 }
 
 const LANDING_HTML: &str = include_str!("../public/index.html");
@@ -478,6 +496,21 @@ async fn run_substream(
                 // We made progress this attempt: reset backoff before the next retry.
                 backoff = RESTART_BACKOFF_MIN;
                 error!(stream = %identity.display(), "Substreams read stream ended unexpectedly; will retry");
+                metrics::counter!(
+                    "substreams_websocket_substreams_errors_total",
+                    "network" => identity.network.clone(),
+                    "package_name" => identity.package_name.clone(),
+                    "package_version" => identity.package_version.clone(),
+                    "kind" => "transient"
+                )
+                .increment(1);
+                metrics::counter!(
+                    "substreams_websocket_substreams_reconnects_total",
+                    "network" => identity.network.clone(),
+                    "package_name" => identity.package_name.clone(),
+                    "package_version" => identity.package_version.clone()
+                )
+                .increment(1);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
@@ -486,6 +519,21 @@ async fn run_substream(
                 clients
                     .broadcast_lifecycle(stream_status(&identity, "error", err))
                     .await;
+                metrics::counter!(
+                    "substreams_websocket_substreams_errors_total",
+                    "network" => identity.network.clone(),
+                    "package_name" => identity.package_name.clone(),
+                    "package_version" => identity.package_version.clone(),
+                    "kind" => "fatal"
+                )
+                .increment(1);
+                metrics::counter!(
+                    "substreams_websocket_substreams_reconnects_total",
+                    "network" => identity.network.clone(),
+                    "package_name" => identity.package_name.clone(),
+                    "package_version" => identity.package_version.clone()
+                )
+                .increment(1);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
@@ -556,10 +604,25 @@ async fn handle_substream_event(
                 network: identity.network.clone(),
                 module_hash: identity.module_hash.clone(),
             };
+            metrics::counter!(
+                "substreams_websocket_substreams_blocks_total",
+                "network" => identity.network.clone(),
+                "package_name" => identity.package_name.clone(),
+                "package_version" => identity.package_version.clone()
+            )
+            .increment(1);
             let decoded = match decode_database_changes(&payload, context) {
                 Ok(decoded) => decoded,
                 Err(error) => {
                     warn!(stream = %identity.display(), %error, "failed to decode Substreams block output");
+                    metrics::counter!(
+                        "substreams_websocket_substreams_errors_total",
+                        "network" => identity.network.clone(),
+                        "package_name" => identity.package_name.clone(),
+                        "package_version" => identity.package_version.clone(),
+                        "kind" => "decode"
+                    )
+                    .increment(1);
                     clients
                         .broadcast_lifecycle(stream_status(
                             identity,
@@ -584,6 +647,8 @@ async fn handle_substream_event(
 
                 // Persist the whole block (mixed tables) keyed by spkg
                 // provenance. Replay readers split per-table at scan time.
+                let block_text = block_value.to_string();
+                let block_bytes = block_text.len() as u64;
                 if let Err(error) = replay
                     .append(
                         &identity.network,
@@ -591,11 +656,35 @@ async fn handle_substream_event(
                         &identity.package_version,
                         &identity.module_hash,
                         decoded.timestamp_seconds,
-                        &block_value.to_string(),
+                        &block_text,
                     )
                     .await
                 {
                     warn!(stream = %identity.display(), %error, "failed to append replay log");
+                    metrics::counter!(
+                        "substreams_websocket_replay_appends_total",
+                        "network" => identity.network.clone(),
+                        "package_name" => identity.package_name.clone(),
+                        "package_version" => identity.package_version.clone(),
+                        "outcome" => "error"
+                    )
+                    .increment(1);
+                } else {
+                    metrics::counter!(
+                        "substreams_websocket_replay_appends_total",
+                        "network" => identity.network.clone(),
+                        "package_name" => identity.package_name.clone(),
+                        "package_version" => identity.package_version.clone(),
+                        "outcome" => "success"
+                    )
+                    .increment(1);
+                    metrics::counter!(
+                        "substreams_websocket_replay_append_bytes_total",
+                        "network" => identity.network.clone(),
+                        "package_name" => identity.package_name.clone(),
+                        "package_version" => identity.package_version.clone()
+                    )
+                    .increment(block_bytes);
                 }
 
                 // Group events by @table and broadcast one per-table payload
@@ -629,6 +718,23 @@ async fn handle_substream_event(
                 .await
             {
                 warn!(stream = %identity.display(), %error, "failed to persist Substreams cursor");
+                metrics::counter!(
+                    "substreams_websocket_cursor_saves_total",
+                    "network" => identity.network.clone(),
+                    "package_name" => identity.package_name.clone(),
+                    "package_version" => identity.package_version.clone(),
+                    "outcome" => "error"
+                )
+                .increment(1);
+            } else {
+                metrics::counter!(
+                    "substreams_websocket_cursor_saves_total",
+                    "network" => identity.network.clone(),
+                    "package_name" => identity.package_name.clone(),
+                    "package_version" => identity.package_version.clone(),
+                    "outcome" => "success"
+                )
+                .increment(1);
             }
         }
         StreamEvent::Fatal { message } => {
@@ -640,6 +746,13 @@ async fn handle_substream_event(
             last_valid_block,
             last_valid_cursor,
         } => {
+            metrics::counter!(
+                "substreams_websocket_substreams_undo_total",
+                "network" => identity.network.clone(),
+                "package_name" => identity.package_name.clone(),
+                "package_version" => identity.package_version.clone()
+            )
+            .increment(1);
             clients
                 .broadcast_lifecycle(serde_json::json!({
                     "type": "stream",
@@ -979,6 +1092,13 @@ async fn replay_for_client(
                 oldest_buffered_timestamp = oldest,
                 "replay gap"
             );
+            metrics::counter!(
+                "substreams_websocket_replay_reads_total",
+                "network" => network.to_owned(),
+                "table" => stream.to_owned(),
+                "outcome" => "gap"
+            )
+            .increment(1);
             continue;
         }
 
@@ -1021,6 +1141,27 @@ async fn replay_for_client(
                 client_id,
                 network, stream, from_timestamp, replayed, "replay delivered"
             );
+            metrics::counter!(
+                "substreams_websocket_replay_reads_total",
+                "network" => network.to_owned(),
+                "table" => stream.to_owned(),
+                "outcome" => "replayed"
+            )
+            .increment(1);
+            metrics::counter!(
+                "substreams_websocket_replay_blocks_delivered_total",
+                "network" => network.to_owned(),
+                "table" => stream.to_owned()
+            )
+            .increment(replayed as u64);
+        } else {
+            metrics::counter!(
+                "substreams_websocket_replay_reads_total",
+                "network" => network.to_owned(),
+                "table" => stream.to_owned(),
+                "outcome" => "empty"
+            )
+            .increment(1);
         }
     }
 
@@ -1102,6 +1243,7 @@ async fn handle_socket(
     let Some((client, filter_handle)) = state.clients.register(&state.config, filter.clone()).await
     else {
         warn!("rejecting WebSocket client because max client count was reached");
+        metrics::counter!("substreams_websocket_rejected_connections_total").increment(1);
         return;
     };
 
@@ -1112,6 +1254,8 @@ async fn handle_socket(
         wrap_envelope = filter.wrap_envelope,
         "WebSocket client connected"
     );
+    metrics::counter!("substreams_websocket_connections_total").increment(1);
+    metrics::gauge!("substreams_websocket_active_connections").increment(1);
 
     let (mut sender, mut receiver) = socket.split();
     let mut messages = client.rx;
@@ -1222,12 +1366,18 @@ async fn handle_socket(
     heartbeat.abort();
     drop(outbound);
     let _ = writer.await;
+    let duration = connected_at.elapsed();
+    let drops = total_drops.load(Ordering::Relaxed);
     info!(
         client_id,
-        duration_secs = connected_at.elapsed().as_secs(),
-        total_drops = total_drops.load(Ordering::Relaxed),
+        duration_secs = duration.as_secs(),
+        total_drops = drops,
         "WebSocket client disconnected"
     );
+    metrics::gauge!("substreams_websocket_active_connections").decrement(1);
+    metrics::counter!("substreams_websocket_disconnections_total").increment(1);
+    metrics::histogram!("substreams_websocket_connection_duration_seconds")
+        .record(duration.as_secs_f64());
 }
 
 /// A single `network@stream` selector. Either field may be `*` (`None`) for
@@ -1534,6 +1684,15 @@ impl ClientRegistry {
                 }
             }
         }
+        let status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        metrics::counter!(
+            "substreams_websocket_lifecycle_broadcasts_total",
+            "status" => status.to_owned()
+        )
+        .increment(1);
         self.close_slow(&slow_to_close).await;
         delivered
     }
@@ -1554,8 +1713,15 @@ impl ClientRegistry {
         let unfiltered_text = block.to_string();
         let unfiltered_wrapped = format!(r#"{{"stream":"{selector}","data":{unfiltered_text}}}"#);
         let limit = self.slow_client_drop_limit();
+        let event_count = block
+            .get("events")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0) as u64;
         let clients = self.clients.read().await;
         let mut delivered: usize = 0;
+        let mut dropped: u64 = 0;
+        let mut filter_skipped: u64 = 0;
         let mut slow_to_close: Vec<ClientId> = Vec::new();
 
         for (client_id, client) in clients.iter() {
@@ -1566,8 +1732,6 @@ impl ClientRegistry {
             let matching_filters = filter.event_filters.matching(network, stream);
             let text = if !matching_filters.is_empty() {
                 let mut block_copy = block.clone();
-                // Apply every matching filter in turn — event must satisfy
-                // all of them (filters AND together).
                 let mut remaining = 0usize;
                 for f in &matching_filters {
                     remaining = apply_filter_in_place(&mut block_copy, f);
@@ -1576,6 +1740,7 @@ impl ClientRegistry {
                     }
                 }
                 if remaining == 0 {
+                    filter_skipped += 1;
                     continue;
                 }
                 let filtered_text = block_copy.to_string();
@@ -1593,6 +1758,8 @@ impl ClientRegistry {
             let outcome = backpressured_send(*client_id, client, Message::Text(text.into()), limit);
             if outcome.delivered {
                 delivered += 1;
+            } else {
+                dropped += 1;
             }
             if outcome.must_close {
                 slow_to_close.push(*client_id);
@@ -1607,6 +1774,41 @@ impl ClientRegistry {
             "broadcast block"
         );
         drop(clients);
+
+        metrics::counter!(
+            "substreams_websocket_broadcast_blocks_total",
+            "network" => network.to_owned(),
+            "table" => stream.to_owned()
+        )
+        .increment(1);
+        metrics::counter!(
+            "substreams_websocket_broadcast_events_total",
+            "network" => network.to_owned(),
+            "table" => stream.to_owned()
+        )
+        .increment(event_count);
+        metrics::counter!(
+            "substreams_websocket_broadcast_delivered_total",
+            "network" => network.to_owned(),
+            "table" => stream.to_owned()
+        )
+        .increment(delivered as u64);
+        if dropped > 0 {
+            metrics::counter!(
+                "substreams_websocket_broadcast_dropped_total",
+                "network" => network.to_owned(),
+                "table" => stream.to_owned()
+            )
+            .increment(dropped);
+        }
+        if filter_skipped > 0 {
+            metrics::counter!(
+                "substreams_websocket_broadcast_filtered_skipped_total",
+                "network" => network.to_owned(),
+                "table" => stream.to_owned()
+            )
+            .increment(filter_skipped);
+        }
 
         self.close_slow(&slow_to_close).await;
         delivered
@@ -1639,6 +1841,7 @@ impl ClientRegistry {
                     "force-closing slow WebSocket client (backpressure limit reached)"
                 );
                 let _ = client.tx.try_send(close.clone());
+                metrics::counter!("substreams_websocket_force_closed_total").increment(1);
             }
         }
     }
@@ -1761,6 +1964,12 @@ async fn handle_subscription_command(
     };
 
     let id = cmd.id.unwrap_or(serde_json::Value::Null);
+
+    metrics::counter!(
+        "substreams_websocket_commands_total",
+        "method" => cmd.method.clone()
+    )
+    .increment(1);
 
     // Extract string params for selector-only methods. Returns error reply
     // when any param is not a string.
@@ -2284,6 +2493,54 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with("ok"));
+    }
+
+    #[tokio::test]
+    async fn metrics_route_renders_prometheus_payload() {
+        let server = TestServer::start(config()).await;
+
+        let mut stream = tokio::net::TcpStream::connect(server.addr)
+            .await
+            .expect("metrics tcp connection succeeds");
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("metrics request writes");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("metrics response reads");
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "expected 200, got: {response}"
+        );
+        assert!(
+            response.contains("text/plain"),
+            "missing prometheus content-type"
+        );
+        // metrics-exporter-prometheus only emits a counter / gauge that has
+        // actually been touched. Drive one and re-scrape to confirm it
+        // renders. (`describe!` alone seeds help text, not the metric line.)
+        metrics::counter!("substreams_websocket_test_canary_total").increment(1);
+        let mut stream2 = tokio::net::TcpStream::connect(server.addr)
+            .await
+            .expect("second metrics tcp connection");
+        stream2
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("metrics request writes");
+        let mut second = String::new();
+        stream2
+            .read_to_string(&mut second)
+            .await
+            .expect("metrics body reads");
+        assert!(
+            second.contains("substreams_websocket_test_canary_total"),
+            "scrape after counter touch must include the metric: {second}"
+        );
     }
 
     #[tokio::test]
@@ -3007,6 +3264,10 @@ mod tests {
 
     impl TestServer {
         async fn start(config: Config) -> Self {
+            // Tests share the global metrics recorder via OnceLock — first
+            // call installs it, subsequent calls are no-ops. The /metrics
+            // route is wired through build_app even when this is called.
+            crate::metrics::init();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("test listener binds");
@@ -3121,6 +3382,7 @@ mod tests {
                 listen: "127.0.0.1:0".parse().expect("listen address"),
                 ws_path: "/ws".to_owned(),
                 stream_path: "/stream".to_owned(),
+                metrics_path: "/metrics".to_owned(),
                 health_path: "/healthz".to_owned(),
                 heartbeat_interval: Duration::from_secs(180),
                 heartbeat_timeout: Duration::from_secs(600),

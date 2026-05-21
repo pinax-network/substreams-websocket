@@ -2,6 +2,7 @@ pub mod config;
 pub mod cursor;
 pub mod decoder;
 pub mod event_filter;
+pub mod metrics;
 pub mod module_hash;
 pub mod replay;
 pub mod server;

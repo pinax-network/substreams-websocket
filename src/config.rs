@@ -62,6 +62,9 @@ pub struct WebSocketConfig {
     /// `{"stream":"...","data":...}`.
     pub stream_path: String,
     pub health_path: String,
+    /// HTTP path that serves Prometheus metrics. Default `/metrics`. Set to
+    /// empty to disable the endpoint.
+    pub metrics_path: String,
     pub heartbeat_interval: Duration,
     pub heartbeat_timeout: Duration,
     pub connection_ttl: Option<Duration>,
@@ -232,6 +235,7 @@ mod tests {
             listen: "127.0.0.1:0".parse().expect("listen"),
             ws_path: "/ws".to_owned(),
             stream_path: "/stream".to_owned(),
+            metrics_path: "/metrics".to_owned(),
             health_path: "/healthz".to_owned(),
             heartbeat_interval: Duration::from_secs(60),
             heartbeat_timeout: Duration::from_secs(180),
