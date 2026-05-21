@@ -42,9 +42,217 @@
     overflow: hidden;
   }
   @media (max-width: 760px) {
-    body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-    nav.side { display: none; }
+    body {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto 1fr;
+      overflow: visible;
+    }
+    html, body { height: auto; min-height: 100%; }
+
+    /* --- mobile top bar replaces the sidebar --- */
+    nav.side {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      max-height: none;
+      padding: 0;
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+      overflow: visible;
+      background: color-mix(in srgb, var(--sidebar-bg) 92%, transparent);
+      backdrop-filter: saturate(160%) blur(12px);
+      -webkit-backdrop-filter: saturate(160%) blur(12px);
+    }
+    nav.side .nav-top {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 10px 4px 14px;
+      min-height: 40px;
+    }
+    nav.side .brand { margin: 0; padding: 0; flex: 1; min-width: 0; gap: 6px; border-radius: 0; }
+    nav.side .brand:hover { background: transparent; }
+    nav.side .brand svg { width: 18px; height: 18px; }
+    nav.side .brand .title { font-size: 14px; }
+    nav.side .nav-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--fg);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    nav.side .nav-toggle svg { width: 18px; height: 18px; }
+    nav.side .nav-toggle:hover { background: var(--border); }
+    nav.side .nav-toggle-close { display: none; }
+    nav.side.open .nav-toggle-open { display: none; }
+    nav.side.open .nav-toggle-close { display: block; }
+
+    /* Drawer body: hidden by default, slides down when nav.side is .open */
+    nav.side .nav-body {
+      display: none;
+      padding: 8px 12px 20px;
+      border-top: 1px solid var(--border);
+      max-height: calc(100vh - 44px);
+      max-height: calc(100dvh - 44px);
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    nav.side.open .nav-body { display: block; }
+    nav.side .group { margin-bottom: 12px; }
+    nav.side .group-title { margin-top: 8px; }
+    nav.side .footer { margin-top: 12px; }
+
+    /* Scrim under the open drawer to hint it's modal-ish */
+    .nav-scrim {
+      display: block;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 30;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 160ms ease-out;
+    }
+    body.nav-open .nav-scrim {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    body.nav-open { overflow: hidden; }
+
+    /* --- main column on mobile --- */
+    main {
+      padding: 22px 18px 120px;
+      overflow: visible;
+      min-width: 0;
+    }
+    main > section,
+    main > .page-wrap { min-width: 0; }
+    main h2 { font-size: 19px; margin: 28px 0 8px; }
+    main h3 { font-size: 15px; }
+    main p, main li { font-size: 14px; line-height: 1.55; }
+    main pre { font-size: 11.5px; padding: 12px 13px; }
+
+    .hero h2 { font-size: 26px; line-height: 1.15; }
+    .hero p.tagline { font-size: 15px; margin: 8px 0 22px; }
+
+    /* Feature cards: stack instead of forcing two narrow columns. */
+    .features { grid-template-columns: 1fr; gap: 10px; }
+
+    /* Long URL/code tables would overflow — let them scroll on the X. */
+    table {
+      display: block;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      white-space: nowrap;
+    }
+    th, td { white-space: normal; }
+
+    /* Streams list: tighter padding so pills fit. */
+    .streams-list .network-header { padding: 10px 14px; }
+    .streams-list .pkg-header,
+    .streams-list .pkg-tables,
+    .streams-list .pkg-discovery { padding-left: 14px; padding-right: 14px; }
+    .streams-list .table-pill { font-size: 11.5px; padding: 4px 10px; }
+
+    /* --- Try it FAB & modal --- */
+    .tryit-fab {
+      right: 14px;
+      bottom: 14px;
+      padding: 10px 16px;
+      font-size: 13px;
+    }
+    .tryit-fab svg { width: 14px; height: 14px; }
+
+    .tryit-modal { padding: 0; }
+    .tryit {
+      border-radius: 0;
+      border: 0;
+      max-width: 100%;
+      width: 100%;
+      max-height: 100vh;
+      max-height: 100dvh;
+      height: 100vh;
+      height: 100dvh;
+    }
+    .tryit header {
+      padding: 12px 14px;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .tryit header h2 { font-size: 15px; margin: 0 0 10px; }
+    .tryit-close { font-size: 24px; padding: 0 6px; }
+
+    /* Stack form rows: every control gets its own line, buttons share. */
+    .tryit .row { flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+    .tryit .row > * { min-width: 0; }
+    .tryit select#stream-select,
+    .tryit input#url,
+    .tryit input#cmd {
+      flex: 1 1 100%;
+      width: 100%;
+      min-width: 0;
+    }
+    .tryit select { min-width: 0; }
+    .tryit .row button {
+      flex: 1 1 0;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    .tryit #status {
+      flex: 1 1 100%;
+      text-align: center;
+      align-self: stretch;
+      padding: 5px 10px;
+    }
+    .tryit button#send { flex: 0 0 auto; min-width: 84px; }
+
+    /* Template + filter rows: tighter, fully wrapping. */
+    .tryit .tpl-row { gap: 5px; margin-top: 6px; }
+    .tryit .tpl-row button { padding: 5px 9px; font-size: 12px; }
+    .tryit-filter {
+      margin-left: 0;
+      display: flex;
+      flex: 1 1 100%;
+      width: 100%;
+    }
+    .tryit-filter button { flex: 1 1 0; padding: 6px 8px; }
+
+    #filter-presets > span { flex: 1 1 100%; }
+    #filter-presets select { flex: 1 1 100%; min-width: 0; }
+
+    .tryit #log {
+      padding: 12px 14px;
+      font-size: 11.5px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .msg { padding: 8px 8px; }
+    .msg .meta { gap: 8px; font-size: 10.5px; }
+    .msg .meta .summary { font-size: 11.5px; }
+    .msg pre { font-size: 11px; padding: 7px 9px; }
   }
+
+  @media (max-width: 420px) {
+    main { padding: 18px 14px 110px; }
+    .hero h2 { font-size: 22px; }
+    .hero p.tagline { font-size: 14px; }
+    main h2 { font-size: 18px; }
+    .tryit .row button { font-size: 12px; padding: 7px 8px; }
+    .tryit-fab { padding: 9px 14px; font-size: 12px; }
+  }
+
+  /* Desktop defaults — `display: contents` makes .nav-top a no-op so the
+     existing brand + groups layout is byte-identical above 760px. */
+  nav.side .nav-top { display: contents; }
+  nav.side .nav-toggle { display: none; }
+  .nav-scrim { display: none; }
 
   /* --- sidebar --- */
   nav.side {
@@ -142,7 +350,7 @@
   .hero p.tagline { font-size: 16px; color: var(--muted); max-width: 640px; line-height: 1.55; margin: 10px 0 28px; }
   .features {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     gap: 14px;
     margin: 0 0 20px;
   }
@@ -590,7 +798,8 @@
 
 <body>
 
-<nav class="side">
+<nav class="side" id="side-nav">
+  <div class="nav-top">
   <a class="brand" href="/" aria-label="Streams">
     <svg width="28" height="28" viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <path d="M15.9994 15.9904L12.7002 13.0069V12.694L15.9994 9.74072L19.2984 12.6941L19.2985 13.0071L15.9994 15.9904Z" />
@@ -605,7 +814,13 @@
     </svg>
     <span class="title">Streams</span>
   </a>
+  <button class="nav-toggle" id="nav-toggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="side-nav">
+    <svg class="nav-toggle-open" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
+    <svg class="nav-toggle-close" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
+  </button>
+  </div>
 
+  <div class="nav-body">
   <div class="group">
     <div class="group-title">Overview</div>
     <a href="#intro">Introduction</a>
@@ -655,7 +870,9 @@
     <a href="/llms.txt">llms.txt</a> ·
     <a href="https://github.com/pinax-network/substreams-websocket">GitHub</a>
   </div>
+  </div>
 </nav>
+<div class="nav-scrim" id="nav-scrim" aria-hidden="true"></div>
 
 <main>
   <section id="intro" class="hero">
@@ -1869,6 +2086,36 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
   });
 
   syncActive();
+
+  // --- mobile nav drawer ---
+  var navEl = document.getElementById('side-nav');
+  var navToggle = document.getElementById('nav-toggle');
+  var navScrim = document.getElementById('nav-scrim');
+  function setNavOpen(open) {
+    if (!navEl) return;
+    navEl.classList.toggle('open', open);
+    document.body.classList.toggle('nav-open', open);
+    navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    navToggle.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+  }
+  if (navToggle) {
+    navToggle.addEventListener('click', function () {
+      setNavOpen(!navEl.classList.contains('open'));
+    });
+  }
+  if (navScrim) {
+    navScrim.addEventListener('click', function () { setNavOpen(false); });
+  }
+  // Close the drawer after tapping any section link.
+  if (navEl) {
+    Array.prototype.forEach.call(navEl.querySelectorAll('a[href^="#"]'), function (a) {
+      a.addEventListener('click', function () { setNavOpen(false); });
+    });
+  }
+  // Close on Escape.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && navEl && navEl.classList.contains('open')) setNavOpen(false);
+  });
 })();
 </script>
 </body>
