@@ -33,6 +33,7 @@ sha1 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "0.9"
+serde_yaml = "0.9"
 tonic = { version = "0.14", features = ["tls-native-roots", "tls-webpki-roots", "gzip", "zstd"] }
 tonic-prost = "0.14"
 tower-http = { version = "0.6", features = ["trace"] }
