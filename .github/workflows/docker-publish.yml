@@ -37,7 +37,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value={{sha}}-{{date 'X'}}
+            type=raw,value={{sha}}-{{date 'X'}},enable={{is_default_branch}}
       - uses: docker/build-push-action@v5
         with:
           context: .
