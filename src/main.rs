@@ -464,6 +464,8 @@ struct FileStreamConfig {
     api_key: Option<String>,
     api_key_header: Option<String>,
     auth_url: Option<String>,
+    production_mode: Option<bool>,
+    final_blocks_only: Option<bool>,
 }
 
 impl FileStreamConfig {
@@ -481,8 +483,8 @@ impl FileStreamConfig {
                 params: self.params,
                 plaintext: defaults.plaintext,
                 insecure: defaults.insecure,
-                production_mode: defaults.production_mode,
-                final_blocks_only: defaults.final_blocks_only,
+                production_mode: self.production_mode.unwrap_or(defaults.production_mode),
+                final_blocks_only: self.final_blocks_only.unwrap_or(defaults.final_blocks_only),
                 token: self.token.or_else(|| defaults.token.clone()),
                 api_key: self.api_key.or_else(|| defaults.api_key.clone()),
                 api_key_header: self
