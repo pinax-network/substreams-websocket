@@ -385,6 +385,16 @@ struct StreamIdentity {
     package_name: String,
     package_version: String,
     module_hash: String,
+    /// Manifest path (local file or HTTPS URL). Surfaced as the `spkg`
+    /// label on per-stream gauges.
+    manifest: String,
+    /// gRPC endpoint we read from. Surfaced as the `endpoint` label on
+    /// per-stream gauges.
+    endpoint: String,
+    /// Operator-declared table names this stream emits. Used to label
+    /// per-stream gauges even when a given block contains no rows for a
+    /// table. Falls back to tables observed in a block when empty.
+    tables: Vec<String>,
 }
 
 impl StreamIdentity {
@@ -413,6 +423,9 @@ async fn run_substream(
         package_name: meta.package_name.clone(),
         package_version: meta.package_version.clone(),
         module_hash: meta.module_hash.clone(),
+        manifest: meta.manifest.clone(),
+        endpoint: config.substreams.endpoint.clone().unwrap_or_default(),
+        tables: meta.tables.clone(),
     };
 
     if let Some(error) = error {
@@ -634,6 +647,8 @@ async fn handle_substream_event(
                 }
             };
 
+            update_head_block_gauges(identity, &decoded);
+
             if !decoded.events.is_empty() {
                 let block_num = decoded.block_num;
                 let total_events = decoded.events.len();
@@ -794,6 +809,55 @@ async fn handle_substream_event(
         | StreamEvent::SnapshotData { .. }
         | StreamEvent::SnapshotComplete
         | StreamEvent::Unknown => {}
+    }
+}
+
+/// Update per-stream head-block gauges. One block applies to every table
+/// emitted by the same spkg, so we update gauges for each operator-declared
+/// table (or, when none are declared, the set of tables that appear in this
+/// block's events). Drift is `max(0, now - block_timestamp)` seconds.
+fn update_head_block_gauges(
+    identity: &StreamIdentity,
+    decoded: &crate::DatabaseChangesBlockMessage,
+) {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let drift = (now_secs - decoded.timestamp_seconds).max(0) as f64;
+    let block_num = decoded.block_num as f64;
+
+    let mut tables: Vec<String> = identity.tables.clone();
+    if tables.is_empty() {
+        for ev in &decoded.events {
+            if let Some(t) = ev.get("@table").and_then(serde_json::Value::as_str)
+                && !tables.iter().any(|s| s == t)
+            {
+                tables.push(t.to_owned());
+            }
+        }
+    }
+
+    for table in &tables {
+        let stream_label = format!("{}@{}", identity.network, table);
+        metrics::gauge!(
+            "substreams_websocket_head_block_number",
+            "stream" => stream_label.clone(),
+            "network" => identity.network.clone(),
+            "table" => table.clone(),
+            "spkg" => identity.manifest.clone(),
+            "endpoint" => identity.endpoint.clone(),
+        )
+        .set(block_num);
+        metrics::gauge!(
+            "substreams_websocket_head_block_time_drift",
+            "stream" => stream_label,
+            "network" => identity.network.clone(),
+            "table" => table.clone(),
+            "spkg" => identity.manifest.clone(),
+            "endpoint" => identity.endpoint.clone(),
+        )
+        .set(drift);
     }
 }
 
@@ -3105,6 +3169,9 @@ mod tests {
             package_name: "svm_swaps".to_owned(),
             package_version: "v0.1.0".to_owned(),
             module_hash: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned(),
+            manifest: "./svm-swaps.spkg".to_owned(),
+            endpoint: "https://test.endpoint:443".to_owned(),
+            tables: vec!["swaps".to_owned()],
         }
     }
 
@@ -3400,5 +3467,163 @@ mod tests {
                 dir: std::path::PathBuf::from("/tmp/replay-test"),
             },
         }
+    }
+
+    /// Find a `<metric>{...labels...} <value>` line in a Prometheus scrape
+    /// body that contains the given metric name and all of the given
+    /// `label="value"` substrings, and parse out its trailing float value.
+    /// Returns `None` if no matching line exists.
+    fn find_metric_value(rendered: &str, metric: &str, label_matchers: &[&str]) -> Option<f64> {
+        rendered.lines().find_map(|line| {
+            if !line.starts_with(metric) {
+                return None;
+            }
+            if !label_matchers.iter().all(|m| line.contains(m)) {
+                return None;
+            }
+            line.rsplit_once(' ')
+                .and_then(|(_, v)| v.parse::<f64>().ok())
+        })
+    }
+
+    #[test]
+    fn update_head_block_gauges_emits_all_five_labels_per_declared_table() {
+        // Use process-unique label values so this test's gauge series can't
+        // collide with the other gauge tests (the metrics registry is a
+        // process-wide singleton).
+        crate::metrics::init();
+
+        let identity = super::StreamIdentity {
+            network: "gauge-test-net-decl".to_owned(),
+            package_name: "pkg".to_owned(),
+            package_version: "v1".to_owned(),
+            module_hash: "h".to_owned(),
+            manifest: "./gauge-test-decl.spkg".to_owned(),
+            endpoint: "https://gauge-test-decl:443".to_owned(),
+            tables: vec!["swaps".to_owned(), "transfers".to_owned()],
+        };
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is past UNIX epoch")
+            .as_secs() as i64;
+        let block_ts = now_secs - 30;
+
+        let decoded = crate::DatabaseChangesBlockMessage {
+            network: identity.network.clone(),
+            block_num: 12345,
+            block_hash: "0xabc".to_owned(),
+            timestamp: "2026-05-13 17:30:00".to_owned(),
+            timestamp_seconds: block_ts,
+            module_hash: identity.module_hash.clone(),
+            // Empty events: declared tables must still receive gauge updates
+            // because head_block_number is a property of the source spkg, not
+            // of any individual row.
+            events: vec![],
+        };
+
+        super::update_head_block_gauges(&identity, &decoded);
+
+        let rendered = crate::metrics::render();
+
+        for table in ["swaps", "transfers"] {
+            let stream = format!("gauge-test-net-decl@{table}");
+            let matchers = [
+                "stream=\"".to_owned() + &stream + "\"",
+                "network=\"gauge-test-net-decl\"".to_owned(),
+                "table=\"".to_owned() + table + "\"",
+                "spkg=\"./gauge-test-decl.spkg\"".to_owned(),
+                "endpoint=\"https://gauge-test-decl:443\"".to_owned(),
+            ];
+            let matchers_ref: Vec<&str> = matchers.iter().map(String::as_str).collect();
+
+            let block_num = find_metric_value(
+                &rendered,
+                "substreams_websocket_head_block_number",
+                &matchers_ref,
+            )
+            .unwrap_or_else(|| {
+                panic!("head_block_number gauge missing for {stream} in:\n{rendered}")
+            });
+            assert_eq!(block_num, 12345.0, "head_block_number for {stream}");
+
+            let drift = find_metric_value(
+                &rendered,
+                "substreams_websocket_head_block_time_drift",
+                &matchers_ref,
+            )
+            .unwrap_or_else(|| {
+                panic!("head_block_time_drift gauge missing for {stream} in:\n{rendered}")
+            });
+            assert!(
+                (30.0..120.0).contains(&drift),
+                "drift {drift} for {stream} should be ~30s (block_ts was now-30); rendered:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_head_block_gauges_falls_back_to_observed_tables_when_undeclared() {
+        crate::metrics::init();
+
+        // Empty `tables`: gauges must fall back to whatever @table values
+        // appear in the block's events.
+        let identity = super::StreamIdentity {
+            network: "gauge-test-net-obs".to_owned(),
+            package_name: "pkg".to_owned(),
+            package_version: "v1".to_owned(),
+            module_hash: "h".to_owned(),
+            manifest: "./gauge-test-obs.spkg".to_owned(),
+            endpoint: "https://gauge-test-obs:443".to_owned(),
+            tables: Vec::new(),
+        };
+
+        let mk_event = |table: &str| {
+            let mut m = serde_json::Map::new();
+            m.insert("@table".to_owned(), serde_json::Value::String(table.into()));
+            m
+        };
+        let decoded = crate::DatabaseChangesBlockMessage {
+            network: identity.network.clone(),
+            block_num: 999,
+            block_hash: "0xdef".to_owned(),
+            timestamp: "2026-05-13 17:30:00".to_owned(),
+            timestamp_seconds: 1_700_000_000,
+            module_hash: identity.module_hash.clone(),
+            events: vec![mk_event("swaps"), mk_event("pools"), mk_event("swaps")],
+        };
+
+        super::update_head_block_gauges(&identity, &decoded);
+
+        let rendered = crate::metrics::render();
+
+        for table in ["swaps", "pools"] {
+            let stream = format!("gauge-test-net-obs@{table}");
+            let stream_match = format!("stream=\"{stream}\"");
+            let table_match = format!("table=\"{table}\"");
+            let matchers = [
+                stream_match.as_str(),
+                "network=\"gauge-test-net-obs\"",
+                table_match.as_str(),
+                "spkg=\"./gauge-test-obs.spkg\"",
+                "endpoint=\"https://gauge-test-obs:443\"",
+            ];
+
+            let block_num = find_metric_value(
+                &rendered,
+                "substreams_websocket_head_block_number",
+                &matchers,
+            )
+            .unwrap_or_else(|| {
+                panic!("head_block_number gauge missing for {stream} in:\n{rendered}")
+            });
+            assert_eq!(block_num, 999.0);
+        }
+
+        // A table NOT observed in events and NOT declared must not emit.
+        assert!(
+            !rendered.contains("stream=\"gauge-test-net-obs@unrelated\""),
+            "unexpected gauge for table that never appeared in events"
+        );
     }
 }

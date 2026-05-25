@@ -40,6 +40,8 @@ All metrics are namespaced `substreams_websocket_*`. Naming follows Prometheus c
 | `substreams_websocket_substreams_errors_total` | counter | `network`, `package_name`, `package_version`, `kind` | `kind`: `transient` (stream ended after progress), `fatal` (errored), `decode` (DatabaseChanges parse failed). |
 | `substreams_websocket_substreams_reconnects_total` | counter | `network`, `package_name`, `package_version` | Retry-loop reconnect attempts. |
 | `substreams_websocket_substreams_undo_total` | counter | `network`, `package_name`, `package_version` | `BlockUndoSignal` events. |
+| `substreams_websocket_head_block_number` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Latest block number observed per stream. `stream` is the Binance-style `<network>@<table>` selector. Updated on every successful decode for each operator-declared table (falls back to tables seen in the block when none are declared). |
+| `substreams_websocket_head_block_time_drift` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Lag (`now - block_timestamp`) in seconds for the latest block, same labels as `head_block_number`. Useful for alerting on stalled or backfilling streams. |
 
 ## Replay log
 
@@ -64,6 +66,7 @@ Label sets are kept small on purpose:
 - `network`, `table`, `package_name`, `package_version` are surfaced where they make sense.
 - `module_hash` is **not** a label — high-churn (changes on every spkg upgrade), low operational value once `package_version` is present.
 - `client_id` is **not** a label — would blow up on a busy server.
+- The head-block gauges carry `spkg` (manifest path) and `endpoint` so operators can group by upstream source. These stay bounded by the number of configured streams.
 
 Outcome-style labels (`success`, `error`, `gap`, `transient`, ...) stay finite per metric.
 
@@ -100,4 +103,10 @@ rate(substreams_websocket_replay_reads_total{outcome="gap"}[5m])
 
 # p99 connection lifetime
 histogram_quantile(0.99, sum by (le) (rate(substreams_websocket_connection_duration_seconds_bucket[10m])))
+
+# Streams falling behind real time (alert on > 60s drift sustained)
+max by (stream) (substreams_websocket_head_block_time_drift)
+
+# Per-stream head block — useful to spot stalled streams
+max by (stream) (substreams_websocket_head_block_number)
 ```

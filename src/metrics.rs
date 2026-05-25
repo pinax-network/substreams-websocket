@@ -138,6 +138,17 @@ fn describe() {
         "substreams_websocket_substreams_reconnects_total",
         "Substreams gRPC reconnect attempts after an error."
     );
+    describe_gauge!(
+        "substreams_websocket_head_block_number",
+        "Latest block number observed per stream. Labelled by \
+         stream/network/table/spkg/endpoint."
+    );
+    describe_gauge!(
+        "substreams_websocket_head_block_time_drift",
+        Unit::Seconds,
+        "Lag (now - block_timestamp) in seconds for the latest block per \
+         stream. Labelled by stream/network/table/spkg/endpoint."
+    );
 
     // ---- Replay log -------------------------------------------------------
     describe_counter!(
