@@ -27,28 +27,28 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    /// Path to the streams config file (TOML or YAML). The file contains
+    /// Path to the streams config file (YAML or TOML). The file contains
     /// only the `streams:` / `[[streams]]` array — single-value settings
     /// come from env/flags. Format is detected from the extension
-    /// (`.toml` | `.yaml` | `.yml`).
+    /// (`.yaml` | `.yml` | `.toml`).
     #[arg(
         short,
         long,
         env = "SUBSTREAMS_WEBSOCKET_STREAMS",
-        default_value = "./streams.toml"
+        default_value = "./streams.yaml"
     )]
     streams: PathBuf,
 
-    /// Inline streams TOML content. Wins over `--streams` when set.
+    /// Inline streams YAML content. Wins over `--streams` when set.
     /// Useful for env-only PaaS deploys (Railway, Fly, Heroku).
-    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAMS_TOML")]
-    streams_toml: Option<String>,
-
-    /// Inline streams YAML content. Wins over `--streams` when set. Same
-    /// shape as the TOML form, just in YAML. If both `STREAMS_TOML` and
-    /// `STREAMS_YAML` are set, TOML takes precedence.
     #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAMS_YAML")]
     streams_yaml: Option<String>,
+
+    /// Inline streams TOML content. Wins over `--streams` when set. Same
+    /// shape as the YAML form, just in TOML. If both `STREAMS_YAML` and
+    /// `STREAMS_TOML` are set, YAML takes precedence.
+    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_STREAMS_TOML")]
+    streams_toml: Option<String>,
 
     #[command(flatten)]
     websocket: WebSocketArgs,
@@ -343,8 +343,8 @@ impl StreamsFormat {
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            Some("yaml") | Some("yml") => Self::Yaml,
-            _ => Self::Toml,
+            Some("toml") => Self::Toml,
+            _ => Self::Yaml,
         }
     }
 
@@ -358,40 +358,40 @@ impl StreamsFormat {
 
 impl ServeArgs {
     async fn load_config(self) -> anyhow::Result<Config> {
-        // Inline content wins over the file path. TOML is checked first for
-        // backwards compatibility, then YAML. Both are trimmed first so an
+        // Inline content wins over the file path. YAML is checked first
+        // (preferred format), then TOML. Both are trimmed first so an
         // empty env var is treated as unset (lets operators keep both vars
         // declared without one tripping the other on PaaS).
-        let inline_toml = self
-            .streams_toml
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
         let inline_yaml = self
             .streams_yaml
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let inline_toml = self
+            .streams_toml
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
-        let (contents, source_label, format) = if let Some(inline) = inline_toml {
-            (
-                inline.to_owned(),
-                "SUBSTREAMS_WEBSOCKET_STREAMS_TOML".to_owned(),
-                StreamsFormat::Toml,
-            )
-        } else if let Some(inline) = inline_yaml {
+        let (contents, source_label, format) = if let Some(inline) = inline_yaml {
             (
                 inline.to_owned(),
                 "SUBSTREAMS_WEBSOCKET_STREAMS_YAML".to_owned(),
                 StreamsFormat::Yaml,
+            )
+        } else if let Some(inline) = inline_toml {
+            (
+                inline.to_owned(),
+                "SUBSTREAMS_WEBSOCKET_STREAMS_TOML".to_owned(),
+                StreamsFormat::Toml,
             )
         } else {
             let path = self.streams.clone();
             let format = StreamsFormat::from_path(&path);
             let contents = tokio::fs::read_to_string(&path).await.with_context(|| {
                 format!(
-                    "failed to read streams from {}. Set SUBSTREAMS_WEBSOCKET_STREAMS_TOML \
-                     or SUBSTREAMS_WEBSOCKET_STREAMS_YAML to inject the stream list directly \
+                    "failed to read streams from {}. Set SUBSTREAMS_WEBSOCKET_STREAMS_YAML \
+                     or SUBSTREAMS_WEBSOCKET_STREAMS_TOML to inject the stream list directly \
                      via env, or point SUBSTREAMS_WEBSOCKET_STREAMS at a readable file",
                     path.display()
                 )
@@ -603,10 +603,10 @@ streams:
             StreamsFormat::from_path(Path::new("./streams.toml")),
             StreamsFormat::Toml
         ));
-        // Unknown / missing extension falls back to TOML.
+        // Unknown / missing extension falls back to YAML.
         assert!(matches!(
             StreamsFormat::from_path(Path::new("./streams")),
-            StreamsFormat::Toml
+            StreamsFormat::Yaml
         ));
     }
 }

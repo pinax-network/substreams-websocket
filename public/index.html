@@ -2014,7 +2014,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
   // Render one network group per `network`, listing every `(network, table)`
   // channel underneath. Each table row carries the spkg `name v0.X.Y` that
   // backs it (multiple spkgs feeding the same channel are joined with `,`).
-  // Tables not declared in streams.toml render as a discovery placeholder.
+  // Tables not declared in streams.yaml render as a discovery placeholder.
   (function loadStreams() {
     var host = document.getElementById('streams-list');
     if (!host) return;

@@ -36,7 +36,7 @@ cargo install --git https://github.com/pinax-network/substreams-websocket --bin 
 
 ```bash
 cp .env.example .env             # set SUBSTREAMS_API_KEY=<pinax key>
-cp streams.example.toml streams.toml
+cp streams.example.yaml streams.yaml
 ./substreams-websocket serve
 curl http://127.0.0.1:8080/healthz                  # -> ok
 npx wscat -c 'ws://127.0.0.1:8080/ws/*@*'
@@ -65,7 +65,7 @@ Details: [`docs/substreams.md`](docs/substreams.md), [`docs/cursors-and-resume.m
 
 ## Configuration
 
-Secrets + single-value runtime settings in `.env`. Streams list in `streams.toml`.
+Secrets + single-value runtime settings in `.env`. Streams list in `streams.yaml`.
 
 ### `.env`
 
@@ -78,9 +78,9 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.toml
 | Runtime | `SUBSTREAMS_PRODUCTION_MODE` | `false` | Skip dev outputs. |
 | Runtime | `SUBSTREAMS_FINAL_BLOCKS_ONLY` | `false` | Skip un-finalized blocks. |
 | Runtime | `SUBSTREAMS_PLAINTEXT` / `SUBSTREAMS_INSECURE` | `false` | TLS toggles. |
-| Server | `SUBSTREAMS_WEBSOCKET_STREAMS` | `./streams.toml` | Path to streams config. Format detected from extension (`.toml` \| `.yaml` \| `.yml`). |
-| Server | `SUBSTREAMS_WEBSOCKET_STREAMS_TOML` | _(unset)_ | Inline TOML. Wins over file path. |
-| Server | `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` | _(unset)_ | Inline YAML. Same shape as the TOML form. TOML wins if both set. |
+| Server | `SUBSTREAMS_WEBSOCKET_STREAMS` | `./streams.yaml` | Path to streams config. Format detected from extension (`.yaml` \| `.yml` \| `.toml`). |
+| Server | `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` | _(unset)_ | Inline YAML. Wins over file path. |
+| Server | `SUBSTREAMS_WEBSOCKET_STREAMS_TOML` | _(unset)_ | Inline TOML. Same shape as the YAML form. YAML wins if both set. |
 | Server | `SUBSTREAMS_WEBSOCKET_LISTEN` | `127.0.0.1:8080` | HTTP/WS listen address. |
 | Server | `SUBSTREAMS_WEBSOCKET_WS_PATH` | `/ws` | WebSocket route. |
 | Server | `SUBSTREAMS_WEBSOCKET_STREAM_PATH` | `/stream` | Query-mode route. |
@@ -102,25 +102,24 @@ Every variable has a matching CLI flag. `substreams-websocket serve --help` for 
 
 Auth modes (api-key→JWT, raw bearer, header passthrough): [`docs/auth.md`](docs/auth.md).
 
-### `streams.toml` or `streams.yaml`
+### `streams.yaml` (or `streams.toml`)
 
-Either format works. The server detects from the file extension (`.toml`, `.yaml`, `.yml`) or from the env var name (`STREAMS_TOML` vs `STREAMS_YAML`). Examples below are TOML; see [`streams.example.yaml`](streams.example.yaml) for the YAML equivalent.
+YAML is the default. TOML is also accepted — same shape. The server detects from the file extension (`.yaml`, `.yml`, `.toml`) or from the env var name (`STREAMS_YAML` vs `STREAMS_TOML`). See [`streams.example.yaml`](streams.example.yaml).
 
-#### `streams.toml`
+#### `streams.yaml`
 
 Array of Substreams sources. No global block, no secrets, **no operator-supplied name** — stream identity is derived from the loaded `.spkg` (`package_name` + `package_version` from `Package.package_meta[0]`, plus the canonical `module_hash`). Clients subscribe by `<network>@<table>` where `<table>` is the DatabaseChanges table emitted by `db_out`.
 
-```toml
-[[streams]]
-network = "solana-mainnet"
-endpoint = "https://solana.substreams.pinax.network:443"
-manifest = "https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg"
-# module defaults to "db_out"
+```yaml
+streams:
+  - network: solana-mainnet
+    endpoint: https://solana.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg
+    # module defaults to "db_out"
 
-[[streams]]
-network = "ethereum-mainnet"
-endpoint = "https://eth.substreams.pinax.network:443"
-manifest = "https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg"
+  - network: ethereum-mainnet
+    endpoint: https://eth.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg
 ```
 
 | Field | Required | Default | Notes |
@@ -166,7 +165,7 @@ substreams-websocket stream    # one-shot read for debugging
 
 ```bash
 substreams-websocket serve \
-  --streams ./streams.toml \
+  --streams ./streams.yaml \
   --listen 0.0.0.0:8080 \
   --cursors-dir /var/lib/substreams-websocket/cursors
 
@@ -188,14 +187,14 @@ docker pull ghcr.io/pinax-network/substreams-websocket:latest
 docker run --rm -p 8080:8080 \
   -e SUBSTREAMS_API_KEY="$YOUR_KEY" \
   -e SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080 \
-  -e SUBSTREAMS_WEBSOCKET_STREAMS_TOML="$(cat streams.toml)" \
+  -e SUBSTREAMS_WEBSOCKET_STREAMS_YAML="$(cat streams.yaml)" \
   -v $(pwd)/cursors:/app/cursors \
   ghcr.io/pinax-network/substreams-websocket:latest serve
 ```
 
 Tags per release: `{version}`, `{major}.{minor}`, `{major}`, `latest`.
 
-Railway / Fly / Heroku recipe (inline TOML, volume mount): [`docs/railway.md`](docs/railway.md).
+Railway / Fly / Heroku recipe (inline YAML, volume mount): [`docs/railway.md`](docs/railway.md).
 
 ---
 

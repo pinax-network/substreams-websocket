@@ -66,10 +66,10 @@ Rejected: per-token allowlists, JWT verification, IP allowlists in-process.
 
 Why: this server is a fan-out, not a security boundary. Auth belongs in front (Cloudflare Access, nginx auth_request, Tailscale). Bolting auth in here would either duplicate the upstream's model badly or constrain operators who already have a reverse proxy.
 
-## Single binary + inline TOML for PaaS
+## Single binary + inline YAML/TOML for PaaS
 
-`SUBSTREAMS_WEBSOCKET_STREAMS_TOML` env var wins over the file path.
+`SUBSTREAMS_WEBSOCKET_STREAMS_YAML` (or `_TOML`) env var wins over the file path.
 
 Rejected: requiring a writable filesystem for the streams config.
 
-Why: Railway / Fly / Heroku deploys don't have a place to drop a config file without baking it into the image. Inline TOML lets the platform's env-var UI be the config plane.
+Why: Railway / Fly / Heroku deploys don't have a place to drop a config file without baking it into the image. Inline YAML (or TOML) lets the platform's env-var UI be the config plane.

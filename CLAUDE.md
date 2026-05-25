@@ -17,7 +17,7 @@ cargo test --workspace <name>     # single test by name (e.g. `rejects_duplicate
 cargo build --bin substreams-websocket --locked
 cargo check --workspace
 
-# run the server locally (reads .env + ./streams.toml)
+# run the server locally (reads .env + ./streams.yaml)
 ./target/debug/substreams-websocket serve
 
 # one-shot debug stream (no WS, prints decoded events)
@@ -32,7 +32,7 @@ The `lib.rs` re-exports a small public surface; everything wires together in `sr
 
 ### Module map
 
-- `src/main.rs` — Clap CLI + env mapping. Builds `Config` from `streams.toml` (or inline `SUBSTREAMS_WEBSOCKET_STREAMS_TOML` env var, which wins) and per-stream defaults. Two subcommands: `serve`, `stream`.
+- `src/main.rs` — Clap CLI + env mapping. Builds `Config` from `streams.yaml` (or inline `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` env var, which wins; TOML equivalents also supported) and per-stream defaults. Two subcommands: `serve`, `stream`.
 - `src/config.rs` — `Config`, `StreamConfig`, `SubstreamsConfig`, `WebSocketConfig`, `ReplayConfig`. Pure data + `Config::validate()`. Validation rejects duplicate `(network, manifest, module)` triples.
 - `src/substreams.rs` — gRPC client. JWT exchange (`api_key → bearer`), HTTP/2 + TCP keepalive tuning, 64 MiB decode cap, package loading from local path or HTTPS, `StreamEvent` enum.
 - `src/module_hash.rs` — Canonical Substreams module-hash computation (matches `substreams info` output). Identity key for cursor + replay files.
@@ -48,7 +48,7 @@ The `lib.rs` re-exports a small public surface; everything wires together in `sr
 
 There is no operator-supplied stream name. Identity is derived from the loaded `.spkg`'s `Package.package_meta[0]` (`name`, `version`) plus the canonical `module_hash`. A missing `package_meta` fails fast at startup. This anchors cursor and replay filenames to the spkg, so renaming a TOML entry has no effect and upgrading a spkg writes to a fresh file.
 
-Clients subscribe by `<network>@<table>` where `<table>` is the DatabaseChanges table emitted by `db_out` — not by anything in `streams.toml`.
+Clients subscribe by `<network>@<table>` where `<table>` is the DatabaseChanges table emitted by `db_out` — not by anything in `streams.yaml`.
 
 ### Data flow (per stream)
 
@@ -73,7 +73,7 @@ On SIGTERM/SIGINT: `/healthz` flips to 503 so a reverse proxy can drain new conn
 - **`@table` per-row, other meta block-scoped.** Only `@`-prefixed key on rows is `@table`.
 - **Connecting without a subscription yields zero traffic, not all-streams.** A `*` wildcard must be explicit.
 - **`serde_json` with `preserve_order`** — column order matches the wire, not alphabetical.
-- **Inline `SUBSTREAMS_WEBSOCKET_STREAMS_TOML` env wins over file path** — for Railway/Fly/Heroku where the filesystem isn't writable.
+- **Inline `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` env wins over file path** (TOML equivalent also supported) — for Railway/Fly/Heroku where the filesystem isn't writable.
 
 ## Things to know before changing client-facing JSON
 

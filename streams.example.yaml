@@ -1,8 +1,7 @@
-# YAML alternative to streams.example.toml. Same shape — only the
-# serialization format differs. Pick whichever is more ergonomic for
-# your toolchain. The server detects the format from the file extension
-# (.toml | .yaml | .yml) or from the env var name
-# (SUBSTREAMS_WEBSOCKET_STREAMS_TOML vs SUBSTREAMS_WEBSOCKET_STREAMS_YAML).
+# Default streams config format. TOML is also supported (same shape) —
+# the server detects the format from the file extension
+# (.yaml | .yml | .toml) or from the env var name
+# (SUBSTREAMS_WEBSOCKET_STREAMS_YAML vs SUBSTREAMS_WEBSOCKET_STREAMS_TOML).
 #
 # Stream identity is derived at startup from the loaded .spkg:
 #   (network, package_name, package_version, module_hash)

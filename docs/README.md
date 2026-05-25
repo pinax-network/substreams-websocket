@@ -17,5 +17,5 @@ Reference material that is **not** loaded at runtime or compile time. Audience: 
 | [`metrics.md`](metrics.md) | Prometheus `/metrics` endpoint + full metric catalog |
 | [`envoy.md`](envoy.md) | Running behind Envoy (or any reverse proxy) — health-check, idle timeout, buffer sizing |
 | [`decisions.md`](decisions.md) | Log of significant design decisions made during dev |
-| [`railway.md`](railway.md) | Railway deployment specifics (inline TOML, volumes, GHCR image) |
+| [`railway.md`](railway.md) | Railway deployment specifics (inline YAML, volumes, GHCR image) |
 | [`sample.db_out.json`](sample.db_out.json) | Captured `db_out` response showing raw upstream JSON shape (pre-normalization) |

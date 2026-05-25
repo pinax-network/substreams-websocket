@@ -17,19 +17,19 @@ Paste into the Variables tab:
 SUBSTREAMS_API_KEY=<pinax key>
 SUBSTREAMS_AUTH_URL=https://auth.pinax.network/v1/auth/issue
 SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080
-SUBSTREAMS_WEBSOCKET_STREAMS_TOML=<inline TOML, see below>
+SUBSTREAMS_WEBSOCKET_STREAMS_YAML=<inline YAML, see below>
 ```
 
-`SUBSTREAMS_WEBSOCKET_STREAMS_TOML` is the full contents of a `streams.toml`, pasted as the env value. It wins over `SUBSTREAMS_WEBSOCKET_STREAMS` (the file path). Required on Railway because the image has no writable place to drop a config file.
+`SUBSTREAMS_WEBSOCKET_STREAMS_YAML` is the full contents of a `streams.yaml`, pasted as the env value. It wins over `SUBSTREAMS_WEBSOCKET_STREAMS` (the file path). Required on Railway because the image has no writable place to drop a config file. TOML equivalent (`SUBSTREAMS_WEBSOCKET_STREAMS_TOML`) is also accepted.
 
 Example value:
 
-```toml
-[[streams]]
-network = "solana-mainnet"
-endpoint = "https://solana.substreams.pinax.network:443"
-manifest = "https://github.com/pinax-network/substreams-solana/releases/download/swaps-v0.1.0/swaps-v0.1.0.spkg"
-module = "db_out"
+```yaml
+streams:
+  - network: solana-mainnet
+    endpoint: https://solana.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-solana/releases/download/swaps-v0.1.0/swaps-v0.1.0.spkg
+    module: db_out
 ```
 
 Railway's env-var input accepts multi-line values. Paste with line breaks preserved.
@@ -63,7 +63,7 @@ Two options:
 - **WebSocket termination.** Railway's edge proxy upgrades WebSocket connections transparently. No special config needed.
 - **24-hour disconnects.** Railway does not enforce a 24-hour cap (unlike Binance). Long-lived clients stay connected.
 - **Cold start cursor loss.** First deploy with no volume = full re-sync from `initial_block`. On Solana this can be hours of catch-up. Mount a volume before going to prod.
-- **Empty `SUBSTREAMS_WEBSOCKET_STREAMS_TOML`.** clap reports the var as `Some("")` when the field is blank in the dashboard. The server treats empty/whitespace as unset and falls back to the file path. Delete the variable entirely if you don't want it.
+- **Empty `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` / `_TOML`.** clap reports the var as `Some("")` when the field is blank in the dashboard. The server treats empty/whitespace as unset and falls back to the file path. Delete the variable entirely if you don't want it.
 - **Memory.** Solana with the 64 MiB gRPC decode cap can spike memory on fat blocks. The starter plan's 512 MB has been observed to hold; bump to 1 GB if you see OOM-kills under load.
 
 ## References
