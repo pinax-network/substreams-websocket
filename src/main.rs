@@ -524,40 +524,28 @@ fn log_serve_args(args: &ServeArgs) {
 }
 
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {
-    // Start with defaults that mute the noisy transport-layer crates
-    // (`h2::codec::framed_read: received frame=Data { ... }` and friends)
-    // so passing `debug` at the top level only enables our own logs, not
-    // the gRPC/HTTP plumbing.
-    let mut filter = EnvFilter::new("");
-    for default in [
-        "h2=info",
-        "hyper=info",
-        "hyper_util=info",
-        "tower=info",
-        "tower_http=info",
-        "tonic=info",
-        "rustls=info",
-        "axum=info",
-    ] {
-        filter = filter.add_directive(
-            default
-                .parse()
-                .expect("static silencing directive must parse"),
-        );
-    }
-    // Append user directives last so they override the defaults — e.g.
-    // `--log-level=debug,h2=trace` re-enables h2 trace for debugging.
-    for piece in log_level
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        filter = filter.add_directive(
-            piece
-                .parse()
-                .with_context(|| format!("invalid log directive {piece:?}"))?,
-        );
-    }
+    // Prepend dependency caps so `debug` at the top level doesn't drag in
+    // the h2/hyper/etc. frame-level noise. The user's filter string is
+    // appended verbatim and parsed by `EnvFilter` so the full envfilter
+    // syntax is supported (whitespace separators, span field filters with
+    // commas inside `{...}`, etc.). User directives come last and take
+    // precedence on collision — e.g. `--log-level=debug,h2=trace` still
+    // re-enables h2 trace.
+    //
+    // Falls back to `info` for an empty/whitespace value so an accidental
+    // `SUBSTREAMS_WEBSOCKET_LOG_LEVEL=` doesn't silence the binary.
+    let user_part = log_level.trim();
+    let user_part = if user_part.is_empty() {
+        "info"
+    } else {
+        user_part
+    };
+    let combined = format!(
+        "h2=info,hyper=info,hyper_util=info,tower=info,tower_http=info,\
+         tonic=info,rustls=info,axum=info,{user_part}"
+    );
+    let filter = EnvFilter::try_new(&combined)
+        .with_context(|| format!("invalid log filter {log_level:?}"))?;
     fmt().with_env_filter(filter).init();
     Ok(())
 }
