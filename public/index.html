@@ -1190,6 +1190,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
           <option value="">— pick a stream —</option>
         </select>
         <input id="url" type="text" />
+        <input id="auto-disconnect" type="number" min="0" step="1" value="15" title="Auto-disconnect after N seconds (0 to disable). Protects the browser from runaway block streams." style="width:5em;flex:0 0 auto;" />
         <button id="connect">Connect</button>
         <button id="disconnect" disabled>Disconnect</button>
         <button id="clear">Clear log</button>
@@ -1274,6 +1275,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
   var statusEl = $('status');
   var logEl = $('log');
   var connectBtn = $('connect');
+  var autoDisconnectEl = $('auto-disconnect');
   var disconnectBtn = $('disconnect');
   var sendBtn = $('send');
   var cmdEl = $('cmd');
@@ -1712,10 +1714,20 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
   // exploring the API, not long-running ingest. A live block stream can fire
   // hundreds of payloads per second; without this cap the browser runs out
   // of memory rendering them. Server-to-server clients have no such cap.
-  var AUTO_DISCONNECT_MS = 15000;
+  // The cap is user-configurable via the seconds input next to Connect;
+  // `0` disables it for sessions that genuinely want to ride the stream.
+  var DEFAULT_AUTO_DISCONNECT_SECS = 15;
   var autoTimer = null;
   var countdownTimer = null;
   var autoDeadline = 0;
+
+  function readAutoDisconnectMs() {
+    var raw = (autoDisconnectEl.value || '').trim();
+    if (raw === '') return DEFAULT_AUTO_DISCONNECT_SECS * 1000;
+    var n = parseInt(raw, 10);
+    if (!isFinite(n) || n < 0) return DEFAULT_AUTO_DISCONNECT_SECS * 1000;
+    return n * 1000;
+  }
 
   function connect() {
     var url = urlEl.value.trim();
@@ -1735,11 +1747,17 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
     connectBtn.disabled = true;
     disconnectBtn.disabled = false;
     sendBtn.disabled = false;
+    var autoMs = readAutoDisconnectMs();
     ws.onopen = function () {
-      append('sys', '*', 'connected: ' + url + (hasJwt ? ' (with JWT)' : '') + ' (auto-disconnect in ' + (AUTO_DISCONNECT_MS / 1000) + 's)');
       if (autoTimer) clearTimeout(autoTimer);
       if (countdownTimer) clearInterval(countdownTimer);
-      autoDeadline = Date.now() + AUTO_DISCONNECT_MS;
+      if (autoMs === 0) {
+        append('sys', '*', 'connected: ' + url + (hasJwt ? ' (with JWT)' : '') + ' (auto-disconnect disabled)');
+        setStatus('open', 'ok');
+        return;
+      }
+      append('sys', '*', 'connected: ' + url + (hasJwt ? ' (with JWT)' : '') + ' (auto-disconnect in ' + (autoMs / 1000) + 's)');
+      autoDeadline = Date.now() + autoMs;
       var tick = function () {
         var remaining = autoDeadline - Date.now();
         if (remaining <= 0) {
@@ -1757,7 +1775,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
         // re-asserting "open" while ws.close() works its way through.
         if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
         if (ws && (ws.readyState === 0 || ws.readyState === 1)) {
-          append('sys', '*', 'auto-disconnecting after ' + (AUTO_DISCONNECT_MS / 1000) + 's to protect the browser');
+          append('sys', '*', 'auto-disconnecting after ' + (autoMs / 1000) + 's to protect the browser');
           setStatus('closed', 'err');
           // Eagerly restore UI; ws.onclose will also fire and is idempotent.
           connectBtn.disabled = false;
@@ -1765,7 +1783,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
           sendBtn.disabled = true;
           try { ws.close(1000, 'browser auto-disconnect'); } catch (_) {}
         }
-      }, AUTO_DISCONNECT_MS);
+      }, autoMs);
     };
     ws.onmessage = function (ev) {
       append('in', '<', typeof ev.data === 'string' ? ev.data : '<binary ' + ev.data.byteLength + 'B>');
