@@ -92,6 +92,8 @@ pub async fn serve_with_shutdown(
 ) -> Result<(), ServerError> {
     let config = Arc::new(config);
 
+    log_startup_config(&config);
+
     // Install the Prometheus recorder before any code path increments a
     // counter, so all metrics land in the same registry that `/metrics`
     // renders. Safe to call repeatedly — first call wins.
@@ -160,6 +162,35 @@ pub async fn serve_with_shutdown(
     }
 
     result
+}
+
+/// Emit a one-shot startup log of every effective config knob (defaults
+/// included). Individual streams aren't logged — there can be many — but
+/// the stream count is. Auth-bearing per-stream fields (`token`, `api_key`)
+/// live only inside `StreamConfig` and so are intentionally not surfaced.
+fn log_startup_config(config: &Config) {
+    let ws = &config.websocket;
+    info!(
+        listen = %ws.listen,
+        ws_path = %ws.ws_path,
+        stream_path = %ws.stream_path,
+        health_path = %ws.health_path,
+        metrics_path = %ws.metrics_path,
+        heartbeat_interval_secs = ws.heartbeat_interval.as_secs(),
+        heartbeat_timeout_secs = ws.heartbeat_timeout.as_secs(),
+        connection_ttl_secs = ?ws.connection_ttl.map(|d| d.as_secs()),
+        max_clients = ws.max_clients,
+        client_buffer_size = ws.client_buffer_size,
+        shutdown_drain_timeout_secs = ws.shutdown_drain_timeout.as_secs(),
+        max_filter_fields = ws.max_filter_fields,
+        max_filter_values = ws.max_filter_values,
+        slow_client_drop_limit = ws.slow_client_drop_limit,
+        cursors_dir = %config.cursors_dir.display(),
+        replay_dir = %config.replay.dir.display(),
+        replay_max_seconds = config.replay.max_seconds,
+        streams = config.streams.len(),
+        "effective configuration"
+    );
 }
 
 fn build_app(state: AppState) -> Router {
