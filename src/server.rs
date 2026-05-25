@@ -424,7 +424,14 @@ async fn run_substream(
         package_version: meta.package_version.clone(),
         module_hash: meta.module_hash.clone(),
         manifest: meta.manifest.clone(),
-        endpoint: config.substreams.endpoint.clone().unwrap_or_default(),
+        // `Config::validate()` rejects empty endpoints at startup, so this
+        // path is unreachable on a validated config. Fail loud rather than
+        // emit a confusing `endpoint=""` label if the invariant ever drifts.
+        endpoint: config
+            .substreams
+            .endpoint
+            .clone()
+            .expect("Config::validate guarantees endpoint is set"),
         tables: meta.tables.clone(),
     };
 
@@ -815,7 +822,9 @@ async fn handle_substream_event(
 /// Update per-stream head-block gauges. One block applies to every table
 /// emitted by the same spkg, so we update gauges for each operator-declared
 /// table (or, when none are declared, the set of tables that appear in this
-/// block's events). Drift is `max(0, now - block_timestamp)` seconds.
+/// block's events). Drift is `now - block_timestamp` (seconds, fractional);
+/// not clamped — negative values surface clock skew between this server and
+/// the block producer.
 fn update_head_block_gauges(
     identity: &StreamIdentity,
     decoded: &crate::DatabaseChangesBlockMessage,
