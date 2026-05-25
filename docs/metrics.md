@@ -41,7 +41,7 @@ All metrics are namespaced `substreams_websocket_*`. Naming follows Prometheus c
 | `substreams_websocket_substreams_reconnects_total` | counter | `network`, `package_name`, `package_version` | Retry-loop reconnect attempts. |
 | `substreams_websocket_substreams_undo_total` | counter | `network`, `package_name`, `package_version` | `BlockUndoSignal` events. |
 | `substreams_websocket_head_block_number` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Latest block number observed per stream. `stream` is the Binance-style `<network>@<table>` selector. Updated on every successful decode for each operator-declared table (falls back to tables seen in the block when none are declared). |
-| `substreams_websocket_head_block_time_drift` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Lag (`now - block_timestamp`) in seconds for the latest block, same labels as `head_block_number`. Useful for alerting on stalled or backfilling streams. |
+| `substreams_websocket_head_block_time_drift` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Lag (`now - block_timestamp`) in seconds for the latest block, same labels as `head_block_number`. Sub-second precision (block timestamp is integer seconds, but `now` is `f64`). Can go **negative** if a block's timestamp is ahead of this server's clock — a signal of clock skew between producer and consumer; not clamped. Useful for alerting on stalled / backfilling streams (`drift > X`) or time-sync issues (`drift < -X`). |
 
 ## Replay log
 

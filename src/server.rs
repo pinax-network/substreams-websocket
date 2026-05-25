@@ -820,11 +820,17 @@ fn update_head_block_gauges(
     identity: &StreamIdentity,
     decoded: &crate::DatabaseChangesBlockMessage,
 ) {
+    // `as_secs_f64` preserves sub-second precision on `now`. Block
+    // timestamps themselves are integer seconds, so drift granularity is
+    // bounded by that — but for slow blocks the fractional part of `now`
+    // matters. Negative drift is passed through (not clamped): it surfaces
+    // clock skew between this server and the block producer, which is a
+    // real signal operators may want to alert on.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let drift = (now_secs - decoded.timestamp_seconds).max(0) as f64;
+        .unwrap_or_default()
+        .as_secs_f64();
+    let drift = now_secs - decoded.timestamp_seconds as f64;
     let block_num = decoded.block_num as f64;
 
     // Borrow declared tables when present; only allocate when we need the
@@ -3631,6 +3637,62 @@ mod tests {
         assert!(
             !rendered.contains("stream=\"gauge-test-net-obs@unrelated\""),
             "unexpected gauge for table that never appeared in events"
+        );
+    }
+
+    #[test]
+    fn update_head_block_gauges_passes_negative_drift_through() {
+        // A block timestamped in the future (block producer ahead of us, or
+        // clock skew) must surface as negative drift — operators may want to
+        // alert on `drift < -X` to detect time-sync issues. Clamping to 0
+        // would erase that signal.
+        crate::metrics::init();
+
+        let identity = super::StreamIdentity {
+            network: "gauge-test-net-skew".to_owned(),
+            package_name: "pkg".to_owned(),
+            package_version: "v1".to_owned(),
+            module_hash: "h".to_owned(),
+            manifest: "./gauge-test-skew.spkg".to_owned(),
+            endpoint: "https://gauge-test-skew:443".to_owned(),
+            tables: vec!["swaps".to_owned()],
+        };
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is past UNIX epoch")
+            .as_secs() as i64;
+        // Block timestamped 60s in the future of our clock.
+        let block_ts = now_secs + 60;
+
+        let decoded = crate::DatabaseChangesBlockMessage {
+            network: identity.network.clone(),
+            block_num: 42,
+            block_hash: "0xskew".to_owned(),
+            timestamp: "2099-01-01 00:00:00".to_owned(),
+            timestamp_seconds: block_ts,
+            module_hash: identity.module_hash.clone(),
+            events: vec![],
+        };
+
+        super::update_head_block_gauges(&identity, &decoded);
+
+        let rendered = crate::metrics::render();
+        let matchers = ["stream=\"gauge-test-net-skew@swaps\""];
+        let drift = find_metric_value(
+            &rendered,
+            "substreams_websocket_head_block_time_drift",
+            &matchers,
+        )
+        .unwrap_or_else(|| panic!("drift gauge missing in:\n{rendered}"));
+
+        // Drift ≈ -60s. Allow generous slack for slow CI:
+        // drift = now_f64 - (now_secs + 60), and now_f64 - now_secs ∈ [0, 1+ε)
+        // so drift lands somewhere in (-60, -59) under sane scheduling, with
+        // wider headroom on a loaded test runner.
+        assert!(
+            (-65.0..-55.0).contains(&drift),
+            "expected drift near -60s for future-dated block, got {drift}; rendered:\n{rendered}"
         );
     }
 }
