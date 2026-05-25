@@ -501,9 +501,40 @@ fn default_module() -> String {
 }
 
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {
-    let filter = EnvFilter::try_new(log_level)
-        .with_context(|| format!("invalid log level {log_level:?}"))?;
-
+    // Start with defaults that mute the noisy transport-layer crates
+    // (`h2::codec::framed_read: received frame=Data { ... }` and friends)
+    // so passing `debug` at the top level only enables our own logs, not
+    // the gRPC/HTTP plumbing.
+    let mut filter = EnvFilter::new("");
+    for default in [
+        "h2=info",
+        "hyper=info",
+        "hyper_util=info",
+        "tower=info",
+        "tower_http=info",
+        "tonic=info",
+        "rustls=info",
+        "axum=info",
+    ] {
+        filter = filter.add_directive(
+            default
+                .parse()
+                .expect("static silencing directive must parse"),
+        );
+    }
+    // Append user directives last so they override the defaults — e.g.
+    // `--log-level=debug,h2=trace` re-enables h2 trace for debugging.
+    for piece in log_level
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filter = filter.add_directive(
+            piece
+                .parse()
+                .with_context(|| format!("invalid log directive {piece:?}"))?,
+        );
+    }
     fmt().with_env_filter(filter).init();
     Ok(())
 }
