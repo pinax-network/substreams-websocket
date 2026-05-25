@@ -743,17 +743,20 @@ async fn handle_substream_event(
                 // Group events by @table and broadcast one per-table payload
                 // per group. Clients subscribed to (network, table) match.
                 //
-                // Drift is computed once per block (not per table) and only
-                // when the debug log will actually emit — `SystemTime::now()`
-                // is cheap but the surrounding loop is hot, so we don't run
-                // it at info level.
-                let drift_secs = tracing::enabled!(tracing::Level::DEBUG).then(|| {
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs_f64();
-                    now_secs - decoded.timestamp_seconds as f64
-                });
+                // Drift is computed and formatted once per block — it's a
+                // property of the block, not the table — and only when the
+                // debug log will actually emit, so info-level callers skip
+                // both `SystemTime::now()` and the `format!()` allocation
+                // entirely.
+                let drift_fmt: Option<String> =
+                    tracing::enabled!(tracing::Level::DEBUG).then(|| {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64();
+                        let drift = now_secs - decoded.timestamp_seconds as f64;
+                        format!("{drift:.3}")
+                    });
                 let groups = group_events_by_table(&decoded);
                 for (table, events) in &groups {
                     let per_table = build_table_payload(&decoded, table, events);
@@ -761,12 +764,12 @@ async fn handle_substream_event(
                     let stats = clients
                         .broadcast_block(&identity.network, table, per_table)
                         .await;
-                    if let Some(drift) = drift_secs {
+                    if let Some(drift) = drift_fmt.as_deref() {
                         debug!(
                             network = %identity.network,
                             table,
                             block_num,
-                            drift_secs = format!("{drift:.3}"),
+                            drift_secs = drift,
                             rows,
                             bytes = stats.bytes,
                             delivered = stats.delivered,

@@ -524,14 +524,6 @@ fn log_serve_args(args: &ServeArgs) {
 }
 
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {
-    // Prepend dependency caps so `debug` at the top level doesn't drag in
-    // the h2/hyper/etc. frame-level noise. The user's filter string is
-    // appended verbatim and parsed by `EnvFilter` so the full envfilter
-    // syntax is supported (whitespace separators, span field filters with
-    // commas inside `{...}`, etc.). User directives come last and take
-    // precedence on collision — e.g. `--log-level=debug,h2=trace` still
-    // re-enables h2 trace.
-    //
     // Falls back to `info` for an empty/whitespace value so an accidental
     // `SUBSTREAMS_WEBSOCKET_LOG_LEVEL=` doesn't silence the binary.
     let user_part = log_level.trim();
@@ -540,10 +532,27 @@ fn init_tracing(log_level: &str) -> anyhow::Result<()> {
     } else {
         user_part
     };
-    let combined = format!(
-        "h2=info,hyper=info,hyper_util=info,tower=info,tower_http=info,\
-         tonic=info,rustls=info,axum=info,{user_part}"
-    );
+
+    // The transport-layer crates (h2, hyper, tonic, …) emit per-frame
+    // chatter at DEBUG / TRACE. Quiet them — but only when the user's
+    // global level is DEBUG or TRACE. If the user asked for `warn` or
+    // `error`, adding `h2=info` would actually *raise* h2's level (more
+    // specific directive wins), so we skip the caps and respect their
+    // global. `--log-level=debug,h2=trace` still works because the user
+    // override is appended last in the filter string.
+    let wants_verbose = user_part
+        .split(',')
+        .map(str::trim)
+        .any(|piece| matches!(piece.to_ascii_lowercase().as_str(), "debug" | "trace"));
+
+    let combined = if wants_verbose {
+        format!(
+            "h2=info,hyper=info,hyper_util=info,tower=info,tower_http=info,\
+             tonic=info,rustls=info,axum=info,{user_part}"
+        )
+    } else {
+        user_part.to_owned()
+    };
     let filter = EnvFilter::try_new(&combined)
         .with_context(|| format!("invalid log filter {log_level:?}"))?;
     fmt().with_env_filter(filter).init();
