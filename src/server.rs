@@ -92,6 +92,8 @@ pub async fn serve_with_shutdown(
 ) -> Result<(), ServerError> {
     let config = Arc::new(config);
 
+    log_startup_config(&config);
+
     // Install the Prometheus recorder before any code path increments a
     // counter, so all metrics land in the same registry that `/metrics`
     // renders. Safe to call repeatedly — first call wins.
@@ -160,6 +162,35 @@ pub async fn serve_with_shutdown(
     }
 
     result
+}
+
+/// Emit a one-shot startup log of every effective config knob (defaults
+/// included). Individual streams aren't logged — there can be many — but
+/// the stream count is. Auth-bearing per-stream fields (`token`, `api_key`)
+/// live only inside `StreamConfig` and so are intentionally not surfaced.
+fn log_startup_config(config: &Config) {
+    let ws = &config.websocket;
+    info!(
+        listen = %ws.listen,
+        ws_path = %ws.ws_path,
+        stream_path = %ws.stream_path,
+        health_path = %ws.health_path,
+        metrics_path = %ws.metrics_path,
+        heartbeat_interval_secs = ws.heartbeat_interval.as_secs(),
+        heartbeat_timeout_secs = ws.heartbeat_timeout.as_secs(),
+        connection_ttl_secs = ?ws.connection_ttl.map(|d| d.as_secs()),
+        max_clients = ws.max_clients,
+        client_buffer_size = ws.client_buffer_size,
+        shutdown_drain_timeout_secs = ws.shutdown_drain_timeout.as_secs(),
+        max_filter_fields = ws.max_filter_fields,
+        max_filter_values = ws.max_filter_values,
+        slow_client_drop_limit = ws.slow_client_drop_limit,
+        cursors_dir = %config.cursors_dir.display(),
+        replay_dir = %config.replay.dir.display(),
+        replay_max_seconds = config.replay.max_seconds,
+        streams = config.streams.len(),
+        "effective configuration"
+    );
 }
 
 fn build_app(state: AppState) -> Router {
@@ -711,20 +742,40 @@ async fn handle_substream_event(
 
                 // Group events by @table and broadcast one per-table payload
                 // per group. Clients subscribed to (network, table) match.
+                //
+                // Drift is computed and formatted once per block — it's a
+                // property of the block, not the table — and only when the
+                // debug log will actually emit, so info-level callers skip
+                // both `SystemTime::now()` and the `format!()` allocation
+                // entirely.
+                let drift_fmt: Option<String> =
+                    tracing::enabled!(tracing::Level::DEBUG).then(|| {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs_f64();
+                        let drift = now_secs - decoded.timestamp_seconds as f64;
+                        format!("{drift:.3}")
+                    });
                 let groups = group_events_by_table(&decoded);
                 for (table, events) in &groups {
                     let per_table = build_table_payload(&decoded, table, events);
-                    let delivered = clients
+                    let rows = events.len();
+                    let stats = clients
                         .broadcast_block(&identity.network, table, per_table)
                         .await;
-                    debug!(
-                        stream = %identity.display(),
-                        table,
-                        block_num,
-                        events = events.len(),
-                        delivered,
-                        "broadcast table payload"
-                    );
+                    if let Some(drift) = drift_fmt.as_deref() {
+                        debug!(
+                            network = %identity.network,
+                            table,
+                            block_num,
+                            drift_secs = drift,
+                            rows,
+                            bytes = stats.bytes,
+                            delivered = stats.delivered,
+                            "broadcast"
+                        );
+                    }
                 }
                 let _ = total_events; // surfaced via per-table debug above
             }
@@ -1794,9 +1845,10 @@ impl ClientRegistry {
         network: &str,
         stream: &str,
         block: serde_json::Value,
-    ) -> usize {
+    ) -> BroadcastStats {
         let selector = format!("{network}@{stream}");
         let unfiltered_text = block.to_string();
+        let bytes = unfiltered_text.len();
         let unfiltered_wrapped = format!(r#"{{"stream":"{selector}","data":{unfiltered_text}}}"#);
         let limit = self.slow_client_drop_limit();
         let event_count = block
@@ -1897,7 +1949,7 @@ impl ClientRegistry {
         }
 
         self.close_slow(&slow_to_close).await;
-        delivered
+        BroadcastStats { delivered, bytes }
     }
 
     fn slow_client_drop_limit(&self) -> u64 {
@@ -1931,6 +1983,16 @@ impl ClientRegistry {
             }
         }
     }
+}
+
+/// Aggregate result of broadcasting one per-table block payload to every
+/// matching client. `bytes` is the unfiltered serialized payload size — a
+/// representative figure for log lines; per-client filtered sends may be
+/// smaller.
+#[derive(Debug, Clone, Copy)]
+struct BroadcastStats {
+    delivered: usize,
+    bytes: usize,
 }
 
 /// Outcome of a single backpressured send: did the frame land on the

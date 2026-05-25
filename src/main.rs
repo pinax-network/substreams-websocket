@@ -6,6 +6,7 @@ use serde::Deserialize;
 use substreams_websocket::{
     Config, StreamConfig, StreamEvent, SubstreamsClient, SubstreamsConfig, WebSocketConfig,
 };
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Debug, Parser)]
@@ -305,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve(args) => {
+            log_serve_args(&args);
             let config = args.load_config().await?;
             config.validate()?;
             substreams_websocket::serve(config).await?;
@@ -500,10 +502,59 @@ fn default_module() -> String {
     "db_out".to_owned()
 }
 
-fn init_tracing(log_level: &str) -> anyhow::Result<()> {
-    let filter = EnvFilter::try_new(log_level)
-        .with_context(|| format!("invalid log level {log_level:?}"))?;
+/// Log the top-level `serve` knobs and Substreams defaults that get
+/// merged into each stream. `token` / `api_key` are credential-bearing
+/// and rendered as a boolean set/unset, never their values.
+fn log_serve_args(args: &ServeArgs) {
+    let d = &args.substreams_defaults;
+    info!(
+        streams_file = %args.streams.display(),
+        streams_yaml_inline = args.streams_yaml.is_some(),
+        streams_toml_inline = args.streams_toml.is_some(),
+        production_mode = d.production_mode,
+        final_blocks_only = d.final_blocks_only,
+        plaintext = d.plaintext,
+        insecure = d.insecure,
+        token_set = d.token.is_some(),
+        api_key_set = d.api_key.is_some(),
+        api_key_header = %d.api_key_header,
+        auth_url = ?d.auth_url,
+        "substreams defaults (applied to streams that don't override)"
+    );
+}
 
+fn init_tracing(log_level: &str) -> anyhow::Result<()> {
+    // Falls back to `info` for an empty/whitespace value so an accidental
+    // `SUBSTREAMS_WEBSOCKET_LOG_LEVEL=` doesn't silence the binary.
+    let user_part = log_level.trim();
+    let user_part = if user_part.is_empty() {
+        "info"
+    } else {
+        user_part
+    };
+
+    // The transport-layer crates (h2, hyper, tonic, …) emit per-frame
+    // chatter at DEBUG / TRACE. Quiet them — but only when the user's
+    // global level is DEBUG or TRACE. If the user asked for `warn` or
+    // `error`, adding `h2=info` would actually *raise* h2's level (more
+    // specific directive wins), so we skip the caps and respect their
+    // global. `--log-level=debug,h2=trace` still works because the user
+    // override is appended last in the filter string.
+    let wants_verbose = user_part
+        .split(',')
+        .map(str::trim)
+        .any(|piece| matches!(piece.to_ascii_lowercase().as_str(), "debug" | "trace"));
+
+    let combined = if wants_verbose {
+        format!(
+            "h2=info,hyper=info,hyper_util=info,tower=info,tower_http=info,\
+             tonic=info,rustls=info,axum=info,{user_part}"
+        )
+    } else {
+        user_part.to_owned()
+    };
+    let filter = EnvFilter::try_new(&combined)
+        .with_context(|| format!("invalid log filter {log_level:?}"))?;
     fmt().with_env_filter(filter).init();
     Ok(())
 }
