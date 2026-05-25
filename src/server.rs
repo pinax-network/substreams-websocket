@@ -827,18 +827,25 @@ fn update_head_block_gauges(
     let drift = (now_secs - decoded.timestamp_seconds).max(0) as f64;
     let block_num = decoded.block_num as f64;
 
-    let mut tables: Vec<String> = identity.tables.clone();
-    if tables.is_empty() {
+    // Borrow declared tables when present; only allocate when we need the
+    // fallback (no operator-declared tables — derive from event `@table`s).
+    let observed: Vec<String>;
+    let tables: &[String] = if !identity.tables.is_empty() {
+        &identity.tables
+    } else {
+        let mut acc: Vec<String> = Vec::new();
         for ev in &decoded.events {
             if let Some(t) = ev.get("@table").and_then(serde_json::Value::as_str)
-                && !tables.iter().any(|s| s == t)
+                && !acc.iter().any(|s| s == t)
             {
-                tables.push(t.to_owned());
+                acc.push(t.to_owned());
             }
         }
-    }
+        observed = acc;
+        &observed
+    };
 
-    for table in &tables {
+    for table in tables {
         let stream_label = format!("{}@{}", identity.network, table);
         metrics::gauge!(
             "substreams_websocket_head_block_number",
