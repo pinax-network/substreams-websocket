@@ -6,6 +6,7 @@ use serde::Deserialize;
 use substreams_websocket::{
     Config, StreamConfig, StreamEvent, SubstreamsClient, SubstreamsConfig, WebSocketConfig,
 };
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Debug, Parser)]
@@ -305,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve(args) => {
+            log_serve_args(&args);
             let config = args.load_config().await?;
             config.validate()?;
             substreams_websocket::serve(config).await?;
@@ -498,6 +500,27 @@ impl FileStreamConfig {
 
 fn default_module() -> String {
     "db_out".to_owned()
+}
+
+/// Log the top-level `serve` knobs and Substreams defaults that get
+/// merged into each stream. `token` / `api_key` are credential-bearing
+/// and rendered as a boolean set/unset, never their values.
+fn log_serve_args(args: &ServeArgs) {
+    let d = &args.substreams_defaults;
+    info!(
+        streams_file = %args.streams.display(),
+        streams_yaml_inline = args.streams_yaml.is_some(),
+        streams_toml_inline = args.streams_toml.is_some(),
+        production_mode = d.production_mode,
+        final_blocks_only = d.final_blocks_only,
+        plaintext = d.plaintext,
+        insecure = d.insecure,
+        token_set = d.token.is_some(),
+        api_key_set = d.api_key.is_some(),
+        api_key_header = %d.api_key_header,
+        auth_url = ?d.auth_url,
+        "substreams defaults (applied to streams that don't override)"
+    );
 }
 
 fn init_tracing(log_level: &str) -> anyhow::Result<()> {
