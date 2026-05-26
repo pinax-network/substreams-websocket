@@ -170,7 +170,7 @@ ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%
 
 Semantics: string equality only; fields are AND'd; values within a field are OR'd; events missing the filtered field are dropped. If every event of a block is dropped, the block is skipped for that client. Top-level fields (`block_num`, `network`, `module_hash`) are not filterable.
 
-See [`docs/filters.md`](https://github.com/pinax-network/substreams-websocket/blob/main/docs/filters.md) for full reference + common filter shapes per stream type.
+Filters accept only strings or arrays of strings. Max keys and values are server-configured (`SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS`, `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES`), and invalid payloads return an `error` reply without closing the socket.
 
 ## Reconnects and replay
 
@@ -196,6 +196,24 @@ Use `block_num + 1` from the latest payload you successfully processed. Wildcard
 ## Heartbeats
 
 The server sends WebSocket ping frames every `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` (default 180s). Standard WebSocket clients pong automatically. The server closes connections that don't pong within `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` (default 600s).
+
+## Discovery endpoints
+
+Before opening a WebSocket, you can probe the server over plain HTTP:
+
+- `GET /healthz` — `200 ok` if the server is live, `503` if it is draining.
+- `GET /streams` — JSON listing of every configured `(network, package_name, package_version, module_hash, tables)`. Use this to confirm your target `network@table` exists before you connect.
+- `GET /` — interactive browser client (Scalar-style reference + try-it panel).
+
+Or just connect to `wss://<host>/ws/*@*` and read the `session` message — it advertises every available stream and its tables.
+
+## Client-side troubleshooting
+
+- `ModuleNotFoundError: No module named 'websockets'` — install the Python `websockets` package (add to `requirements.txt`, `pyproject.toml`, etc.).
+- `TypeError: ... unexpected keyword argument ...` on connect — your WebSocket library renamed a kwarg between versions (e.g. `extra_headers` vs `additional_headers` in Python `websockets`). Match the kwarg to the installed version.
+- Silent disconnects or close code `1009` (`message too big`) on busy chains (Solana especially) — raise your client's max frame/message size to at least `32 MiB` (Python: `max_size=32 * 1024 * 1024`).
+- Socket opens but no payloads — re-check your selector (`<network>@<table>`), confirm the table exists in `/streams` or `session.streams[].tables`, and remember wildcard selectors (`*@*`, `*@swaps`, `solana-mainnet@*`) skip replay (live-only).
+- Stream lifecycle frames with `"status":"error"` or `"status":"fatal"` carry upstream errors — surface `message` to the user and reconnect with `?from_timestamp=` if you want to resume.
 
 ## Common agent recipes
 
@@ -238,7 +256,6 @@ Compare each broadcast's `module_hash` with the one you saw in the welcome messa
 
 - **Bounded replay only.** The on-disk replay log holds a `REPLAY_SECONDS` window per spkg (default 600s). For older history, use Substreams gRPC directly with the desired `start_block`.
 - **No payload transformation.** Field values are pass-through strings from the source DatabaseChanges. Numeric parsing, decimal handling, base58 / hex encoding are the consumer's responsibility.
-- **No authentication.** The server itself is open; access control is the operator's deploy concern.
 - **No persistence of historical messages.** Once a block is broadcast, it's gone unless a connected subscriber received it.
 
 ## When to use this server

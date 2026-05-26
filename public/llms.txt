@@ -51,10 +51,23 @@ Replies are `{"result": null | [...] | {...}, "id": <echoed>}`. Errors are `{"er
 
 ## Event filters
 
-Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream. String equality only; fields AND, values OR; missing-field=miss; zero matches = block skipped. Wildcard selectors never filter. See `/SKILL.md` and `docs/filters.md` for per-stream filter examples.
+Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream. String equality only; fields AND, values OR; missing-field=miss; zero matches = block skipped. Wildcard selectors never filter. Full command and semantics reference is in `/SKILL.md`.
+
+## Discovery
+
+- `GET /healthz` → `200 ok` if the server is live, `503` if draining.
+- `GET /streams` → JSON list of configured streams with `network`, `package_name`, `package_version`, `module_hash`, and `tables`. Use it to confirm a `network@table` exists before connecting.
+- `wss://<host>/ws/*@*` → connect and read the `session` message for the same catalog inline.
+
+## Client troubleshooting
+
+- `ModuleNotFoundError: No module named 'websockets'` — install the Python `websockets` package.
+- `TypeError: ... unexpected keyword argument ...` on connect — WebSocket library kwarg renamed across versions (e.g. `extra_headers` vs `additional_headers`). Match the installed version.
+- Close code `1009` (`message too big`) or silent disconnects on Solana-heavy streams — raise the client max frame/message size to at least 32 MiB (Python: `max_size=32 * 1024 * 1024`).
+- Socket opens, no payloads — recheck the selector, confirm the table in `/streams` or `session.streams[].tables`, and remember wildcards skip replay.
+- `{"type":"stream","status":"error|fatal"}` carries upstream errors — surface `message` to the user and reconnect with `?from_timestamp=` to resume.
 
 ## Resources
 
 - [SKILL.md](/SKILL.md): full agent-oriented reference.
-- [GitHub](https://github.com/pinax-network/substreams-websocket): source, releases, Docker image, Railway recipe.
 - `/`: interactive in-browser client (Scalar-style API reference + try-it panel).

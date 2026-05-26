@@ -66,6 +66,35 @@ Two options:
 - **Empty `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` / `_TOML`.** clap reports the var as `Some("")` when the field is blank in the dashboard. The server treats empty/whitespace as unset and falls back to the file path. Delete the variable entirely if you don't want it.
 - **Memory.** Solana with the 64 MiB gRPC decode cap can spike memory on fat blocks. The starter plan's 512 MB has been observed to hold; bump to 1 GB if you see OOM-kills under load.
 
+## Troubleshooting workflow (fast path)
+
+When something "just doesn't stream," run this order before changing code:
+
+1. `GET /healthz` — verify process health first.
+2. `GET /streams` — verify your expected `network` and table(s) are present.
+3. Connect to `wss://<host>/ws/*@*` and read the `session` message to confirm discoverable streams.
+4. Only then debug consumer code and subscription selectors.
+
+This order is especially useful on Railway when log tailing is delayed.
+
+### Common errors and fixes
+
+- **Python import failure**
+  - Error: `ModuleNotFoundError: No module named 'websockets'`
+  - Fix: add `websockets` to `requirements.txt` and redeploy.
+
+- **Client keyword mismatch after dependency upgrade**
+  - Error: `TypeError: ... unexpected keyword argument ...` during WebSocket connect
+  - Fix: check the installed client library version and use its expected connect kwargs (for example `extra_headers` vs `additional_headers` in Python `websockets`).
+
+- **Busy Solana blocks disconnect client**
+  - Signal: close code `1009` (`message too big`) or intermittent disconnects on high-volume blocks
+  - Fix: increase your client max frame/message size to at least `32 MiB` (for example `max_size=32 * 1024 * 1024`).
+
+- **No data despite successful connect**
+  - Signal: socket opens but no block payloads arrive
+  - Fix: verify selector correctness (`<network>@<table>`), confirm table existence in `/streams` or `session.streams[].tables`, and avoid assuming wildcard replay behavior (`*@*` is live-only).
+
 ## References
 
 - Railway docs: <https://docs.railway.com/>
