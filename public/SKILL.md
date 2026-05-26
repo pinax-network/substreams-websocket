@@ -170,7 +170,7 @@ ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%
 
 Semantics: string equality only; fields are AND'd; values within a field are OR'd; events missing the filtered field are dropped. If every event of a block is dropped, the block is skipped for that client. Top-level fields (`block_num`, `network`, `module_hash`) are not filterable.
 
-See [`docs/filters.md`](https://github.com/pinax-network/substreams-websocket/blob/main/docs/filters.md) for full reference + common filter shapes per stream type.
+Filters accept only strings or arrays of strings. Max keys and values are server-configured (`SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS`, `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES`), and invalid payloads return an `error` reply without closing the socket.
 
 ## Reconnects and replay
 
@@ -196,6 +196,34 @@ Use `block_num + 1` from the latest payload you successfully processed. Wildcard
 ## Heartbeats
 
 The server sends WebSocket ping frames every `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` (default 180s). Standard WebSocket clients pong automatically. The server closes connections that don't pong within `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` (default 600s).
+
+## Railway setup reference (self-contained)
+
+Use these required env vars:
+
+```bash
+SUBSTREAMS_API_KEY=<pinax key>
+SUBSTREAMS_AUTH_URL=https://auth.pinax.network/v1/auth/issue
+SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080
+SUBSTREAMS_WEBSOCKET_STREAMS_YAML=<inline YAML>
+```
+
+`SUBSTREAMS_WEBSOCKET_STREAMS_YAML` should be the entire streams manifest as a multi-line value, for example:
+
+```yaml
+streams:
+  - network: solana-mainnet
+    endpoint: https://solana.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-solana/releases/download/swaps-v0.1.0/swaps-v0.1.0.spkg
+    module: db_out
+```
+
+Railway operations checklist:
+
+- Configure Healthcheck Path as `/healthz`.
+- If you need cursor continuity across redeploys, mount a volume and set `SUBSTREAMS_WEBSOCKET_CURSORS_DIR` to that mount (for example `/data/cursors`).
+- Empty `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` / `_TOML` values are treated as unset (fallback to file path config).
+- Solana-heavy workloads can create memory spikes; if you observe OOM kills, increase service memory.
 
 ## Troubleshooting (Railway + Solana-heavy streams)
 

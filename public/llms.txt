@@ -51,7 +51,25 @@ Replies are `{"result": null | [...] | {...}, "id": <echoed>}`. Errors are `{"er
 
 ## Event filters
 
-Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream. String equality only; fields AND, values OR; missing-field=miss; zero matches = block skipped. Wildcard selectors never filter. See `/SKILL.md` and `docs/filters.md` for per-stream filter examples.
+Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream. String equality only; fields AND, values OR; missing-field=miss; zero matches = block skipped. Wildcard selectors never filter. Full command and semantics reference is in `/SKILL.md`.
+
+## Railway setup (quick reference)
+
+Use these required env vars in Railway:
+
+```
+SUBSTREAMS_API_KEY=<pinax key>
+SUBSTREAMS_AUTH_URL=https://auth.pinax.network/v1/auth/issue
+SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080
+SUBSTREAMS_WEBSOCKET_STREAMS_YAML=<inline YAML>
+```
+
+`SUBSTREAMS_WEBSOCKET_STREAMS_YAML` should contain the entire `streams.yaml` content as a multi-line value. On Railway, this env var should be preferred over file-path config because the filesystem is ephemeral.
+
+Operational defaults:
+- Set Railway Healthcheck Path to `/healthz`.
+- If you need resume across redeploys, mount a volume (for example `/data/cursors`) and set `SUBSTREAMS_WEBSOCKET_CURSORS_DIR=/data/cursors`.
+- For Solana-heavy traffic, plan enough memory headroom and use client message-size limits of at least 32 MiB.
 
 ## Troubleshooting (Railway + clients)
 
@@ -64,5 +82,4 @@ Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url
 ## Resources
 
 - [SKILL.md](/SKILL.md): full agent-oriented reference.
-- [GitHub](https://github.com/pinax-network/substreams-websocket): source, releases, Docker image, Railway recipe.
 - `/`: interactive in-browser client (Scalar-style API reference + try-it panel).
