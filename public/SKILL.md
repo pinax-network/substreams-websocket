@@ -197,54 +197,23 @@ Use `block_num + 1` from the latest payload you successfully processed. Wildcard
 
 The server sends WebSocket ping frames every `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` (default 180s). Standard WebSocket clients pong automatically. The server closes connections that don't pong within `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` (default 600s).
 
-## Railway setup reference (self-contained)
+## Discovery endpoints
 
-Use these required env vars:
+Before opening a WebSocket, you can probe the server over plain HTTP:
 
-```bash
-SUBSTREAMS_API_KEY=<pinax key>
-SUBSTREAMS_AUTH_URL=https://auth.pinax.network/v1/auth/issue
-SUBSTREAMS_WEBSOCKET_LISTEN=0.0.0.0:8080
-SUBSTREAMS_WEBSOCKET_STREAMS_YAML=<inline YAML>
-```
+- `GET /healthz` — `200 ok` if the server is live, `503` if it is draining.
+- `GET /streams` — JSON listing of every configured `(network, package_name, package_version, module_hash, tables)`. Use this to confirm your target `network@table` exists before you connect.
+- `GET /` — interactive browser client (Scalar-style reference + try-it panel).
 
-`SUBSTREAMS_WEBSOCKET_STREAMS_YAML` should be the entire streams manifest as a multi-line value, for example:
+Or just connect to `wss://<host>/ws/*@*` and read the `session` message — it advertises every available stream and its tables.
 
-```yaml
-streams:
-  - network: solana-mainnet
-    endpoint: https://solana.substreams.pinax.network:443
-    manifest: https://github.com/pinax-network/substreams-solana/releases/download/swaps-v0.1.0/swaps-v0.1.0.spkg
-    module: db_out
-```
+## Client-side troubleshooting
 
-Railway operations checklist:
-
-- Configure Healthcheck Path as `/healthz`.
-- If you need cursor continuity across redeploys, mount a volume and set `SUBSTREAMS_WEBSOCKET_CURSORS_DIR` to that mount (for example `/data/cursors`).
-- Empty `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` / `_TOML` values are treated as unset (fallback to file path config).
-- Solana-heavy workloads can create memory spikes; if you observe OOM kills, increase service memory.
-
-## Troubleshooting (Railway + Solana-heavy streams)
-
-Start with server diagnostics before consumer code:
-
-1. Check `GET /healthz` (`200 ok` means the process is up; `503` means draining).
-2. Check `GET /streams` to confirm your target `network@table` is actually configured.
-3. Connect to `wss://<host>/ws/*@*` and inspect the initial `session` payload to verify available tables/module hashes.
-
-Common client-side failures:
-
-- `ModuleNotFoundError: No module named 'websockets'`  
-  Add `websockets` to `requirements.txt` and redeploy.
-
-- `TypeError: ... unexpected keyword argument ...` when connecting  
-  Your WebSocket library version likely changed a keyword name (for example `extra_headers` vs `additional_headers`). Align arguments with the installed library version.
-
-- Silent disconnects or close code `1009` (`message too big`) on busy Solana blocks  
-  Increase your client max frame/message size to at least `32 MiB` (for example `max_size=32 * 1024 * 1024` in Python clients).
-
-When Railway logs are delayed, prioritize `/healthz`, `/streams`, and stream lifecycle messages (`"status":"error"` / `"status":"fatal"`) to quickly isolate config vs consumer issues.
+- `ModuleNotFoundError: No module named 'websockets'` — install the Python `websockets` package (add to `requirements.txt`, `pyproject.toml`, etc.).
+- `TypeError: ... unexpected keyword argument ...` on connect — your WebSocket library renamed a kwarg between versions (e.g. `extra_headers` vs `additional_headers` in Python `websockets`). Match the kwarg to the installed version.
+- Silent disconnects or close code `1009` (`message too big`) on busy chains (Solana especially) — raise your client's max frame/message size to at least `32 MiB` (Python: `max_size=32 * 1024 * 1024`).
+- Socket opens but no payloads — re-check your selector (`<network>@<table>`), confirm the table exists in `/streams` or `session.streams[].tables`, and remember wildcard selectors (`*@*`, `*@swaps`, `solana-mainnet@*`) skip replay (live-only).
+- Stream lifecycle frames with `"status":"error"` or `"status":"fatal"` carry upstream errors — surface `message` to the user and reconnect with `?from_timestamp=` if you want to resume.
 
 ## Common agent recipes
 
@@ -287,7 +256,6 @@ Compare each broadcast's `module_hash` with the one you saw in the welcome messa
 
 - **Bounded replay only.** The on-disk replay log holds a `REPLAY_SECONDS` window per spkg (default 600s). For older history, use Substreams gRPC directly with the desired `start_block`.
 - **No payload transformation.** Field values are pass-through strings from the source DatabaseChanges. Numeric parsing, decimal handling, base58 / hex encoding are the consumer's responsibility.
-- **No authentication.** The server itself is open; access control is the operator's deploy concern.
 - **No persistence of historical messages.** Once a block is broadcast, it's gone unless a connected subscriber received it.
 
 ## When to use this server
