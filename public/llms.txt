@@ -53,6 +53,14 @@ Replies are `{"result": null | [...] | {...}, "id": <echoed>}`. Errors are `{"er
 
 Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream. String equality only; fields AND, values OR; missing-field=miss; zero matches = block skipped. Wildcard selectors never filter. See `/SKILL.md` and `docs/filters.md` for per-stream filter examples.
 
+## Troubleshooting (Railway + clients)
+
+- Build diagnostics before consumers: verify `GET /healthz` returns `200 ok`, then check `GET /streams` to confirm your `network` + `table` exist before opening WebSocket consumers.
+- Python clients must explicitly include `websockets` in `requirements.txt`; missing it typically fails with `ModuleNotFoundError: No module named 'websockets'`.
+- WebSocket client libraries rename connection kwargs across versions (for example `extra_headers` vs `additional_headers`). If you see `TypeError: ... unexpected keyword argument ...`, check your installed client version and update the argument name.
+- Busy Solana blocks can exceed conservative default client frame/message limits (often ~1 MiB). Raise the client max frame/message size to at least `32 MiB` (for example `max_size=32 * 1024 * 1024`) to avoid silent disconnects or close code `1009`.
+- If Railway logs are delayed, rely on `/healthz` and lifecycle messages (`"type":"stream","status":"error|fatal"`) as first-line diagnostics to cut time-to-fix.
+
 ## Resources
 
 - [SKILL.md](/SKILL.md): full agent-oriented reference.

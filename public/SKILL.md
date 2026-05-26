@@ -197,6 +197,27 @@ Use `block_num + 1` from the latest payload you successfully processed. Wildcard
 
 The server sends WebSocket ping frames every `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` (default 180s). Standard WebSocket clients pong automatically. The server closes connections that don't pong within `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` (default 600s).
 
+## Troubleshooting (Railway + Solana-heavy streams)
+
+Start with server diagnostics before consumer code:
+
+1. Check `GET /healthz` (`200 ok` means the process is up; `503` means draining).
+2. Check `GET /streams` to confirm your target `network@table` is actually configured.
+3. Connect to `wss://<host>/ws/*@*` and inspect the initial `session` payload to verify available tables/module hashes.
+
+Common client-side failures:
+
+- `ModuleNotFoundError: No module named 'websockets'`  
+  Add `websockets` to `requirements.txt` and redeploy.
+
+- `TypeError: ... unexpected keyword argument ...` when connecting  
+  Your WebSocket library version likely changed a keyword name (for example `extra_headers` vs `additional_headers`). Align arguments with the installed library version.
+
+- Silent disconnects or close code `1009` (`message too big`) on busy Solana blocks  
+  Increase your client max frame/message size to at least `32 MiB` (for example `max_size=32 * 1024 * 1024` in Python clients).
+
+When Railway logs are delayed, prioritize `/healthz`, `/streams`, and stream lifecycle messages (`"status":"error"` / `"status":"fatal"`) to quickly isolate config vs consumer issues.
+
 ## Common agent recipes
 
 ### "Tail every event from a single stream"
