@@ -209,6 +209,8 @@ fn build_app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/", get(landing_html))
         .route("/streams", get(streams_json))
+        .route("/openapi", get(openapi_json))
+        .route("/openapi.json", get(openapi_json))
         .route("/SKILL.md", get(skill_md))
         .route("/llms.txt", get(llms_txt))
         .route("/favicon.ico", get(favicon_png))
@@ -251,6 +253,236 @@ async fn streams_json(State(state): State<AppState>) -> impl IntoResponse {
     let body =
         serde_json::to_string(state.streams_meta.as_ref()).unwrap_or_else(|_| "[]".to_owned());
     ([("content-type", "application/json; charset=utf-8")], body)
+}
+
+/// OpenAPI 3.1 document describing every HTTP GET route exposed by this
+/// server. Paths reflect the runtime config (`ws_path`, `stream_path`,
+/// `health_path`, `metrics_path`) so the document matches the live router.
+/// WebSocket upgrade routes are listed for discoverability — the on-wire
+/// message contract is specified in `/SKILL.md`.
+async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
+    let ws = &state.config.websocket;
+    let ws_root = ws.ws_path.trim_end_matches('/');
+    let ws_wildcard = format!("{ws_root}/{{streams}}");
+    let stream_path = ws.stream_path.clone();
+    let health_path = ws.health_path.clone();
+    let metrics_path = ws.metrics_path.clone();
+
+    let mut paths = serde_json::Map::new();
+    paths.insert(
+        "/".to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "Landing page",
+                "description": "Interactive browser client (Scalar-style API reference + try-it panel).",
+                "responses": {
+                    "200": { "description": "HTML page", "content": {
+                        "text/html": { "schema": { "type": "string" } }
+                    } }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/streams".to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "List configured streams",
+                "description": "JSON array of every configured Substreams source: `(network, package_name, package_version, module_hash, manifest, module, description, tables)`.",
+                "responses": {
+                    "200": { "description": "Stream list", "content": {
+                        "application/json": { "schema": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/Stream" }
+                        } }
+                    } }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/openapi".to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "OpenAPI document",
+                "description": "This document. Also served at `/openapi.json`.",
+                "responses": {
+                    "200": { "description": "OpenAPI 3.1 JSON", "content": {
+                        "application/json": { "schema": { "type": "object" } }
+                    } }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/SKILL.md".to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "Agent-oriented reference",
+                "description": "Canonical client contract: on-wire JSON, command envelope, error shapes.",
+                "responses": {
+                    "200": { "description": "Markdown", "content": {
+                        "text/markdown": { "schema": { "type": "string" } }
+                    } }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/llms.txt".to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "Short llms.txt for AI crawlers",
+                "responses": {
+                    "200": { "description": "Plain text", "content": {
+                        "text/plain": { "schema": { "type": "string" } }
+                    } }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/favicon.png".to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "Favicon (PNG). Also served at `/favicon.ico`.",
+                "responses": {
+                    "200": { "description": "PNG", "content": {
+                        "image/png": { "schema": { "type": "string", "format": "binary" } }
+                    } }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        health_path.clone(),
+        serde_json::json!({
+            "get": {
+                "summary": "Health check",
+                "description": "`200 ok` if live, `503 draining` during shutdown drain.",
+                "responses": {
+                    "200": { "description": "Live", "content": {
+                        "text/plain": { "schema": { "type": "string", "example": "ok" } }
+                    } },
+                    "503": { "description": "Draining", "content": {
+                        "text/plain": { "schema": { "type": "string", "example": "draining" } }
+                    } }
+                }
+            }
+        }),
+    );
+    if !metrics_path.is_empty() {
+        paths.insert(
+            metrics_path.clone(),
+            serde_json::json!({
+                "get": {
+                    "summary": "Prometheus metrics",
+                    "description": "Text exposition format (`text/plain; version=0.0.4`).",
+                    "responses": {
+                        "200": { "description": "Prometheus text", "content": {
+                            "text/plain": { "schema": { "type": "string" } }
+                        } }
+                    }
+                }
+            }),
+        );
+    }
+    paths.insert(
+        ws_root.to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "WebSocket upgrade (no streams — error)",
+                "description": "Bare `/ws` returns HTTP 400. Use `/ws/<network>@<table>` or `/stream?streams=...`.",
+                "responses": {
+                    "400": { "description": "Missing stream selector" },
+                    "101": { "description": "Switching Protocols (never reached on this exact path)" }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        ws_wildcard,
+        serde_json::json!({
+            "get": {
+                "summary": "WebSocket upgrade (path mode)",
+                "description": "Single (`/ws/<a>`) or combined (`/ws/<a>/<b>/...`) channel subscription. Multi-channel wraps payloads in `{\"stream\":\"...\",\"data\":...}`. Wire contract: `/SKILL.md`.",
+                "parameters": [
+                    { "name": "streams", "in": "path", "required": true,
+                      "description": "One or more `<network>@<table>` selectors joined by `/`. `*` is a wildcard on either side.",
+                      "schema": { "type": "string" },
+                      "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
+                    { "name": "from_timestamp", "in": "query", "required": false,
+                      "description": "Resume from this Unix epoch seconds value or `YYYY-MM-DD HH:MM:SS` UTC. Replays buffered blocks for explicit selectors.",
+                      "schema": { "type": "string" } },
+                    { "name": "filter", "in": "query", "required": false,
+                      "description": "URL-encoded JSON `{field: value|[values]}`. Server-side row filter, fields AND, values OR.",
+                      "schema": { "type": "string" } }
+                ],
+                "responses": {
+                    "101": { "description": "Switching Protocols — WebSocket open" },
+                    "400": { "description": "Invalid selector / filter / from_timestamp" },
+                    "503": { "description": "max_clients reached" }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        stream_path,
+        serde_json::json!({
+            "get": {
+                "summary": "WebSocket upgrade (query mode)",
+                "description": "Combined-streams form. Payloads always wrapped in `{\"stream\":\"...\",\"data\":...}`.",
+                "parameters": [
+                    { "name": "streams", "in": "query", "required": true,
+                      "description": "One or more `<network>@<table>` selectors joined by `/`.",
+                      "schema": { "type": "string" },
+                      "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
+                    { "name": "from_timestamp", "in": "query", "required": false,
+                      "schema": { "type": "string" } },
+                    { "name": "filter", "in": "query", "required": false,
+                      "schema": { "type": "string" } }
+                ],
+                "responses": {
+                    "101": { "description": "Switching Protocols — WebSocket open" },
+                    "400": { "description": "Invalid `streams` / filter / from_timestamp" },
+                    "503": { "description": "max_clients reached" }
+                }
+            }
+        }),
+    );
+
+    let doc = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "substreams-websocket",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "Substreams-to-WebSocket fan-out server. HTTP GET routes for discovery, health, metrics, and WebSocket upgrade. On-wire message contract: `/SKILL.md`.",
+        },
+        "paths": serde_json::Value::Object(paths),
+        "components": {
+            "schemas": {
+                "Stream": {
+                    "type": "object",
+                    "required": ["network", "module", "manifest", "module_hash", "package_name", "package_version"],
+                    "properties": {
+                        "network": { "type": "string" },
+                        "module": { "type": "string" },
+                        "manifest": { "type": "string" },
+                        "module_hash": { "type": "string" },
+                        "package_name": { "type": "string" },
+                        "package_version": { "type": "string" },
+                        "description": { "type": "string" },
+                        "tables": { "type": "array", "items": { "type": "string" } }
+                    }
+                }
+            }
+        }
+    });
+
+    (
+        [("content-type", "application/json; charset=utf-8")],
+        doc.to_string(),
+    )
 }
 
 async fn favicon_png() -> impl IntoResponse {
