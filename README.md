@@ -39,6 +39,7 @@ cp .env.example .env             # set SUBSTREAMS_API_KEY=<pinax key>
 cp streams.example.yaml streams.yaml
 ./substreams-websocket serve
 curl http://127.0.0.1:8080/healthz                  # -> ok
+curl http://127.0.0.1:8080/openapi                  # -> OpenAPI 3.1 doc
 npx wscat -c 'ws://127.0.0.1:8080/ws/*@*'
 ```
 

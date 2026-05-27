@@ -203,6 +203,7 @@ Before opening a WebSocket, you can probe the server over plain HTTP:
 
 - `GET /healthz` — `200 ok` if the server is live, `503` if it is draining.
 - `GET /streams` — JSON listing of every configured `(network, package_name, package_version, module_hash, tables)`. Use this to confirm your target `network@table` exists before you connect.
+- `GET /openapi` (also `/openapi.json`) — OpenAPI 3.1 document describing every HTTP GET route. Paths reflect the runtime config.
 - `GET /` — interactive browser client (Scalar-style reference + try-it panel).
 
 Or just connect to `wss://<host>/ws/*@*` and read the `session` message — it advertises every available stream and its tables.
