@@ -57,6 +57,7 @@ Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url
 
 - `GET /healthz` → `200 ok` if the server is live, `503` if draining.
 - `GET /streams` → JSON list of configured streams with `network`, `package_name`, `package_version`, `module_hash`, and `tables`. Use it to confirm a `network@table` exists before connecting.
+- `GET /openapi` (also `/openapi.json`) → OpenAPI 3.1 document covering every HTTP GET route, reflecting runtime config.
 - `wss://<host>/ws/*@*` → connect and read the `session` message for the same catalog inline.
 
 ## Client troubleshooting
