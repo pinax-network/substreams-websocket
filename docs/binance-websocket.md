@@ -20,6 +20,7 @@ Authoritative upstream references:
 
 - **No `id` requirement.** Binance requires `id`; we treat it as optional and echo `null` when absent. Saves clients on quick experimentation.
 - **Wildcards.** Binance has no wildcard syntax. We accept `*` on either side of `@` so subscribers can pull "every swaps stream" or "every Solana stream" with one selector. Wildcards survive `LIST_SUBSCRIPTIONS` verbatim — they are not expanded.
+- **Comma network list.** The `<network>` side of a selector accepts a comma-separated list (`solana-mainnet,ethereum-mainnet@swaps`). The server expands it into one entry per network at parse time; `LIST_SUBSCRIPTIONS` returns the expanded form. Mixing `*` with named networks is rejected; comma on the `<table>` side is unsupported.
 - **No public/market/private split.** Binance routes streams under `/public`, `/market`, `/private`. We have one data type (`DatabaseChanges`) and one authorization model (server-wide), so the prefix would be ceremony.
 - **No 24-hour forced disconnect.** Binance kills connections at 24 hours. We do not. Operators can layer their own LB-level timeout if needed.
 - **No 1024-stream subscription cap.** Binance limits 1024 streams per connection. We have no hard cap.

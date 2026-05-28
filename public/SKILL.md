@@ -8,6 +8,8 @@ If you're an AI agent or programmatic client, this page tells you everything you
 
 Stream selectors are `<network>@<table>` (Binance market-streams style). `*` is a wildcard on either side. `<network>` is a chain identifier (e.g. `solana-mainnet`, `ethereum-mainnet`). `<table>` is the DatabaseChanges table emitted by the spkg's `db_out` module (e.g. `swaps`, `transfers`, `spl_transfers`).
 
+The `<network>` side also accepts a comma-separated list to subscribe to the same table across multiple chains in one selector: `<n1>,<n2>,...@<table>` (e.g. `solana-mainnet,ethereum-mainnet@swaps`). The server expands it into one entry per network — `LIST_SUBSCRIPTIONS` echoes the expanded form. Mixing `*` with named networks (`*,solana-mainnet@swaps`) is rejected; use a bare `*` instead. Comma on the `<table>` side is not supported.
+
 Two URL modes:
 
 | URL | Behavior |
@@ -24,6 +26,7 @@ Examples:
 wss://<host>/ws/solana-mainnet@swaps
 wss://<host>/ws/solana-mainnet@swaps/ethereum-mainnet@transfers
 wss://<host>/ws/*@swaps
+wss://<host>/ws/solana-mainnet,ethereum-mainnet@swaps
 wss://<host>/stream?streams=*@*
 ```
 
