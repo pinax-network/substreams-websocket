@@ -41,9 +41,11 @@ const EXTRA_KEYS_TO_STRIP: &[&str] = &[
     "tx_gas_limit",
     "tx_gas_used",
     "tx_value",
-    // EVM log provenance (set_template_log)
+    // EVM log provenance (set_template_log). `log_ordinal` is retained as
+    // the canonical EVM event ordering key; `log_index` is dropped since it
+    // duplicates positional information already available from the row order.
+    "log_index",
     "log_block_index",
-    "log_ordinal",
     "log_topics",
     "log_data",
     // EVM call provenance (set_template_call) — full set, debug/trace only
@@ -485,7 +487,7 @@ mod tests {
         assert_eq!(event["tx_hash"], "0xabc");
         assert_eq!(event["tx_from"], "0x111");
         assert_eq!(event["tx_to"], "0x222");
-        assert_eq!(event["log_index"], "5");
+        assert_eq!(event["log_ordinal"], "100");
         assert_eq!(event["log_address"], "0xdef");
         assert_eq!(event["input_amount"], "100");
         // Dropped
@@ -496,8 +498,8 @@ mod tests {
             "tx_gas_limit",
             "tx_gas_used",
             "tx_value",
+            "log_index",
             "log_block_index",
-            "log_ordinal",
             "log_topics",
             "log_data",
             "call_caller",
