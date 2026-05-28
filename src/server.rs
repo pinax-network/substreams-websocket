@@ -1768,7 +1768,8 @@ impl StreamId {
     }
 
     /// Parse a single `network@stream` string. `*` on either side is a
-    /// wildcard. Rejects empty input and any value missing the `@` separator.
+    /// wildcard. Rejects empty input, any value missing the `@` separator,
+    /// and comma-separated network lists (use [`parse_many`] for those).
     fn parse(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -1782,10 +1783,77 @@ impl StreamId {
                 ));
             }
         };
+        if net.contains(',') {
+            return Err(format!(
+                "stream selector {trimmed:?} is a comma list; not allowed here"
+            ));
+        }
+        if stream.contains(',') {
+            return Err(format!(
+                "stream selector {trimmed:?} has comma on the stream side; not supported"
+            ));
+        }
         Ok(StreamId {
             network: parse_wildcard(net),
             stream: parse_wildcard(stream),
         })
+    }
+
+    /// Parse a `network@stream` selector that may contain a comma-separated
+    /// network list (e.g. `solana-mainnet,ethereum-mainnet@swaps`). Returns
+    /// one [`StreamId`] per network. A bare `*` on the network side is a
+    /// wildcard and cannot be mixed with named networks. Comma is not
+    /// supported on the stream side.
+    fn parse_many(raw: &str) -> Result<Vec<Self>, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("stream selector must not be empty".to_owned());
+        }
+        let (net, stream) = match trimmed.split_once('@') {
+            Some((n, s)) => (n, s),
+            None => {
+                return Err(format!(
+                    "stream selector {trimmed:?} must be `network@stream`"
+                ));
+            }
+        };
+        if stream.contains(',') {
+            return Err(format!(
+                "stream selector {trimmed:?} has comma on the stream side; not supported"
+            ));
+        }
+        if !net.contains(',') {
+            return Ok(vec![StreamId {
+                network: parse_wildcard(net),
+                stream: parse_wildcard(stream),
+            }]);
+        }
+        let stream_field = parse_wildcard(stream);
+        let mut networks: Vec<String> = Vec::new();
+        for piece in net.split(',') {
+            let p = piece.trim();
+            if p.is_empty() {
+                return Err(format!(
+                    "stream selector {trimmed:?} has an empty network entry"
+                ));
+            }
+            if p == "*" {
+                return Err(format!(
+                    "stream selector {trimmed:?} mixes `*` with named networks; use a bare `*` selector instead"
+                ));
+            }
+            if networks.iter().any(|n| n == p) {
+                return Err(format!("stream selector {trimmed:?} repeats network {p:?}"));
+            }
+            networks.push(p.to_owned());
+        }
+        Ok(networks
+            .into_iter()
+            .map(|n| StreamId {
+                network: Some(n),
+                stream: stream_field.clone(),
+            })
+            .collect())
     }
 
     fn matches(&self, network: &str, stream: &str) -> bool {
@@ -1838,7 +1906,11 @@ fn parse_stream_list(raw: &str) -> Result<Vec<StreamId>, String> {
         if piece.is_empty() {
             continue;
         }
-        out.push(StreamId::parse(piece)?);
+        for id in StreamId::parse_many(piece)? {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
     }
     if out.is_empty() {
         return Err(
@@ -2374,8 +2446,8 @@ async fn handle_subscription_command(
             };
             let mut parsed = Vec::with_capacity(raw.len());
             for p in &raw {
-                match StreamId::parse(p) {
-                    Ok(id) => parsed.push(id),
+                match StreamId::parse_many(p) {
+                    Ok(ids) => parsed.extend(ids),
                     Err(error) => {
                         warn!(
                             client_id,
@@ -2414,8 +2486,8 @@ async fn handle_subscription_command(
             };
             let mut parsed = Vec::with_capacity(raw.len());
             for p in &raw {
-                match StreamId::parse(p) {
-                    Ok(id) => parsed.push(id),
+                match StreamId::parse_many(p) {
+                    Ok(ids) => parsed.extend(ids),
                     Err(error) => {
                         warn!(
                             client_id,
@@ -2718,6 +2790,60 @@ mod filter_tests {
     fn rejects_empty_list() {
         let err = parse_stream_list("").unwrap_err();
         assert!(err.contains("at least one"), "got: {err}");
+    }
+
+    #[test]
+    fn parses_comma_network_list() {
+        let list = parse_stream_list("solana-mainnet,ethereum-mainnet@swaps").unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].to_wire(), "solana-mainnet@swaps");
+        assert_eq!(list[1].to_wire(), "ethereum-mainnet@swaps");
+    }
+
+    #[test]
+    fn parses_comma_network_list_with_wildcard_table() {
+        let list = parse_stream_list("a,b@*").unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[0].matches("a", "anything"));
+        assert!(list[1].matches("b", "anything"));
+        assert!(!list[0].matches("c", "anything"));
+    }
+
+    #[test]
+    fn comma_list_dedupes_across_pieces() {
+        let list = parse_stream_list("a,b@swaps/b@swaps").unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn rejects_mixed_wildcard_in_network_list() {
+        let err = parse_stream_list("*,a@swaps").unwrap_err();
+        assert!(err.contains("mixes `*`"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_empty_network_in_list() {
+        let err = parse_stream_list("a,@swaps").unwrap_err();
+        assert!(err.contains("empty network"), "got: {err}");
+        let err = parse_stream_list(",a@swaps").unwrap_err();
+        assert!(err.contains("empty network"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_network_inside_one_selector() {
+        let err = parse_stream_list("a,a@swaps").unwrap_err();
+        assert!(err.contains("repeats network"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_comma_on_stream_side() {
+        let err = parse_stream_list("solana-mainnet@swaps,transfers").unwrap_err();
+        assert!(err.contains("stream side"), "got: {err}");
+    }
+
+    #[test]
+    fn stream_id_parse_rejects_comma() {
+        assert!(StreamId::parse("a,b@swaps").is_err());
     }
 
     #[test]
