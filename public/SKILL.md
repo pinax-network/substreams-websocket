@@ -90,6 +90,8 @@ Field reference:
 - All values inside `events[*]` are strings on the wire (per DatabaseChanges proto). Numeric types are stringified; the agent must parse.
 - The keys `block_num`, `block_hash`, `timestamp`, `minute` are stripped from each event because they duplicate top-level meta.
 - Upstream `ordinal`, `operation`, `pk`/`composite_pk`, `update_op` are dropped — never surfaced.
+- ClickHouse-backfill provenance columns are dropped on the wire: EVM `tx_index`, `tx_nonce`, `tx_gas_price`, `tx_gas_limit`, `tx_gas_used`, `tx_value`, `log_block_index`, `log_ordinal`, `log_topics`, `log_data`, all `call_*` (caller/index/begin_ordinal/end_ordinal/address/value/gas_consumed/gas_limit/depth/parent_index/type); SVM `compute_units_consumed`, `stack_height`, and the SVM transaction `fee` (the latter only when the row also carries `compute_units_consumed`, so EVM `swap_fee.fee` survives). Kept: `tx_hash`, `tx_from`, `tx_to`, `log_index`, `log_address`, `signature`, `fee_payer`, `program_id`.
+- Any field whose key ends in `_raw` is treated as a comma-joined list: the value is split on `,` and re-emitted as a JSON array under the suffix-stripped key (e.g. `signers_raw: "a,b,c"` becomes `signers: ["a","b","c"]`). Empty strings become empty arrays.
 
 When `wrap_envelope` is `true`, the same object is delivered nested under `data`:
 
