@@ -29,6 +29,56 @@ pub const SUPPORTED_OUTPUT_TYPE: &str = "proto:sf.substreams.sink.database.v1.Da
 /// event to avoid repeating the same value on every row.
 const BLOCK_KEYS_TO_STRIP: &[&str] = &["block_num", "block_hash", "timestamp", "minute"];
 
+/// Per-row keys that exist only as ClickHouse-backfill provenance. They carry
+/// no useful information for a live WebSocket consumer. Names taken from the
+/// shared `substreams-evm` (`set_template_tx`/`_log`/`_call`) and
+/// `substreams-svm` (`set_*_transaction_v2`/`_instruction_v2`) templates.
+const EXTRA_KEYS_TO_STRIP: &[&str] = &[
+    // EVM tx provenance (set_template_tx)
+    "tx_index",
+    "tx_nonce",
+    "tx_gas_price",
+    "tx_gas_limit",
+    "tx_gas_used",
+    "tx_value",
+    // EVM log provenance (set_template_log). `log_ordinal` is retained as
+    // the canonical EVM event ordering key; `log_index` is dropped since it
+    // duplicates positional information already available from the row order.
+    "log_index",
+    "log_block_index",
+    "log_topics",
+    "log_data",
+    // EVM call provenance (set_template_call) — full set, debug/trace only
+    "call_caller",
+    "call_index",
+    "call_begin_ordinal",
+    "call_end_ordinal",
+    "call_address",
+    "call_value",
+    "call_gas_consumed",
+    "call_gas_limit",
+    "call_depth",
+    "call_parent_index",
+    "call_type",
+    // SVM transaction provenance (set_*_transaction_v2)
+    "compute_units_consumed",
+    // SVM instruction provenance (set_*_instruction_v2). `program_id` is
+    // intentionally retained — semantic identifier, not provenance.
+    "stack_height",
+];
+
+/// SVM emits a transaction-level `fee` that is pure provenance. EVM's
+/// `swap_fee` table emits a *protocol* `fee` that is real data. We can't
+/// tell by table name alone here (decoder is chain-agnostic), so strip
+/// `fee` only when the row also carries SVM-specific `compute_units_consumed`,
+/// which never appears on EVM rows.
+const SVM_FEE_GUARD: &str = "compute_units_consumed";
+
+/// Suffix applied by upstream templates when a list value is joined into a
+/// comma string for ClickHouse. On the wire we split it back into a JSON
+/// array and drop the suffix (`signers_raw` → `signers: [...]`).
+const RAW_LIST_SUFFIX: &str = "_raw";
+
 #[derive(Debug, Clone)]
 pub struct BlockContext {
     pub block_num: u64,
@@ -92,10 +142,30 @@ pub fn normalize_database_changes(
         .table_changes
         .into_iter()
         .filter_map(|change| {
+            let has_svm_fee_guard = change.fields.iter().any(|f| f.name == SVM_FEE_GUARD);
             let mut row = serde_json::Map::with_capacity(change.fields.len() + 1);
             row.insert("@table".to_owned(), serde_json::Value::String(change.table));
             for field in change.fields {
                 if BLOCK_KEYS_TO_STRIP.contains(&field.name.as_str()) {
+                    continue;
+                }
+                if EXTRA_KEYS_TO_STRIP.contains(&field.name.as_str()) {
+                    continue;
+                }
+                if field.name == "fee" && has_svm_fee_guard {
+                    continue;
+                }
+                if let Some(stripped) = field.name.strip_suffix(RAW_LIST_SUFFIX) {
+                    let items: Vec<serde_json::Value> = if field.value.is_empty() {
+                        Vec::new()
+                    } else {
+                        field
+                            .value
+                            .split(',')
+                            .map(|s| serde_json::Value::String(s.to_owned()))
+                            .collect()
+                    };
+                    row.insert(stripped.to_owned(), serde_json::Value::Array(items));
                     continue;
                 }
                 row.insert(field.name, serde_json::Value::String(field.value));
@@ -370,6 +440,172 @@ mod tests {
         // Per-row: `@table` first, then field-name insertion order.
         assert!(text.find("\"@table\"").unwrap() < text.find("\"zeta\"").unwrap());
         assert!(text.find("\"zeta\"").unwrap() < text.find("\"alpha\"").unwrap());
+    }
+
+    #[test]
+    fn strips_evm_extra_metadata_columns() {
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![
+                    field("tx_hash", "0xabc"),
+                    field("tx_from", "0x111"),
+                    field("tx_to", "0x222"),
+                    field("tx_index", "3"),
+                    field("tx_nonce", "7"),
+                    field("tx_gas_price", "1000"),
+                    field("tx_gas_limit", "21000"),
+                    field("tx_gas_used", "21000"),
+                    field("tx_value", "0"),
+                    field("log_index", "5"),
+                    field("log_address", "0xdef"),
+                    field("log_block_index", "9"),
+                    field("log_ordinal", "100"),
+                    field("log_topics", "0x1,0x2"),
+                    field("log_data", "0xff"),
+                    field("call_caller", "0x999"),
+                    field("call_index", "0"),
+                    field("call_begin_ordinal", "1"),
+                    field("call_end_ordinal", "2"),
+                    field("call_address", "0xaaa"),
+                    field("call_value", "0"),
+                    field("call_gas_consumed", "100"),
+                    field("call_gas_limit", "200"),
+                    field("call_depth", "1"),
+                    field("call_parent_index", "0"),
+                    field("call_type", "call"),
+                    field("input_amount", "100"),
+                ],
+                primary_key: None,
+            }],
+        };
+        let message = normalize_database_changes(changes, context());
+        let event = &message.events[0];
+        // Kept
+        assert_eq!(event["tx_hash"], "0xabc");
+        assert_eq!(event["tx_from"], "0x111");
+        assert_eq!(event["tx_to"], "0x222");
+        assert_eq!(event["log_ordinal"], "100");
+        assert_eq!(event["log_address"], "0xdef");
+        assert_eq!(event["input_amount"], "100");
+        // Dropped
+        for key in [
+            "tx_index",
+            "tx_nonce",
+            "tx_gas_price",
+            "tx_gas_limit",
+            "tx_gas_used",
+            "tx_value",
+            "log_index",
+            "log_block_index",
+            "log_topics",
+            "log_data",
+            "call_caller",
+            "call_index",
+            "call_begin_ordinal",
+            "call_end_ordinal",
+            "call_address",
+            "call_value",
+            "call_gas_consumed",
+            "call_gas_limit",
+            "call_depth",
+            "call_parent_index",
+            "call_type",
+        ] {
+            assert!(event.get(key).is_none(), "{key} must be dropped");
+        }
+    }
+
+    #[test]
+    fn strips_svm_extra_metadata_but_keeps_program_id() {
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![
+                    field("signature", "sig"),
+                    field("fee_payer", "payer"),
+                    field("fee", "5000"),
+                    field("compute_units_consumed", "20000"),
+                    field("program_id", "prog"),
+                    field("stack_height", "2"),
+                    field("input_amount", "1"),
+                ],
+                primary_key: None,
+            }],
+        };
+        let message = normalize_database_changes(changes, context());
+        let event = &message.events[0];
+        assert_eq!(event["signature"], "sig");
+        assert_eq!(event["fee_payer"], "payer");
+        assert_eq!(event["program_id"], "prog");
+        assert_eq!(event["input_amount"], "1");
+        assert!(event.get("fee").is_none());
+        assert!(event.get("compute_units_consumed").is_none());
+        assert!(event.get("stack_height").is_none());
+    }
+
+    #[test]
+    fn keeps_fee_on_evm_swap_fee_table_without_cu_guard() {
+        // EVM `swap_fee` rows carry a real `fee` value (protocol fee) and no
+        // `compute_units_consumed`. The conditional drop must not touch it.
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swap_fee".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![
+                    field("protocol", "uniswap_v3"),
+                    field("pool", "0xpool"),
+                    field("fee", "3000"),
+                ],
+                primary_key: None,
+            }],
+        };
+        let message = normalize_database_changes(changes, context());
+        assert_eq!(message.events[0]["fee"], "3000");
+    }
+
+    #[test]
+    fn splits_raw_suffix_into_array_and_renames() {
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![
+                    field("signers_raw", "alice,bob,carol"),
+                    field("input_amount", "1"),
+                ],
+                primary_key: None,
+            }],
+        };
+        let message = normalize_database_changes(changes, context());
+        let event = &message.events[0];
+        assert!(event.get("signers_raw").is_none(), "`_raw` key removed");
+        let signers = event["signers"].as_array().expect("array");
+        assert_eq!(signers.len(), 3);
+        assert_eq!(signers[0], "alice");
+        assert_eq!(signers[2], "carol");
+    }
+
+    #[test]
+    fn empty_raw_field_becomes_empty_array() {
+        let changes = DatabaseChanges {
+            table_changes: vec![TableChange {
+                table: "swaps".to_owned(),
+                ordinal: 0,
+                operation: 1,
+                fields: vec![field("signers_raw", ""), field("input_amount", "1")],
+                primary_key: None,
+            }],
+        };
+        let message = normalize_database_changes(changes, context());
+        let signers = message.events[0]["signers"].as_array().expect("array");
+        assert!(signers.is_empty());
     }
 
     #[test]
