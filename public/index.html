@@ -1527,6 +1527,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
     if (inner && Array.isArray(inner.events)) {
       var bn = inner.block_num != null ? inner.block_num : '?';
       var ts = inner.timestamp || '';
+      var net = typeof inner.network === 'string' ? inner.network : '';
       var tables = {};
       // Modern payloads carry `table` at the top level; legacy per-event
       // `@table` is honored as a fallback.
@@ -1535,7 +1536,7 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
       var tableList = Object.keys(tables).join(',') || '(none)';
       return {
         compact: true,
-        summary: 'block ' + bn + (ts ? '  ' + ts : '') + '  · ' + inner.events.length + ' event' + (inner.events.length === 1 ? '' : 's') + '  · ' + tableList,
+        summary: (net ? net + '  · ' : '') + 'block ' + bn + (ts ? '  ' + ts : '') + '  · ' + inner.events.length + ' event' + (inner.events.length === 1 ? '' : 's') + '  · ' + tableList,
       };
     }
     if (parsed && parsed.type === 'session') {
