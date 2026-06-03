@@ -622,6 +622,8 @@ fn spawn_streams(
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let cursors = CursorStore::new(state.config.cursors_dir.clone());
     let replay = state.replay.clone();
+    let cursor_max_age = (state.config.cursor_max_age_secs > 0)
+        .then(|| Duration::from_secs(state.config.cursor_max_age_secs));
     prepared
         .into_iter()
         .map(|prep| {
@@ -629,7 +631,7 @@ fn spawn_streams(
             let cursors = cursors.clone();
             let replay = replay.clone();
             tokio::spawn(async move {
-                run_substream(prep, clients, cursors, replay).await;
+                run_substream(prep, clients, cursors, replay, cursor_max_age).await;
             })
         })
         .collect()
@@ -670,11 +672,60 @@ impl StreamIdentity {
     }
 }
 
+/// Whether a persisted cursor should be resumed from, given the staleness
+/// policy. Pure decision — the caller logs and acts on it. Resuming from a
+/// cursor written long ago replays every block from that position to chain
+/// head (the catch-up firehose), so anything other than a confirmed-fresh
+/// cursor fails safe to "start from the configured start_block".
+enum CursorFreshness {
+    /// Cursor is fresh (or the check is disabled) — resume from it.
+    Resume,
+    /// Cursor is older than the configured max age.
+    Stale { age_secs: u64, max_secs: u64 },
+    /// Cursor age couldn't be read (mtime missing / unreadable / unsupported).
+    AgeUnknown { reason: String },
+}
+
+/// Classify a persisted cursor against the max-age policy. `max_age == None`
+/// disables the check and always resumes. Otherwise an unreadable mtime is
+/// treated as stale rather than silently resumed.
+async fn cursor_freshness(
+    cursors: &CursorStore,
+    identity: &StreamIdentity,
+    max_age: Option<Duration>,
+) -> CursorFreshness {
+    let Some(max_age) = max_age else {
+        return CursorFreshness::Resume;
+    };
+    match cursors
+        .age(
+            &identity.network,
+            &identity.package_name,
+            &identity.package_version,
+            &identity.module_hash,
+        )
+        .await
+    {
+        Ok(Some(age)) if age <= max_age => CursorFreshness::Resume,
+        Ok(Some(age)) => CursorFreshness::Stale {
+            age_secs: age.as_secs(),
+            max_secs: max_age.as_secs(),
+        },
+        Ok(None) => CursorFreshness::AgeUnknown {
+            reason: "cursor file vanished before its age could be read".to_owned(),
+        },
+        Err(error) => CursorFreshness::AgeUnknown {
+            reason: error.to_string(),
+        },
+    }
+}
+
 async fn run_substream(
     prep: PreparedStream,
     clients: ClientRegistry,
     cursors: CursorStore,
     replay: ReplayLog,
+    cursor_max_age: Option<Duration>,
 ) {
     let PreparedStream {
         mut config,
@@ -713,7 +764,10 @@ async fn run_substream(
     loop {
         // Reload cursor from disk on every retry so we resume from the latest
         // persisted position, not whatever the previous run started with.
-        match cursors
+        // Anything other than a fresh, loadable cursor resolves to `None` —
+        // start from the configured start_block (default -1 = head).
+        let start_block = format!("{:?}", config.substreams.start_block);
+        config.substreams.start_cursor = match cursors
             .load(
                 &identity.network,
                 &identity.package_name,
@@ -722,22 +776,41 @@ async fn run_substream(
             )
             .await
         {
-            Ok(Some(cursor)) => {
-                info!(
-                    stream = %identity.display(),
-                    cursor_len = cursor.len(),
-                    "resuming Substreams read from persisted cursor"
-                );
-                config.substreams.start_cursor = Some(cursor);
-            }
-            Ok(None) => {
-                config.substreams.start_cursor = None;
-            }
+            Ok(Some(cursor)) => match cursor_freshness(&cursors, &identity, cursor_max_age).await {
+                CursorFreshness::Resume => {
+                    info!(
+                        stream = %identity.display(),
+                        cursor_len = cursor.len(),
+                        "resuming Substreams read from persisted cursor"
+                    );
+                    Some(cursor)
+                }
+                CursorFreshness::Stale { age_secs, max_secs } => {
+                    info!(
+                        stream = %identity.display(),
+                        cursor_age_secs = age_secs,
+                        max_age_secs = max_secs,
+                        start_block,
+                        "ignoring stale persisted cursor; starting from configured start_block"
+                    );
+                    None
+                }
+                CursorFreshness::AgeUnknown { reason } => {
+                    warn!(
+                        stream = %identity.display(),
+                        reason,
+                        start_block,
+                        "could not determine cursor age; treating as stale and starting from configured start_block"
+                    );
+                    None
+                }
+            },
+            Ok(None) => None,
             Err(error) => {
                 warn!(stream = %identity.display(), %error, "failed to load cursor; starting from configured block");
-                config.substreams.start_cursor = None;
+                None
             }
-        }
+        };
 
         info!(
             stream = %identity.display(),
@@ -3997,6 +4070,7 @@ mod tests {
                 max_seconds: 0,
                 dir: std::path::PathBuf::from("/tmp/replay-test"),
             },
+            cursor_max_age_secs: 0,
         }
     }
 

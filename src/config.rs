@@ -6,6 +6,14 @@ pub struct Config {
     pub websocket: WebSocketConfig,
     pub cursors_dir: std::path::PathBuf,
     pub replay: ReplayConfig,
+    /// Max age (seconds) of a persisted cursor before it is ignored on
+    /// startup. A cursor file whose last-modified time is older than this is
+    /// treated as stale: the stream starts from the configured `start_block`
+    /// (default `-1` = chain head) instead of replaying every block from the
+    /// stale position to head. Guards against the catch-up firehose after the
+    /// server has been down a while. `0` disables the check (always resume
+    /// from the cursor, however old).
+    pub cursor_max_age_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +271,7 @@ mod tests {
                 max_seconds: 0,
                 dir: std::path::PathBuf::from("/tmp/replay-test"),
             },
+            cursor_max_age_secs: 0,
         }
     }
 

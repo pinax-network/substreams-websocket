@@ -82,6 +82,18 @@ struct ServeArgs {
         default_value = "./replay"
     )]
     replay_dir: PathBuf,
+
+    /// Max age in seconds of a persisted cursor before it is ignored on
+    /// startup. If a cursor file is older than this, the stream starts from
+    /// its configured `start_block` (default `-1` = chain head) instead of
+    /// replaying every block from the stale cursor to head. Default 600s
+    /// (10 minutes). `0` disables the check (always resume from the cursor).
+    #[arg(
+        long,
+        env = "SUBSTREAMS_WEBSOCKET_CURSOR_MAX_AGE_SECS",
+        default_value_t = 600
+    )]
+    cursor_max_age_secs: u64,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -417,6 +429,7 @@ impl ServeArgs {
                 max_seconds: self.replay_seconds,
                 dir: self.replay_dir,
             },
+            cursor_max_age_secs: self.cursor_max_age_secs,
         })
     }
 }
