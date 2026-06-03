@@ -77,7 +77,8 @@ struct StreamMeta {
     description: String,
     /// Operator-declared list of DatabaseChanges tables this spkg is expected
     /// to emit. Lets clients discover available `<network>@<table>` channels
-    /// from the welcome message without waiting for events.
+    /// from the welcome message without waiting for events. When non-empty it
+    /// is also an allowlist — rows for any other table are dropped server-side.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tables: Vec<String>,
 }
@@ -894,7 +895,7 @@ async fn handle_substream_event(
                 "package_version" => identity.package_version.clone()
             )
             .increment(1);
-            let decoded = match decode_database_changes(&payload, context) {
+            let mut decoded = match decode_database_changes(&payload, context) {
                 Ok(decoded) => decoded,
                 Err(error) => {
                     warn!(stream = %identity.display(), %error, "failed to decode Substreams block output");
@@ -916,6 +917,22 @@ async fn handle_substream_event(
                     return;
                 }
             };
+
+            // Restrict emitted rows to the operator-declared `tables` for this
+            // stream. When `tables` is empty the stream is in
+            // discover-at-runtime mode and every emitted `@table` passes
+            // through. When non-empty it is an allowlist: any row whose
+            // `@table` is not declared (or that carries no `@table`) is dropped
+            // before gauges, replay, and broadcast — so noise tables never
+            // leave the server or land in the replay log.
+            if !identity.tables.is_empty() {
+                decoded.events.retain(|event| {
+                    event
+                        .get("@table")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|table| identity.tables.iter().any(|t| t == table))
+                });
+            }
 
             update_head_block_gauges(identity, &decoded);
 
@@ -3298,6 +3315,78 @@ mod tests {
         assert!(
             body["events"][0].get("table").is_none(),
             "bare 'table' must not appear"
+        );
+
+        socket.close(None).await.expect("client closes cleanly");
+    }
+
+    #[tokio::test]
+    async fn undeclared_tables_are_dropped_before_broadcast() {
+        // `test_identity` declares only `tables: ["swaps"]`. A block carrying
+        // both a declared `swaps` row and an undeclared `noise` row must
+        // broadcast the swaps payload and silently drop the noise table.
+        let server = TestServer::start(config()).await;
+
+        let (mut socket, _) = connect_async(format!("ws://{}/stream?streams=*@*", server.addr))
+            .await
+            .expect("websocket connects");
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        for _ in 0..40 {
+            if server.clients.active_count().await > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let changes = DatabaseChanges {
+            table_changes: vec![
+                TableChange {
+                    table: "swaps".to_owned(),
+                    ordinal: 0,
+                    operation: 1,
+                    fields: vec![Field {
+                        name: "user".to_owned(),
+                        value: "alice".to_owned(),
+                        update_op: 1,
+                    }],
+                    primary_key: None,
+                },
+                TableChange {
+                    table: "noise".to_owned(),
+                    ordinal: 0,
+                    operation: 1,
+                    fields: vec![Field {
+                        name: "junk".to_owned(),
+                        value: "drop-me".to_owned(),
+                        update_op: 1,
+                    }],
+                    primary_key: None,
+                },
+            ],
+        };
+        let mut payload = Vec::new();
+        changes.encode(&mut payload).expect("encode");
+        deliver_block(&server, payload).await;
+
+        // First (and only) broadcast must be the declared swaps table.
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("swaps block arrives")
+            .expect("swaps block message")
+            .expect("swaps block ok");
+        let TungsteniteMessage::Text(text) = message else {
+            panic!("expected text block, got {message:?}");
+        };
+        let envelope: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(envelope["stream"], "solana-mainnet@swaps");
+        assert_eq!(envelope["data"]["table"], "swaps");
+
+        // No second broadcast for the undeclared `noise` table.
+        let next = tokio::time::timeout(Duration::from_millis(300), socket.next()).await;
+        assert!(
+            next.is_err(),
+            "undeclared `noise` table must not be broadcast; got {next:?}"
         );
 
         socket.close(None).await.expect("client closes cleanly");

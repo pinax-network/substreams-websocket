@@ -55,7 +55,7 @@ On connect, the server sends a single `session` message describing every configu
 }
 ```
 
-- `streams` lists every Substreams source the server reads. Each entry is identified by `(network, package_name, package_version, module_hash)` — there is no operator-defined name. The optional `tables` array advertises which DatabaseChanges tables that spkg emits, so clients can build a discovery UI without waiting for blocks.
+- `streams` lists every Substreams source the server reads. Each entry is identified by `(network, package_name, package_version, module_hash)` — there is no operator-defined name. The optional `tables` array advertises which DatabaseChanges tables that spkg emits, so clients can build a discovery UI without waiting for blocks. When present it is also the complete allowlist of broadcast tables — the server drops rows for any table not listed, so a `network@table` outside this set will never deliver. When absent, every table the spkg emits is broadcast.
 - `subscriptions` is what this connection will actually receive (filtered set). Selectors are `<network>@<table>` where `<table>` is a DatabaseChanges table emitted by the spkg's `db_out`.
 - `wrap_envelope` tells you whether subsequent payloads are wrapped in `{"stream","data"}` or sent raw.
 

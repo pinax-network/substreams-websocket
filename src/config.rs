@@ -28,8 +28,13 @@ pub struct StreamConfig {
     /// Operator-declared list of DatabaseChanges tables this spkg is expected
     /// to emit (`swaps`, `transfers`, ...). Surfaced in the WebSocket welcome
     /// message so subscribers can discover available `<network>@<table>`
-    /// channels without waiting for a block to land. Optional — empty means
-    /// "tables are discovered at runtime from event `@table` fields".
+    /// channels without waiting for a block to land.
+    ///
+    /// Doubles as a per-stream allowlist: when non-empty, only rows whose
+    /// `@table` is declared here are broadcast or written to the replay log —
+    /// any other table the spkg emits is dropped as noise. Optional — empty
+    /// means "tables are discovered at runtime from event `@table` fields" and
+    /// every emitted table passes through unfiltered.
     pub tables: Vec<String>,
 }
 
