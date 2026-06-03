@@ -24,7 +24,10 @@
 #   stop_block  — default "0" (stream indefinitely).
 #   params      — list of "module=value" Substreams parameters.
 #   tables      — operator-declared DatabaseChanges tables this spkg emits.
-#                 Surfaced in the welcome message for client-side discovery.
+#                 Surfaced in the welcome message for client-side discovery,
+#                 and acts as an allowlist: when set, rows for any other table
+#                 are dropped (not broadcast, not replayed). Omit to emit every
+#                 table the spkg produces.
 
 streams:
   - network: solana
