@@ -764,7 +764,10 @@ async fn run_substream(
     loop {
         // Reload cursor from disk on every retry so we resume from the latest
         // persisted position, not whatever the previous run started with.
-        match cursors
+        // Anything other than a fresh, loadable cursor resolves to `None` —
+        // start from the configured start_block (default -1 = head).
+        let start_block = format!("{:?}", config.substreams.start_block);
+        config.substreams.start_cursor = match cursors
             .load(
                 &identity.network,
                 &identity.package_name,
@@ -780,36 +783,34 @@ async fn run_substream(
                         cursor_len = cursor.len(),
                         "resuming Substreams read from persisted cursor"
                     );
-                    config.substreams.start_cursor = Some(cursor);
+                    Some(cursor)
                 }
                 CursorFreshness::Stale { age_secs, max_secs } => {
                     info!(
                         stream = %identity.display(),
                         cursor_age_secs = age_secs,
                         max_age_secs = max_secs,
-                        start_block = ?config.substreams.start_block,
+                        start_block,
                         "ignoring stale persisted cursor; starting from configured start_block"
                     );
-                    config.substreams.start_cursor = None;
+                    None
                 }
                 CursorFreshness::AgeUnknown { reason } => {
                     warn!(
                         stream = %identity.display(),
                         reason,
-                        start_block = ?config.substreams.start_block,
+                        start_block,
                         "could not determine cursor age; treating as stale and starting from configured start_block"
                     );
-                    config.substreams.start_cursor = None;
+                    None
                 }
             },
-            Ok(None) => {
-                config.substreams.start_cursor = None;
-            }
+            Ok(None) => None,
             Err(error) => {
                 warn!(stream = %identity.display(), %error, "failed to load cursor; starting from configured block");
-                config.substreams.start_cursor = None;
+                None
             }
-        }
+        };
 
         info!(
             stream = %identity.display(),
