@@ -622,6 +622,8 @@ fn spawn_streams(
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let cursors = CursorStore::new(state.config.cursors_dir.clone());
     let replay = state.replay.clone();
+    let cursor_max_age = (state.config.cursor_max_age_secs > 0)
+        .then(|| Duration::from_secs(state.config.cursor_max_age_secs));
     prepared
         .into_iter()
         .map(|prep| {
@@ -629,7 +631,7 @@ fn spawn_streams(
             let cursors = cursors.clone();
             let replay = replay.clone();
             tokio::spawn(async move {
-                run_substream(prep, clients, cursors, replay).await;
+                run_substream(prep, clients, cursors, replay, cursor_max_age).await;
             })
         })
         .collect()
@@ -675,6 +677,7 @@ async fn run_substream(
     clients: ClientRegistry,
     cursors: CursorStore,
     replay: ReplayLog,
+    cursor_max_age: Option<Duration>,
 ) {
     let PreparedStream {
         mut config,
@@ -723,12 +726,41 @@ async fn run_substream(
             .await
         {
             Ok(Some(cursor)) => {
-                info!(
-                    stream = %identity.display(),
-                    cursor_len = cursor.len(),
-                    "resuming Substreams read from persisted cursor"
-                );
-                config.substreams.start_cursor = Some(cursor);
+                // Ignore a cursor that is too old to resume from cheaply:
+                // resuming would replay every block from the stale position to
+                // chain head (the catch-up firehose). Start from the configured
+                // start_block (default -1 = head) instead.
+                let stale_age = match cursor_max_age {
+                    Some(max_age) => cursors
+                        .age(
+                            &identity.network,
+                            &identity.package_name,
+                            &identity.package_version,
+                            &identity.module_hash,
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|age| *age > max_age),
+                    None => None,
+                };
+                if let Some(age) = stale_age {
+                    info!(
+                        stream = %identity.display(),
+                        cursor_age_secs = age.as_secs(),
+                        max_age_secs = cursor_max_age.map(|d| d.as_secs()),
+                        start_block = ?config.substreams.start_block,
+                        "ignoring stale persisted cursor; starting from configured start_block"
+                    );
+                    config.substreams.start_cursor = None;
+                } else {
+                    info!(
+                        stream = %identity.display(),
+                        cursor_len = cursor.len(),
+                        "resuming Substreams read from persisted cursor"
+                    );
+                    config.substreams.start_cursor = Some(cursor);
+                }
             }
             Ok(None) => {
                 config.substreams.start_cursor = None;
@@ -3997,6 +4029,7 @@ mod tests {
                 max_seconds: 0,
                 dir: std::path::PathBuf::from("/tmp/replay-test"),
             },
+            cursor_max_age_secs: 0,
         }
     }
 

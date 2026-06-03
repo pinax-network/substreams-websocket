@@ -50,6 +50,31 @@ impl CursorStore {
         ))
     }
 
+    /// Age of the cursor file by last-modified time. `Ok(None)` when the file
+    /// does not exist. Used at startup to decide whether a persisted cursor is
+    /// too stale to resume from (a long catch-up firehose) and the stream
+    /// should instead start from its configured `start_block`. A negative
+    /// elapsed (file mtime in the future, e.g. clock skew) clamps to zero.
+    pub async fn age(
+        &self,
+        network: &str,
+        package_name: &str,
+        package_version: &str,
+        module_hash_hex: &str,
+    ) -> io::Result<Option<std::time::Duration>> {
+        let path = self.path(network, package_name, package_version, module_hash_hex);
+        match fs::metadata(&path).await {
+            Ok(meta) => {
+                let modified = meta.modified()?;
+                Ok(Some(
+                    modified.elapsed().unwrap_or(std::time::Duration::ZERO),
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn load(
         &self,
         network: &str,
@@ -182,6 +207,25 @@ mod tests {
             store.load(net, PKG, VER, hash).await.unwrap(),
             Some("def456".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn age_is_none_until_saved_then_small() {
+        let dir = tempdir().expect("tempdir");
+        let store = CursorStore::new(dir.path());
+        let net = "solana-mainnet";
+        let hash = "5555555555555555555555555555555555555555";
+        // No file yet → no age.
+        assert_eq!(store.age(net, PKG, VER, hash).await.unwrap(), None);
+
+        store.save(net, PKG, VER, hash, "abc").await.expect("save");
+        let age = store
+            .age(net, PKG, VER, hash)
+            .await
+            .unwrap()
+            .expect("file exists");
+        // Freshly written — comfortably under any sane staleness threshold.
+        assert!(age < std::time::Duration::from_secs(60), "age was {age:?}");
     }
 
     #[tokio::test]
