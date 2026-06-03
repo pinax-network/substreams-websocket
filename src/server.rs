@@ -21,7 +21,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
-    sync::{RwLock, mpsc, oneshot},
+    sync::{RwLock, mpsc, oneshot, watch},
     time::Instant,
 };
 use tower_http::trace::TraceLayer;
@@ -130,7 +130,13 @@ pub async fn serve_with_shutdown(
     let drain_timeout = state.config.websocket.shutdown_drain_timeout;
     let clients = state.clients.clone();
     let draining = state.draining.clone();
-    let stream_tasks = spawn_streams(&state, prepared);
+    // Cooperative shutdown signal for the per-stream tasks. They watch this
+    // and exit between blocks (never mid file-write), so we can join them
+    // cleanly instead of aborting mid-cursor/replay-write — the latter left
+    // tokio's persistent `File` handles in a poisoned state and panicked the
+    // runtime on teardown.
+    let (stream_shutdown_tx, stream_shutdown_rx) = watch::channel(false);
+    let stream_tasks = spawn_streams(&state, prepared, stream_shutdown_rx);
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(listen)
@@ -158,8 +164,29 @@ pub async fn serve_with_shutdown(
 
     let result = serve_listener(listener, app, ws_path, health_path, shutdown_with_drain).await;
 
-    for task in stream_tasks {
-        task.abort();
+    // Ask the stream tasks to stop, then wait for them to wind down at a safe
+    // point (between blocks) so no cursor/replay write is in flight when the
+    // runtime is torn down. Only abort stragglers that overrun the deadline —
+    // those are stuck in a connect/gRPC read, not a file write.
+    let _ = stream_shutdown_tx.send(true);
+    let aborts: Vec<_> = stream_tasks
+        .iter()
+        .map(|task| task.abort_handle())
+        .collect();
+    if tokio::time::timeout(
+        STREAM_SHUTDOWN_TIMEOUT,
+        futures_util::future::join_all(stream_tasks),
+    )
+    .await
+    .is_err()
+    {
+        warn!(
+            timeout_secs = STREAM_SHUTDOWN_TIMEOUT.as_secs(),
+            "stream tasks did not stop gracefully within timeout; aborting stragglers"
+        );
+        for abort in aborts {
+            abort.abort();
+        }
     }
 
     result
@@ -619,6 +646,7 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
 fn spawn_streams(
     state: &AppState,
     prepared: Vec<PreparedStream>,
+    shutdown: watch::Receiver<bool>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let cursors = CursorStore::new(state.config.cursors_dir.clone());
     let replay = state.replay.clone();
@@ -630,12 +658,17 @@ fn spawn_streams(
             let clients = state.clients.clone();
             let cursors = cursors.clone();
             let replay = replay.clone();
+            let shutdown = shutdown.clone();
             tokio::spawn(async move {
-                run_substream(prep, clients, cursors, replay, cursor_max_age).await;
+                run_substream(prep, clients, cursors, replay, cursor_max_age, shutdown).await;
             })
         })
         .collect()
 }
+
+/// How long to wait for per-stream tasks to stop cooperatively after the
+/// shutdown signal before aborting any that are still running.
+const STREAM_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Initial backoff after an error. Doubles each failure, capped at
 /// `RESTART_BACKOFF_MAX`. Resets to `RESTART_BACKOFF_MIN` whenever the
@@ -720,12 +753,26 @@ async fn cursor_freshness(
     }
 }
 
+/// Sleep for `dur` unless shutdown is signalled first. Returns `true` when
+/// shutdown fired (the caller should stop), `false` when the sleep elapsed.
+async fn sleep_or_shutdown(dur: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
+    if *shutdown.borrow() {
+        return true;
+    }
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => true,
+        _ = tokio::time::sleep(dur) => false,
+    }
+}
+
 async fn run_substream(
     prep: PreparedStream,
     clients: ClientRegistry,
     cursors: CursorStore,
     replay: ReplayLog,
     cursor_max_age: Option<Duration>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let PreparedStream {
         mut config,
@@ -762,6 +809,9 @@ async fn run_substream(
     let mut backoff = RESTART_BACKOFF_MIN;
 
     loop {
+        if *shutdown.borrow() {
+            return;
+        }
         // Reload cursor from disk on every retry so we resume from the latest
         // persisted position, not whatever the previous run started with.
         // Anything other than a fresh, loadable cursor resolves to `None` —
@@ -822,7 +872,13 @@ async fn run_substream(
         );
 
         let client = SubstreamsClient::new(config.substreams.clone());
-        let mut substream = match client.stream_with_package(package.clone()).await {
+        let connect = client.stream_with_package(package.clone());
+        let connected = tokio::select! {
+            biased;
+            _ = shutdown.changed() => return,
+            connected = connect => connected,
+        };
+        let mut substream = match connected {
             Ok(substream) => substream,
             Err(error) => {
                 let msg = error.to_string();
@@ -830,7 +886,9 @@ async fn run_substream(
                 clients
                     .broadcast_lifecycle(stream_status(&identity, "error", msg))
                     .await;
-                tokio::time::sleep(backoff).await;
+                if sleep_or_shutdown(backoff, &mut shutdown).await {
+                    return;
+                }
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
                 continue;
             }
@@ -840,8 +898,20 @@ async fn run_substream(
             .broadcast_lifecycle(stream_status(&identity, "started", String::new()))
             .await;
 
-        let outcome = read_loop(&identity, &clients, &cursors, &replay, &mut substream).await;
+        let outcome = read_loop(
+            &identity,
+            &clients,
+            &cursors,
+            &replay,
+            &mut substream,
+            &mut shutdown,
+        )
+        .await;
         match outcome {
+            ReadOutcome::ShuttingDown => {
+                info!(stream = %identity.display(), "stopping Substreams read for shutdown");
+                return;
+            }
             ReadOutcome::Completed => {
                 info!(stream = %identity.display(), "Substreams read completed");
                 clients
@@ -868,7 +938,9 @@ async fn run_substream(
                     "package_version" => identity.package_version.clone()
                 )
                 .increment(1);
-                tokio::time::sleep(backoff).await;
+                if sleep_or_shutdown(backoff, &mut shutdown).await {
+                    return;
+                }
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
             ReadOutcome::Errored(err) => {
@@ -891,7 +963,9 @@ async fn run_substream(
                     "package_version" => identity.package_version.clone()
                 )
                 .increment(1);
-                tokio::time::sleep(backoff).await;
+                if sleep_or_shutdown(backoff, &mut shutdown).await {
+                    return;
+                }
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
         }
@@ -906,6 +980,8 @@ enum ReadOutcome {
     ProducedBlock,
     /// Stream returned an error.
     Errored(String),
+    /// Cooperative shutdown was signalled between blocks — stop without retry.
+    ShuttingDown,
 }
 
 async fn read_loop(
@@ -914,10 +990,19 @@ async fn read_loop(
     cursors: &CursorStore,
     replay: &ReplayLog,
     substream: &mut crate::substreams::SubstreamsStream,
+    shutdown: &mut watch::Receiver<bool>,
 ) -> ReadOutcome {
     let mut produced_any = false;
     loop {
-        match substream.next_event().await {
+        // Only break between events — never mid-write. `handle_substream_event`
+        // runs to completion once an event is in hand, so any cursor/replay
+        // write finishes before we observe shutdown.
+        let next = tokio::select! {
+            biased;
+            _ = shutdown.changed() => return ReadOutcome::ShuttingDown,
+            next = substream.next_event() => next,
+        };
+        match next {
             Ok(Some(event)) => {
                 if matches!(event, StreamEvent::Block { .. }) {
                     produced_any = true;
@@ -3067,6 +3152,34 @@ mod tests {
         DatabaseChanges, Field, TableChange,
     };
     use crate::{StreamEvent, SubstreamsConfig, WebSocketConfig};
+
+    #[tokio::test]
+    async fn sleep_or_shutdown_returns_immediately_when_already_signalled() {
+        let (tx, mut rx) = watch::channel(false);
+        tx.send(true).expect("send");
+        // A long sleep that must NOT elapse — the already-set flag short-circuits.
+        assert!(sleep_or_shutdown(Duration::from_secs(60), &mut rx).await);
+    }
+
+    #[tokio::test]
+    async fn sleep_or_shutdown_wakes_when_signalled_mid_wait() {
+        let (tx, mut rx) = watch::channel(false);
+        let waiter = tokio::spawn(async move {
+            // Long enough that only the signal can complete it in time.
+            sleep_or_shutdown(Duration::from_secs(60), &mut rx).await
+        });
+        // Let the waiter park on the select, then signal.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        tx.send(true).expect("send");
+        assert!(waiter.await.expect("waiter joins"));
+    }
+
+    #[tokio::test]
+    async fn sleep_or_shutdown_returns_false_when_sleep_elapses() {
+        let (_tx, mut rx) = watch::channel(false);
+        // No signal: the sleep elapses and we report "keep going".
+        assert!(!sleep_or_shutdown(Duration::from_millis(10), &mut rx).await);
+    }
 
     #[tokio::test]
     async fn health_route_returns_ok() {

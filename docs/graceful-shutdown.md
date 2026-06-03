@@ -16,7 +16,7 @@ Combined with [`replay.md`](replay.md), the reconnect-and-resume is near-seamles
 4. Server iterates the client registry and sends `Message::Close(CloseFrame { code: 1001, reason: "server shutting down" })` to every client.
 5. Server polls the registry every 50ms. When all clients have closed their side of the socket, drain completes immediately.
 6. If `SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS` elapses with clients still attached, drain logs a `WARN` with the remaining count and yields. axum then tears down sockets hard.
-7. Per-stream Substreams reader tasks are aborted. Cursor + replay log writes already on disk are preserved.
+7. Per-stream Substreams reader tasks are signalled to stop and given up to 5s to wind down at a safe point — between blocks, never mid cursor/replay write. Any task still running past the deadline (e.g. stuck in a gRPC connect) is aborted. Cursor + replay log writes already on disk are preserved.
 
 For Envoy-specific health-check configuration, see [`envoy.md`](envoy.md).
 
@@ -31,7 +31,7 @@ For Envoy-specific health-check configuration, see [`envoy.md`](envoy.md).
 ## What it does not do
 
 - **Does not retain WebSocket connections across restarts.** A WebSocket is bound to a TCP socket which is bound to a process; both die on exit. The drain just makes the disconnect *clean* instead of abrupt.
-- **Does not pause Substreams gRPC readers.** The stream tasks are aborted at the very end. Any block they were mid-process gets re-emitted by Substreams cursor resume on the next start.
+- **Does not pause Substreams gRPC readers.** The stream tasks stop cooperatively at the very end, finishing any in-flight block (and its cursor/replay write) before exiting. Aborting them mid-write previously poisoned tokio's persistent file handles and panicked the runtime on teardown; stopping between blocks avoids that. A block that had not yet been processed gets re-emitted by Substreams cursor resume on the next start.
 - **Does not coordinate with the next container.** That is the load balancer's job (blue/green, drain weights, etc.). The drain just minimizes the per-connection blast.
 
 ## Combined with replay
