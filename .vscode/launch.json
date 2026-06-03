@@ -1,0 +1,34 @@
+{
+	// Requires the CodeLLDB extension: vadimcn.vscode-lldb
+	// The `cargo` block builds the binary and feeds CodeLLDB the artifact path,
+	// so set breakpoints in src/* and hit F5 to run `serve --streams ./streams.yaml`.
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "Debug: serve --streams ./streams.yaml",
+			"cargo": {
+				"args": ["build", "--bin=substreams-websocket"],
+				"filter": {
+					"name": "substreams-websocket",
+					"kind": "bin"
+				}
+			},
+			"args": ["serve", "--streams", "./streams.yaml"],
+			"cwd": "${workspaceFolder}",
+			// .env is auto-loaded by the binary via dotenvy at startup. envFile here
+			// also injects it into the debugger's process env so VS Code's variables
+			// view shows the same values. Comment this out if you don't have a .env.
+			"envFile": "${workspaceFolder}/.env",
+			"env": {
+				// Uncomment to debug-trace our crate without the h2/hyper frame noise.
+				// The binary's own filter still applies on top.
+				// "SUBSTREAMS_WEBSOCKET_LOG_LEVEL": "debug",
+				// Backtrace on panic.
+				"RUST_BACKTRACE": "1"
+			},
+			"sourceLanguages": ["rust"]
+		}
+	]
+}
