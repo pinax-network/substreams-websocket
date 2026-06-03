@@ -726,12 +726,19 @@ async fn run_substream(
             .await
         {
             Ok(Some(cursor)) => {
-                // Ignore a cursor that is too old to resume from cheaply:
-                // resuming would replay every block from the stale position to
-                // chain head (the catch-up firehose). Start from the configured
-                // start_block (default -1 = head) instead.
-                let stale_age = match cursor_max_age {
-                    Some(max_age) => cursors
+                // Decide whether the persisted cursor is fresh enough to
+                // resume from. Resuming from a stale cursor replays every block
+                // from that position to chain head (the catch-up firehose).
+                // When the check is enabled, drop the cursor — and start from
+                // the configured start_block (default -1 = head) — if it is too
+                // old OR if its age can't be determined at all (mtime missing /
+                // unreadable / unsupported). Failing safe here matters: a
+                // swallowed error would otherwise resume from an arbitrarily old
+                // position and reintroduce the very firehose this guards against.
+                let resume = match cursor_max_age {
+                    // Staleness check disabled — always resume.
+                    None => true,
+                    Some(max_age) => match cursors
                         .age(
                             &identity.network,
                             &identity.package_name,
@@ -739,27 +746,46 @@ async fn run_substream(
                             &identity.module_hash,
                         )
                         .await
-                        .ok()
-                        .flatten()
-                        .filter(|age| *age > max_age),
-                    None => None,
+                    {
+                        Ok(Some(age)) if age <= max_age => true,
+                        Ok(Some(age)) => {
+                            info!(
+                                stream = %identity.display(),
+                                cursor_age_secs = age.as_secs(),
+                                max_age_secs = max_age.as_secs(),
+                                start_block = ?config.substreams.start_block,
+                                "ignoring stale persisted cursor; starting from configured start_block"
+                            );
+                            false
+                        }
+                        Ok(None) => {
+                            warn!(
+                                stream = %identity.display(),
+                                start_block = ?config.substreams.start_block,
+                                "cursor file vanished before its age could be read; dropping cursor and starting from configured start_block"
+                            );
+                            false
+                        }
+                        Err(error) => {
+                            warn!(
+                                stream = %identity.display(),
+                                %error,
+                                start_block = ?config.substreams.start_block,
+                                "could not determine cursor age; treating as stale and starting from configured start_block"
+                            );
+                            false
+                        }
+                    },
                 };
-                if let Some(age) = stale_age {
-                    info!(
-                        stream = %identity.display(),
-                        cursor_age_secs = age.as_secs(),
-                        max_age_secs = cursor_max_age.map(|d| d.as_secs()),
-                        start_block = ?config.substreams.start_block,
-                        "ignoring stale persisted cursor; starting from configured start_block"
-                    );
-                    config.substreams.start_cursor = None;
-                } else {
+                if resume {
                     info!(
                         stream = %identity.display(),
                         cursor_len = cursor.len(),
                         "resuming Substreams read from persisted cursor"
                     );
                     config.substreams.start_cursor = Some(cursor);
+                } else {
+                    config.substreams.start_cursor = None;
                 }
             }
             Ok(None) => {
