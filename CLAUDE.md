@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single-binary Rust server that consumes Substreams gRPC streams (one per configured spkg), decodes their `sf.substreams.sink.database.v1.DatabaseChanges` output into per-table JSON, and fans the result out to subscribed WebSocket clients. Clients subscribe by `<network>@<table>` (Binance market-stream URL convention).
 
-`protoc` and Rust 1.90+ are required to build. `build.rs` compiles the `proto/sf/...` definitions via `tonic-prost-build` on every build.
+The `buf` CLI and Rust 1.90+ are required to build (no protoc). `build.rs` imports the proto definitions from buf.build as descriptor sets (`buf build`, pinned to exact BSR commits in `BUF_MODULES`) and compiles them via `tonic_prost_build::compile_fds`; no protos are vendored in the repo.
 
 ## Common commands
 
@@ -41,7 +41,7 @@ The `lib.rs` re-exports a small public surface; everything wires together in `sr
 - `src/cursor.rs` — Persistent cursor store. Files: `cursors/<network>-<package_name>@<package_version>-<module_hash>.cursor`. Atomic write via tmp + rename, no fsync.
 - `src/replay.rs` — JSONL per-spkg replay log for client reconnect (`?from_timestamp=`). Append-only, lazy trim by `timestamp_seconds` window.
 - `src/server.rs` — Axum routes, per-client mpsc fan-out, subscription bookkeeping, graceful shutdown. Routes mirror Binance: `/ws/<network>@<table>/...`, `/stream?streams=<a>/<b>`, plus `/SKILL.md`, `/llms.txt`, `/streams`, `/healthz`, landing page.
-- `proto/sf/...` — Vendored Substreams + DatabaseChanges proto definitions, compiled by `build.rs`.
+- `build.rs` — Imports Substreams + DatabaseChanges proto definitions from buf.build (pinned commits in `BUF_MODULES`) and compiles them with `tonic-prost-build`.
 - `public/` — Served at runtime: `index.html` (landing), `SKILL.md` (on-wire message reference — the canonical client contract), `llms.txt`, `favicon.png`.
 
 ### Stream identity, not stream names

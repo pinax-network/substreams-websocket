@@ -13,6 +13,14 @@ use crate::SubstreamsConfig;
 
 pub mod pb {
     pub mod sf {
+        // Not used directly; the sf.substreams.rpc generated clients reference
+        // sf.firehose.v2 types (EndpointInfo service) via relative paths.
+        pub mod firehose {
+            pub mod v2 {
+                tonic::include_proto!("sf.firehose.v2");
+            }
+        }
+
         pub mod substreams {
             pub mod v1 {
                 tonic::include_proto!("sf.substreams.v1");
@@ -131,7 +139,8 @@ pub enum StreamEvent {
         chain_head: u64,
     },
     Progress {
-        modules: usize,
+        running_jobs: usize,
+        processed_blocks: u64,
     },
     Block {
         number: u64,
@@ -222,7 +231,8 @@ impl From<Response> for StreamEvent {
                 chain_head: session.chain_head,
             },
             Some(response::Message::Progress(progress)) => Self::Progress {
-                modules: progress.modules.len(),
+                running_jobs: progress.running_jobs.len(),
+                processed_blocks: progress.processed_blocks,
             },
             Some(response::Message::BlockScopedData(data)) => {
                 let cursor = data.cursor.clone();
@@ -251,7 +261,11 @@ impl From<Response> for StreamEvent {
                 last_valid_cursor: undo.last_valid_cursor,
             },
             Some(response::Message::FatalError(error)) => Self::Fatal {
-                message: error.message,
+                message: if error.module.is_empty() {
+                    error.reason
+                } else {
+                    format!("module {}: {}", error.module, error.reason)
+                },
             },
             Some(response::Message::DebugSnapshotData(data)) => Self::SnapshotData {
                 module_name: data.module_name,

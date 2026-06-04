@@ -12,9 +12,10 @@ A streaming-first ETL on top of Firehose. Each module is a small WASM program th
 
 ## gRPC service shape
 
-We use `sf.substreams.rpc.v2.Stream/Blocks`. The corresponding proto definitions are vendored under [`proto/sf/substreams/`](../proto/sf/substreams/).
+We use `sf.substreams.rpc.v2.Stream/Blocks`. The proto definitions are not vendored: `build.rs` imports them from the buf.build registry (`buf export`), pinned to exact BSR commits in `BUF_MODULES`. Never copy or hand-edit proto files — to upgrade, bump the pinned commit in `build.rs`.
 
-- Service proto: <https://github.com/streamingfast/substreams/blob/develop/proto/sf/substreams/rpc/v2/service.proto>
+- BSR module: <https://buf.build/streamingfast/substreams>
+- Service proto source: <https://github.com/streamingfast/substreams/blob/develop/proto/sf/substreams/rpc/v2/service.proto>
 - We require **gzip request compression** — Pinax rejects uncompressed gRPC with `400 Bad Request` and body `no supported compression found.`
 - We bumped the tonic decoded-message cap to **64 MiB** (default 4 MiB) because Solana SPL transfers blocks routinely exceed 4 MiB after gzip decompression.
 - HTTP/2 + TCP keepalive enabled to survive long-idle gRPC streams getting reaped by upstream proxies (`h2 protocol error: ... ConnectionReset`).
@@ -23,8 +24,8 @@ We use `sf.substreams.rpc.v2.Stream/Blocks`. The corresponding proto definitions
 
 We accept only `sf.substreams.sink.database.v1.DatabaseChanges` as the module output type. Anything else fails fast at startup.
 
-- Upstream proto: <https://github.com/streamingfast/substreams-sink-database-changes/blob/develop/proto/sf/substreams/sink/database/v1/database.proto>
-- Vendored at [`proto/sf/substreams/sink/database/v1/database.proto`](../proto/sf/substreams/sink/database/v1/database.proto)
+- BSR module: <https://buf.build/streamingfast/substreams-sink-database-changes> (imported by `build.rs`, pinned in `BUF_MODULES`)
+- Upstream proto source: <https://github.com/streamingfast/substreams-sink-database-changes/blob/develop/proto/sf/substreams/sink/database/v1/database.proto>
 
 ### Wire shape (raw, before we normalize)
 
