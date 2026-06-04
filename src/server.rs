@@ -1497,6 +1497,7 @@ async fn replay_for_client(
     from_timestamp: i64,
     client_id: ClientId,
     outbound: &mpsc::Sender<Message>,
+    last_activity_at: &RwLock<Instant>,
 ) -> Result<(), String> {
     if !replay.is_enabled() {
         return Ok(());
@@ -1543,6 +1544,7 @@ async fn replay_for_client(
             if outbound.send(Message::Text(text.into())).await.is_err() {
                 return Err("outbound channel closed during replay".to_owned());
             }
+            *last_activity_at.write().await = Instant::now();
             info!(
                 client_id,
                 network,
@@ -1592,6 +1594,15 @@ async fn replay_for_client(
             if outbound.send(Message::Text(text.into())).await.is_err() {
                 return Err("outbound channel closed during replay".to_owned());
             }
+            // Send progress is proof of liveness: a `send` only completes
+            // when the writer is draining the buffer into the socket, i.e.
+            // the peer is reading. Refreshing the activity stamp here keeps
+            // the heartbeat reaper from killing a healthy client whose
+            // replay outlasts `heartbeat_timeout` (pongs aren't processed
+            // until the main receive loop starts). A peer that stops
+            // reading stalls these sends once the buffer fills, the stamp
+            // goes stale, and the reaper fires as intended.
+            *last_activity_at.write().await = Instant::now();
             replayed += 1;
         }
 
@@ -1728,7 +1739,7 @@ async fn handle_socket(
     let client_id = client.name;
     let total_drops = client.total_drops.clone();
     let connected_at = Instant::now();
-    let last_pong_at = Arc::new(RwLock::new(connected_at));
+    let last_activity_at = Arc::new(RwLock::new(connected_at));
     let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
 
     let mut writer = tokio::spawn(async move {
@@ -1742,7 +1753,7 @@ async fn handle_socket(
     let heartbeat = tokio::spawn(run_heartbeat(
         client_id,
         outbound.clone(),
-        Arc::clone(&last_pong_at),
+        Arc::clone(&last_activity_at),
         state.config.websocket.heartbeat_interval,
         state.config.websocket.heartbeat_timeout,
         state.config.websocket.connection_ttl,
@@ -1776,7 +1787,15 @@ async fn handle_socket(
             }
             if let Some(from) = from_timestamp
                 && let Err(reason) =
-                    replay_for_client(&state.replay, &filter, from, client_id, &outbound).await
+                    replay_for_client(
+                        &state.replay,
+                        &filter,
+                        from,
+                        client_id,
+                        &outbound,
+                        &last_activity_at,
+                    )
+                    .await
             {
                 warn!(client_id, %reason, "replay failed; continuing with live stream only");
             }
@@ -1835,7 +1854,7 @@ async fn handle_socket(
                             }
                         }
                         Ok(Message::Pong(_)) => {
-                            *last_pong_at.write().await = Instant::now();
+                            *last_activity_at.write().await = Instant::now();
                             debug!(client_id, "received WebSocket pong");
                         }
                         Ok(Message::Close(_)) => break,
@@ -2745,10 +2764,14 @@ async fn handle_subscription_command(
     }
 }
 
+/// Periodic liveness check for one client. Fires `HeartbeatTimeout` when
+/// `last_activity_at` goes stale — the stamp is refreshed by pong receipt in
+/// the main receive loop and by send progress during replay catch-up (where
+/// pongs aren't yet being processed).
 async fn run_heartbeat(
     client_id: ClientId,
     outbound: mpsc::Sender<Message>,
-    last_pong_at: Arc<RwLock<Instant>>,
+    last_activity_at: Arc<RwLock<Instant>>,
     interval: Duration,
     timeout: Duration,
     connection_ttl: Option<Duration>,
@@ -2763,8 +2786,8 @@ async fn run_heartbeat(
             break DisconnectReason::ConnectionTtl;
         }
 
-        let last_pong_at = *last_pong_at.read().await;
-        if now.duration_since(last_pong_at) >= timeout {
+        let last_activity_at = *last_activity_at.read().await;
+        if now.duration_since(last_activity_at) >= timeout {
             break DisconnectReason::HeartbeatTimeout;
         }
 
@@ -3228,6 +3251,45 @@ mod tests {
         assert!(
             matches!(reason, DisconnectReason::HeartbeatTimeout),
             "expected heartbeat timeout, got: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_spares_client_with_refreshed_activity() {
+        // Contract that replay catch-up relies on: refreshing
+        // `last_activity_at` (as replay does on every send that makes
+        // progress) keeps the reaper from firing, even when no pong is
+        // ever processed — so a healthy client whose replay outlasts
+        // `heartbeat_timeout` is not killed mid-stream.
+        let (tx, mut rx) = mpsc::channel(16);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
+        let last_activity = Arc::new(RwLock::new(Instant::now()));
+        let refresher = Arc::clone(&last_activity);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                *refresher.write().await = Instant::now();
+            }
+        });
+        tokio::spawn(run_heartbeat(
+            1,
+            tx,
+            last_activity,
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            None,
+            Instant::now(),
+            disconnect_tx,
+        ));
+
+        // Several timeout windows pass; the refreshed stamp must keep the
+        // reaper quiet the whole time.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            disconnect_rx.try_recv().is_err(),
+            "reaper must not fire while activity is being refreshed"
         );
     }
 
