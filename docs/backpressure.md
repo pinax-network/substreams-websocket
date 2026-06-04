@@ -26,7 +26,7 @@ The server tracks **consecutive failed sends** per client:
 
 ## No send toward a client can stall its teardown
 
-A full buffer means the peer has stopped draining its socket — so nothing in the connection's lifecycle may block on it unboundedly, or the teardown machinery would hang on exactly the clients it exists to evict. Every lifecycle send is either non-blocking or raced against the heartbeat reaper:
+A full buffer means the peer isn't draining its socket fast enough — possibly not at all — so nothing in the connection's lifecycle may block on it unboundedly, or the teardown machinery would hang on exactly the clients it exists to evict. Every lifecycle send is either non-blocking or raced against the heartbeat reaper:
 
 - **Heartbeat pings** use `try_send`. On a full buffer the ping is skipped — with no ping delivered there's no pong, so the heartbeat timeout fires on schedule and reaps the connection.
 - **Command replies and pong responses** use `try_send`. On a full buffer they're dropped (the client isn't reading them anyway) so the connection loop keeps polling the disconnect signal.

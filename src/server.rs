@@ -2795,12 +2795,13 @@ async fn run_heartbeat(
         match outbound.try_send(Message::Ping(payload.into())) {
             Ok(()) => debug!(client_id, "sent WebSocket heartbeat ping"),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                // A full buffer means the peer has stopped draining its
-                // socket. A blocking `send` here would park this task and
-                // the timeout check above would never run again — the
-                // reaper would never fire for exactly the clients it
-                // exists to reap. Skip the ping; with no ping delivered
-                // there is no pong, so the timeout fires next interval.
+                // A full buffer means the peer isn't draining its socket
+                // fast enough — possibly not at all. A blocking `send`
+                // here would park this task and the timeout check above
+                // would never run again — the reaper would never fire for
+                // exactly the clients it exists to reap. Skip the ping; a
+                // merely-slow peer still pongs the pings it does receive,
+                // while a dead one goes stale and times out next interval.
                 debug!(client_id, "skipping heartbeat ping; outbound buffer full");
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -3232,11 +3233,11 @@ mod tests {
         // `_rx` stays alive so the channel reads as Full, not Closed.
 
         let (disconnect_tx, disconnect_rx) = oneshot::channel();
-        let last_pong = Arc::new(RwLock::new(Instant::now()));
+        let last_activity = Arc::new(RwLock::new(Instant::now()));
         tokio::spawn(run_heartbeat(
             1,
             tx,
-            last_pong,
+            last_activity,
             Duration::from_millis(10),
             Duration::from_millis(50),
             None,
