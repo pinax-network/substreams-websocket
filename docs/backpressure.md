@@ -24,12 +24,13 @@ The server tracks **consecutive failed sends** per client:
 
 `1013` is the IANA "Try Again Later" code — the closest standard to "backend dropped you for being slow." Clients that handle reconnect logic will pick this up and re-establish.
 
-## Every send toward a client is non-blocking
+## No send toward a client can stall its teardown
 
-A full buffer means the peer has stopped draining its socket — so nothing in the connection's lifecycle is allowed to block on it, or the teardown machinery would hang on exactly the clients it exists to evict:
+A full buffer means the peer has stopped draining its socket — so nothing in the connection's lifecycle may block on it unboundedly, or the teardown machinery would hang on exactly the clients it exists to evict. Every lifecycle send is either non-blocking or raced against the heartbeat reaper:
 
 - **Heartbeat pings** use `try_send`. On a full buffer the ping is skipped — with no ping delivered there's no pong, so the heartbeat timeout fires on schedule and reaps the connection.
 - **Command replies and pong responses** use `try_send`. On a full buffer they're dropped (the client isn't reading them anyway) so the connection loop keeps polling the disconnect signal.
+- **Welcome message and [replay](replay.md) catch-up** use blocking sends by design — replay frames must not be dropped, so a full buffer there is flow control, not an error. The whole setup phase is raced against the reaper's disconnect signal: a peer that connects and never reads still gets torn down on heartbeat timeout.
 - **Final flush at teardown** is bounded to 5 seconds. A peer stuck in zero-window TCP can leave the writer task blocked mid-`send` indefinitely; after the grace the writer is aborted so disconnect accounting (`active_connections` gauge, `disconnections_total`, duration histogram) always completes.
 
 Without these, a dead-but-not-closed peer (NAT timeout, killed laptop, stalled proxy) would freeze its connection's accounting forever: the gauge climbs and never decreases, and `disconnections_total` stays near zero even as pods rotate.

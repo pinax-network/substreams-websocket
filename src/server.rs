@@ -1759,90 +1759,98 @@ async fn handle_socket(
         "wrap_envelope": filter.wrap_envelope,
     });
 
-    if outbound
-        .send(Message::Text(welcome.to_string().into()))
-        .await
-        .is_err()
-    {
-        state.clients.unregister(client_id).await;
-        heartbeat.abort();
-        writer.abort();
-        // Mirror the normal-path accounting below — this connection was
-        // counted in `connections_total`/`active_connections`, so it must
-        // be counted out, or the gauge leaks one per failed welcome.
-        metrics::gauge!("substreams_websocket_active_connections").decrement(1);
-        metrics::counter!("substreams_websocket_disconnections_total").increment(1);
-        metrics::histogram!("substreams_websocket_connection_duration_seconds")
-            .record(connected_at.elapsed().as_secs_f64());
-        return;
-    }
-
-    if let Some(from) = from_timestamp
-        && let Err(reason) =
-            replay_for_client(&state.replay, &filter, from, client_id, &outbound).await
-    {
-        warn!(client_id, %reason, "replay failed; continuing with live stream only");
-    }
-
-    loop {
-        tokio::select! {
-            message = receiver.next() => {
-                let Some(message) = message else {
-                    break;
-                };
-
-                match message {
-                    Ok(Message::Text(text)) => {
-                        debug!(client_id, %text, "received WebSocket text message");
-                        let reply = handle_subscription_command(
-                            client_id,
-                            &filter_handle,
-                            state.config.websocket.max_filter_fields,
-                            state.config.websocket.max_filter_values,
-                            text.as_str(),
-                        )
-                        .await;
-                        // `try_send`, not `send`: blocking on a full buffer
-                        // here would stop this loop from polling
-                        // `disconnect_rx`, so the heartbeat reaper could
-                        // never tear the connection down. A client whose
-                        // buffer is full isn't reading the reply anyway.
-                        match outbound.try_send(Message::Text(reply.into())) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                debug!(client_id, "dropping command reply; outbound buffer full");
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        }
-                    }
-                    Ok(Message::Binary(_)) => {
-                        debug!("received WebSocket binary message");
-                    }
-                    Ok(Message::Ping(payload)) => {
-                        match outbound.try_send(Message::Pong(payload)) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                debug!(client_id, "dropping pong reply; outbound buffer full");
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        }
-                    }
-                    Ok(Message::Pong(_)) => {
-                        *last_pong_at.write().await = Instant::now();
-                        debug!(client_id, "received WebSocket pong");
-                    }
-                    Ok(Message::Close(_)) => break,
-                    Err(error) => {
-                        debug!(%error, "WebSocket client error");
-                        break;
-                    }
-                }
+    // Welcome and replay use blocking sends by design — replay frames must
+    // not be dropped, so a full buffer is flow control, not an error. But
+    // the client was registered above, so broadcasts can already be filling
+    // the buffer; against a peer that never drains its socket these sends
+    // would park this task before the loop below ever polls `disconnect_rx`.
+    // Race them against the reaper so a stalled setup is still torn down.
+    let setup_ok = tokio::select! {
+        ok = async {
+            if outbound
+                .send(Message::Text(welcome.to_string().into()))
+                .await
+                .is_err()
+            {
+                return false;
             }
-            reason = &mut disconnect_rx => {
-                if let Ok(reason) = reason {
-                    info!(client_id, %reason, "disconnecting WebSocket client");
+            if let Some(from) = from_timestamp
+                && let Err(reason) =
+                    replay_for_client(&state.replay, &filter, from, client_id, &outbound).await
+            {
+                warn!(client_id, %reason, "replay failed; continuing with live stream only");
+            }
+            true
+        } => ok,
+        reason = &mut disconnect_rx => {
+            if let Ok(reason) = reason {
+                info!(client_id, %reason, "disconnecting WebSocket client during setup");
+            }
+            false
+        }
+    };
+
+    if setup_ok {
+        loop {
+            tokio::select! {
+                message = receiver.next() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+
+                    match message {
+                        Ok(Message::Text(text)) => {
+                            debug!(client_id, %text, "received WebSocket text message");
+                            let reply = handle_subscription_command(
+                                client_id,
+                                &filter_handle,
+                                state.config.websocket.max_filter_fields,
+                                state.config.websocket.max_filter_values,
+                                text.as_str(),
+                            )
+                            .await;
+                            // `try_send`, not `send`: blocking on a full buffer
+                            // here would stop this loop from polling
+                            // `disconnect_rx`, so the heartbeat reaper could
+                            // never tear the connection down. A client whose
+                            // buffer is full isn't reading the reply anyway.
+                            match outbound.try_send(Message::Text(reply.into())) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    debug!(client_id, "dropping command reply; outbound buffer full");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                        }
+                        Ok(Message::Binary(_)) => {
+                            debug!("received WebSocket binary message");
+                        }
+                        Ok(Message::Ping(payload)) => {
+                            match outbound.try_send(Message::Pong(payload)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    debug!(client_id, "dropping pong reply; outbound buffer full");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                        }
+                        Ok(Message::Pong(_)) => {
+                            *last_pong_at.write().await = Instant::now();
+                            debug!(client_id, "received WebSocket pong");
+                        }
+                        Ok(Message::Close(_)) => break,
+                        Err(error) => {
+                            debug!(%error, "WebSocket client error");
+                            break;
+                        }
+                    }
                 }
-                break;
+                reason = &mut disconnect_rx => {
+                    if let Ok(reason) = reason {
+                        info!(client_id, %reason, "disconnecting WebSocket client");
+                    }
+                    break;
+                }
             }
         }
     }
