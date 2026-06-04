@@ -34,10 +34,10 @@ const BUF_MODULES: &[(&str, &[&str])] = &[
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    for (module, paths) in BUF_MODULES {
+    for &(module, paths) in BUF_MODULES {
         let mut command = Command::new("buf");
         command.args(["build", module, "--as-file-descriptor-set", "-o", "-"]);
-        for path in *paths {
+        for path in paths {
             command.args(["--path", path]);
         }
         let output = command.output().map_err(|error| {
