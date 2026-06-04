@@ -4,18 +4,18 @@ use prost::Message;
 use prost_types::FileDescriptorSet;
 
 /// Proto definitions are imported from the buf.build registry at build time
-/// (no vendored copies, no protoc) and pinned to exact BSR commits for
-/// reproducible builds. To upgrade, pick a newer commit:
+/// (no vendored copies, no protoc), pinned to a release label where the
+/// module publishes them. To upgrade, pick a newer ref:
 ///
 /// ```bash
-/// buf registry module commit list buf.build/streamingfast/substreams --page-size 1
+/// buf registry module label list buf.build/streamingfast/substreams --page-size 10
 /// ```
 ///
 /// Each entry is `(module, paths)`; `paths` limits the build to those proto
 /// files plus their transitive imports.
 const BUF_MODULES: &[(&str, &[&str])] = &[
     (
-        "buf.build/streamingfast/substreams:d58ebf3983cb4663a7235fd074ef68d0",
+        "buf.build/streamingfast/substreams:v1.18.5",
         &[
             "sf/substreams/rpc/v3/service.proto",
             "sf/substreams/rpc/v2/service.proto",
@@ -26,6 +26,8 @@ const BUF_MODULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // This module publishes no version labels; pinned by BSR commit
+        // (`main` as of 2023-06-28 — the proto has been stable since).
         "buf.build/streamingfast/substreams-sink-database-changes:bfa22295f99e4cceb62d1aa8fdce988e",
         &["sf/substreams/sink/database/v1/database.proto"],
     ),
