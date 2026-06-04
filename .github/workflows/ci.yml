@@ -28,6 +28,7 @@ jobs:
         uses: bufbuild/buf-action@v1
         with:
           setup_only: true
+          version: 1.69.0 # keep in sync with Dockerfile
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
