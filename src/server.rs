@@ -1693,6 +1693,12 @@ fn epoch_seconds_utc(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
     days * 86_400 + (hh as i64) * 3600 + (mm as i64) * 60 + ss as i64
 }
 
+/// How long connection teardown waits for the writer task to flush its
+/// remaining frames (including any Close frame) before aborting it. Long
+/// enough for a healthy peer to drain a Close; short enough that a dead
+/// peer can't hold the connection's accounting hostage.
+const WRITER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn handle_socket(
     state: AppState,
     filter: StreamFilter,
@@ -1725,7 +1731,7 @@ async fn handle_socket(
     let last_pong_at = Arc::new(RwLock::new(connected_at));
     let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(message) = messages.recv().await {
             if sender.send(message).await.is_err() {
                 break;
@@ -1761,6 +1767,13 @@ async fn handle_socket(
         state.clients.unregister(client_id).await;
         heartbeat.abort();
         writer.abort();
+        // Mirror the normal-path accounting below — this connection was
+        // counted in `connections_total`/`active_connections`, so it must
+        // be counted out, or the gauge leaks one per failed welcome.
+        metrics::gauge!("substreams_websocket_active_connections").decrement(1);
+        metrics::counter!("substreams_websocket_disconnections_total").increment(1);
+        metrics::histogram!("substreams_websocket_connection_duration_seconds")
+            .record(connected_at.elapsed().as_secs_f64());
         return;
     }
 
@@ -1789,16 +1802,29 @@ async fn handle_socket(
                             text.as_str(),
                         )
                         .await;
-                        if outbound.send(Message::Text(reply.into())).await.is_err() {
-                            break;
+                        // `try_send`, not `send`: blocking on a full buffer
+                        // here would stop this loop from polling
+                        // `disconnect_rx`, so the heartbeat reaper could
+                        // never tear the connection down. A client whose
+                        // buffer is full isn't reading the reply anyway.
+                        match outbound.try_send(Message::Text(reply.into())) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                debug!(client_id, "dropping command reply; outbound buffer full");
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                     Ok(Message::Binary(_)) => {
                         debug!("received WebSocket binary message");
                     }
                     Ok(Message::Ping(payload)) => {
-                        if outbound.send(Message::Pong(payload)).await.is_err() {
-                            break;
+                        match outbound.try_send(Message::Pong(payload)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                debug!(client_id, "dropping pong reply; outbound buffer full");
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                     Ok(Message::Pong(_)) => {
@@ -1824,7 +1850,18 @@ async fn handle_socket(
     state.clients.unregister(client_id).await;
     heartbeat.abort();
     drop(outbound);
-    let _ = writer.await;
+    // Bound the final flush. A peer that has stopped reading (zero-window
+    // TCP) leaves the writer blocked in `sender.send` indefinitely; an
+    // unbounded await here would park this task forever and the disconnect
+    // accounting below would never run — the active-connections gauge
+    // would leak one slot per dead peer.
+    if tokio::time::timeout(WRITER_FLUSH_TIMEOUT, &mut writer)
+        .await
+        .is_err()
+    {
+        debug!(client_id, "writer did not flush in time; aborting");
+        writer.abort();
+    }
     let duration = connected_at.elapsed();
     let drops = total_drops.load(Ordering::Relaxed);
     info!(
@@ -2724,14 +2761,26 @@ async fn run_heartbeat(
         }
 
         let payload = client_id.to_string();
-        if outbound.send(Message::Ping(payload.into())).await.is_err() {
-            break DisconnectReason::OutboundClosed;
+        match outbound.try_send(Message::Ping(payload.into())) {
+            Ok(()) => debug!(client_id, "sent WebSocket heartbeat ping"),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // A full buffer means the peer has stopped draining its
+                // socket. A blocking `send` here would park this task and
+                // the timeout check above would never run again — the
+                // reaper would never fire for exactly the clients it
+                // exists to reap. Skip the ping; with no ping delivered
+                // there is no pong, so the timeout fires next interval.
+                debug!(client_id, "skipping heartbeat ping; outbound buffer full");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                break DisconnectReason::OutboundClosed;
+            }
         }
-
-        debug!(client_id, "sent WebSocket heartbeat ping");
     };
 
-    let _ = outbound.send(Message::Close(None)).await;
+    // `try_send`, not `send`: a full buffer must not delay the disconnect
+    // signal — the peer isn't reading the Close frame anyway.
+    let _ = outbound.try_send(Message::Close(None));
     let _ = disconnect.send(reason);
 }
 
@@ -3136,6 +3185,41 @@ mod tests {
         assert!(
             second.contains("substreams_websocket_test_canary_total"),
             "scrape after counter touch must include the metric: {second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_reaps_client_with_full_outbound_buffer() {
+        // Regression: a peer that stops draining its socket leaves the
+        // outbound mpsc full. The reaper must not block on the ping send —
+        // it has to keep re-checking the pong timeout and fire, or dead
+        // peers are never torn down and the active-connections gauge
+        // leaks one slot per dead peer.
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(Message::Text("stuck".to_owned().into()))
+            .expect("buffer accepts one message");
+        // `_rx` stays alive so the channel reads as Full, not Closed.
+
+        let (disconnect_tx, disconnect_rx) = oneshot::channel();
+        let last_pong = Arc::new(RwLock::new(Instant::now()));
+        tokio::spawn(run_heartbeat(
+            1,
+            tx,
+            last_pong,
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            None,
+            Instant::now(),
+            disconnect_tx,
+        ));
+
+        let reason = tokio::time::timeout(Duration::from_secs(5), disconnect_rx)
+            .await
+            .expect("reaper fires despite full outbound buffer")
+            .expect("disconnect reason is delivered");
+        assert!(
+            matches!(reason, DisconnectReason::HeartbeatTimeout),
+            "expected heartbeat timeout, got: {reason}"
         );
     }
 
