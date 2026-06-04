@@ -12,7 +12,7 @@ A streaming-first ETL on top of Firehose. Each module is a small WASM program th
 
 ## gRPC service shape
 
-We use `sf.substreams.rpc.v2.Stream/Blocks`. The proto definitions are not vendored: `build.rs` imports them from the buf.build registry (`buf export`), pinned to exact BSR commits in `BUF_MODULES`. Never copy or hand-edit proto files — to upgrade, bump the pinned commit in `build.rs`.
+We use `sf.substreams.rpc.v2.Stream/Blocks`. The proto definitions are not vendored: `build.rs` imports them from the buf.build registry (`buf build <module> --as-file-descriptor-set`), pinned per module in `BUF_MODULES`. Never copy or hand-edit proto files — to upgrade, bump the pinned ref in `build.rs`.
 
 - BSR module: <https://buf.build/streamingfast/substreams>
 - Service proto source: <https://github.com/streamingfast/substreams/blob/develop/proto/sf/substreams/rpc/v2/service.proto>
