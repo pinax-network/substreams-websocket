@@ -1775,14 +1775,12 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
         // Stop the countdown immediately so the status pill doesn't keep
         // re-asserting "open" while ws.close() works its way through.
         if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
-        if (ws && (ws.readyState === 0 || ws.readyState === 1)) {
+        // teardown() detaches onmessage before closing — critical here:
+        // without it the browser keeps rendering queued frames long after
+        // the UI says "closed", with the Disconnect button already disabled.
+        if (teardown('browser auto-disconnect')) {
           append('sys', '*', 'auto-disconnecting after ' + (autoMs / 1000) + 's to protect the browser');
           setStatus('closed', 'err');
-          // Eagerly restore UI; ws.onclose will also fire and is idempotent.
-          connectBtn.disabled = false;
-          disconnectBtn.disabled = true;
-          sendBtn.disabled = true;
-          try { ws.close(1000, 'browser auto-disconnect'); } catch (_) {}
         }
       }, autoMs);
     };
@@ -1805,27 +1803,34 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
   }
 
   connectBtn.onclick = connect;
-  disconnectBtn.onclick = function () {
-    if (!ws) return;
-    // Detach handlers immediately so any frames the browser still has
-    // queued from the kernel buffer stop being parsed / rendered while
-    // ws.close() works its way through. Without this, on a hot stream the
-    // user sees blocks keep arriving for a second or two after pressing
-    // Disconnect — the browser is just draining onmessage callbacks for
-    // frames already received.
+
+  // Shared teardown: detach handlers immediately so any frames the browser
+  // still has queued from the kernel buffer stop being parsed / rendered
+  // while ws.close() works its way through. Without this, on a hot stream
+  // blocks keep arriving for seconds-to-minutes after the close — the
+  // browser keeps draining onmessage callbacks until the server completes
+  // the close handshake, and on a busy stream the server can keep flushing
+  // its outbound buffer long before it processes our close frame.
+  function teardown(closeReason) {
+    if (!ws) return false;
     var sock = ws;
     ws = null;
     sock.onmessage = null;
     sock.onerror = null;
     sock.onclose = null;
-    try { sock.close(1000, 'user disconnected'); } catch (_) {}
+    try { sock.close(1000, closeReason); } catch (_) {}
     if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
     if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
-    statusEl.className = 'pill dim';
-    statusEl.textContent = 'closed';
     connectBtn.disabled = false;
     disconnectBtn.disabled = true;
     sendBtn.disabled = true;
+    return true;
+  }
+
+  disconnectBtn.onclick = function () {
+    if (!teardown('user disconnected')) return;
+    statusEl.className = 'pill dim';
+    statusEl.textContent = 'closed';
     append('sys', '*', 'disconnected by user');
   };
   $('clear').onclick = function () { logEl.innerHTML = ''; };
@@ -1853,12 +1858,9 @@ ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:0
     // Tear down the live socket + clear the log first. A busy stream can
     // queue hundreds of paint-blocking nodes; if we hide the modal without
     // draining them, the user perceives the close as frozen.
-    if (ws) {
-      try { ws.close(1000, 'modal closed'); } catch (_) {}
-      ws = null;
-    }
-    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
-    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    teardown('modal closed');
+    statusEl.className = 'pill dim';
+    statusEl.textContent = 'closed';
     logEl.innerHTML = '';
     modalEl.classList.remove('open');
   }
