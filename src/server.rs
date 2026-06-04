@@ -1497,6 +1497,7 @@ async fn replay_for_client(
     from_timestamp: i64,
     client_id: ClientId,
     outbound: &mpsc::Sender<Message>,
+    last_activity_at: &RwLock<Instant>,
 ) -> Result<(), String> {
     if !replay.is_enabled() {
         return Ok(());
@@ -1543,6 +1544,7 @@ async fn replay_for_client(
             if outbound.send(Message::Text(text.into())).await.is_err() {
                 return Err("outbound channel closed during replay".to_owned());
             }
+            *last_activity_at.write().await = Instant::now();
             info!(
                 client_id,
                 network,
@@ -1592,6 +1594,15 @@ async fn replay_for_client(
             if outbound.send(Message::Text(text.into())).await.is_err() {
                 return Err("outbound channel closed during replay".to_owned());
             }
+            // Send progress is proof of liveness: a `send` only completes
+            // when the writer is draining the buffer into the socket, i.e.
+            // the peer is reading. Refreshing the activity stamp here keeps
+            // the heartbeat reaper from killing a healthy client whose
+            // replay outlasts `heartbeat_timeout` (pongs aren't processed
+            // until the main receive loop starts). A peer that stops
+            // reading stalls these sends once the buffer fills, the stamp
+            // goes stale, and the reaper fires as intended.
+            *last_activity_at.write().await = Instant::now();
             replayed += 1;
         }
 
@@ -1693,6 +1704,12 @@ fn epoch_seconds_utc(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
     days * 86_400 + (hh as i64) * 3600 + (mm as i64) * 60 + ss as i64
 }
 
+/// How long connection teardown waits for the writer task to flush its
+/// remaining frames (including any Close frame) before aborting it. Long
+/// enough for a healthy peer to drain a Close; short enough that a dead
+/// peer can't hold the connection's accounting hostage.
+const WRITER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn handle_socket(
     state: AppState,
     filter: StreamFilter,
@@ -1722,10 +1739,10 @@ async fn handle_socket(
     let client_id = client.name;
     let total_drops = client.total_drops.clone();
     let connected_at = Instant::now();
-    let last_pong_at = Arc::new(RwLock::new(connected_at));
+    let last_activity_at = Arc::new(RwLock::new(connected_at));
     let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(message) = messages.recv().await {
             if sender.send(message).await.is_err() {
                 break;
@@ -1736,7 +1753,7 @@ async fn handle_socket(
     let heartbeat = tokio::spawn(run_heartbeat(
         client_id,
         outbound.clone(),
-        Arc::clone(&last_pong_at),
+        Arc::clone(&last_activity_at),
         state.config.websocket.heartbeat_interval,
         state.config.websocket.heartbeat_timeout,
         state.config.websocket.connection_ttl,
@@ -1753,70 +1770,106 @@ async fn handle_socket(
         "wrap_envelope": filter.wrap_envelope,
     });
 
-    if outbound
-        .send(Message::Text(welcome.to_string().into()))
-        .await
-        .is_err()
-    {
-        state.clients.unregister(client_id).await;
-        heartbeat.abort();
-        writer.abort();
-        return;
-    }
-
-    if let Some(from) = from_timestamp
-        && let Err(reason) =
-            replay_for_client(&state.replay, &filter, from, client_id, &outbound).await
-    {
-        warn!(client_id, %reason, "replay failed; continuing with live stream only");
-    }
-
-    loop {
-        tokio::select! {
-            message = receiver.next() => {
-                let Some(message) = message else {
-                    break;
-                };
-
-                match message {
-                    Ok(Message::Text(text)) => {
-                        debug!(client_id, %text, "received WebSocket text message");
-                        let reply = handle_subscription_command(
-                            client_id,
-                            &filter_handle,
-                            state.config.websocket.max_filter_fields,
-                            state.config.websocket.max_filter_values,
-                            text.as_str(),
-                        )
-                        .await;
-                        if outbound.send(Message::Text(reply.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Message::Binary(_)) => {
-                        debug!("received WebSocket binary message");
-                    }
-                    Ok(Message::Ping(payload)) => {
-                        if outbound.send(Message::Pong(payload)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Message::Pong(_)) => {
-                        *last_pong_at.write().await = Instant::now();
-                        debug!(client_id, "received WebSocket pong");
-                    }
-                    Ok(Message::Close(_)) => break,
-                    Err(error) => {
-                        debug!(%error, "WebSocket client error");
-                        break;
-                    }
-                }
+    // Welcome and replay use blocking sends by design — replay frames must
+    // not be dropped, so a full buffer is flow control, not an error. But
+    // the client was registered above, so broadcasts can already be filling
+    // the buffer; against a peer that never drains its socket these sends
+    // would park this task before the loop below ever polls `disconnect_rx`.
+    // Race them against the reaper so a stalled setup is still torn down.
+    let setup_ok = tokio::select! {
+        ok = async {
+            if outbound
+                .send(Message::Text(welcome.to_string().into()))
+                .await
+                .is_err()
+            {
+                return false;
             }
-            reason = &mut disconnect_rx => {
-                if let Ok(reason) = reason {
-                    info!(client_id, %reason, "disconnecting WebSocket client");
+            if let Some(from) = from_timestamp
+                && let Err(reason) =
+                    replay_for_client(
+                        &state.replay,
+                        &filter,
+                        from,
+                        client_id,
+                        &outbound,
+                        &last_activity_at,
+                    )
+                    .await
+            {
+                warn!(client_id, %reason, "replay failed; continuing with live stream only");
+            }
+            true
+        } => ok,
+        reason = &mut disconnect_rx => {
+            if let Ok(reason) = reason {
+                info!(client_id, %reason, "disconnecting WebSocket client during setup");
+            }
+            false
+        }
+    };
+
+    if setup_ok {
+        loop {
+            tokio::select! {
+                message = receiver.next() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+
+                    match message {
+                        Ok(Message::Text(text)) => {
+                            debug!(client_id, %text, "received WebSocket text message");
+                            let reply = handle_subscription_command(
+                                client_id,
+                                &filter_handle,
+                                state.config.websocket.max_filter_fields,
+                                state.config.websocket.max_filter_values,
+                                text.as_str(),
+                            )
+                            .await;
+                            // `try_send`, not `send`: blocking on a full buffer
+                            // here would stop this loop from polling
+                            // `disconnect_rx`, so the heartbeat reaper could
+                            // never tear the connection down. A client whose
+                            // buffer is full isn't reading the reply anyway.
+                            match outbound.try_send(Message::Text(reply.into())) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    debug!(client_id, "dropping command reply; outbound buffer full");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                        }
+                        Ok(Message::Binary(_)) => {
+                            debug!("received WebSocket binary message");
+                        }
+                        Ok(Message::Ping(payload)) => {
+                            match outbound.try_send(Message::Pong(payload)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    debug!(client_id, "dropping pong reply; outbound buffer full");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                        }
+                        Ok(Message::Pong(_)) => {
+                            *last_activity_at.write().await = Instant::now();
+                            debug!(client_id, "received WebSocket pong");
+                        }
+                        Ok(Message::Close(_)) => break,
+                        Err(error) => {
+                            debug!(%error, "WebSocket client error");
+                            break;
+                        }
+                    }
                 }
-                break;
+                reason = &mut disconnect_rx => {
+                    if let Ok(reason) = reason {
+                        info!(client_id, %reason, "disconnecting WebSocket client");
+                    }
+                    break;
+                }
             }
         }
     }
@@ -1824,7 +1877,18 @@ async fn handle_socket(
     state.clients.unregister(client_id).await;
     heartbeat.abort();
     drop(outbound);
-    let _ = writer.await;
+    // Bound the final flush. A peer that has stopped reading (zero-window
+    // TCP) leaves the writer blocked in `sender.send` indefinitely; an
+    // unbounded await here would park this task forever and the disconnect
+    // accounting below would never run — the active-connections gauge
+    // would leak one slot per dead peer.
+    if tokio::time::timeout(WRITER_FLUSH_TIMEOUT, &mut writer)
+        .await
+        .is_err()
+    {
+        debug!(client_id, "writer did not flush in time; aborting");
+        writer.abort();
+    }
     let duration = connected_at.elapsed();
     let drops = total_drops.load(Ordering::Relaxed);
     info!(
@@ -2700,10 +2764,14 @@ async fn handle_subscription_command(
     }
 }
 
+/// Periodic liveness check for one client. Fires `HeartbeatTimeout` when
+/// `last_activity_at` goes stale — the stamp is refreshed by pong receipt in
+/// the main receive loop and by send progress during replay catch-up (where
+/// pongs aren't yet being processed).
 async fn run_heartbeat(
     client_id: ClientId,
     outbound: mpsc::Sender<Message>,
-    last_pong_at: Arc<RwLock<Instant>>,
+    last_activity_at: Arc<RwLock<Instant>>,
     interval: Duration,
     timeout: Duration,
     connection_ttl: Option<Duration>,
@@ -2718,20 +2786,33 @@ async fn run_heartbeat(
             break DisconnectReason::ConnectionTtl;
         }
 
-        let last_pong_at = *last_pong_at.read().await;
-        if now.duration_since(last_pong_at) >= timeout {
+        let last_activity_at = *last_activity_at.read().await;
+        if now.duration_since(last_activity_at) >= timeout {
             break DisconnectReason::HeartbeatTimeout;
         }
 
         let payload = client_id.to_string();
-        if outbound.send(Message::Ping(payload.into())).await.is_err() {
-            break DisconnectReason::OutboundClosed;
+        match outbound.try_send(Message::Ping(payload.into())) {
+            Ok(()) => debug!(client_id, "sent WebSocket heartbeat ping"),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // A full buffer means the peer isn't draining its socket
+                // fast enough — possibly not at all. A blocking `send`
+                // here would park this task and the timeout check above
+                // would never run again — the reaper would never fire for
+                // exactly the clients it exists to reap. Skip the ping; a
+                // merely-slow peer still pongs the pings it does receive,
+                // while a dead one goes stale and times out next interval.
+                debug!(client_id, "skipping heartbeat ping; outbound buffer full");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                break DisconnectReason::OutboundClosed;
+            }
         }
-
-        debug!(client_id, "sent WebSocket heartbeat ping");
     };
 
-    let _ = outbound.send(Message::Close(None)).await;
+    // `try_send`, not `send`: a full buffer must not delay the disconnect
+    // signal — the peer isn't reading the Close frame anyway.
+    let _ = outbound.try_send(Message::Close(None));
     let _ = disconnect.send(reason);
 }
 
@@ -3136,6 +3217,80 @@ mod tests {
         assert!(
             second.contains("substreams_websocket_test_canary_total"),
             "scrape after counter touch must include the metric: {second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_reaps_client_with_full_outbound_buffer() {
+        // Regression: a peer that stops draining its socket leaves the
+        // outbound mpsc full. The reaper must not block on the ping send —
+        // it has to keep re-checking the pong timeout and fire, or dead
+        // peers are never torn down and the active-connections gauge
+        // leaks one slot per dead peer.
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(Message::Text("stuck".to_owned().into()))
+            .expect("buffer accepts one message");
+        // `_rx` stays alive so the channel reads as Full, not Closed.
+
+        let (disconnect_tx, disconnect_rx) = oneshot::channel();
+        let last_activity = Arc::new(RwLock::new(Instant::now()));
+        tokio::spawn(run_heartbeat(
+            1,
+            tx,
+            last_activity,
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            None,
+            Instant::now(),
+            disconnect_tx,
+        ));
+
+        let reason = tokio::time::timeout(Duration::from_secs(5), disconnect_rx)
+            .await
+            .expect("reaper fires despite full outbound buffer")
+            .expect("disconnect reason is delivered");
+        assert!(
+            matches!(reason, DisconnectReason::HeartbeatTimeout),
+            "expected heartbeat timeout, got: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_spares_client_with_refreshed_activity() {
+        // Contract that replay catch-up relies on: refreshing
+        // `last_activity_at` (as replay does on every send that makes
+        // progress) keeps the reaper from firing, even when no pong is
+        // ever processed — so a healthy client whose replay outlasts
+        // `heartbeat_timeout` is not killed mid-stream.
+        let (tx, mut rx) = mpsc::channel(16);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let (disconnect_tx, mut disconnect_rx) = oneshot::channel();
+        let last_activity = Arc::new(RwLock::new(Instant::now()));
+        let refresher = Arc::clone(&last_activity);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                *refresher.write().await = Instant::now();
+            }
+        });
+        tokio::spawn(run_heartbeat(
+            1,
+            tx,
+            last_activity,
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            None,
+            Instant::now(),
+            disconnect_tx,
+        ));
+
+        // Several timeout windows pass; the refreshed stamp must keep the
+        // reaper quiet the whole time.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            disconnect_rx.try_recv().is_err(),
+            "reaper must not fire while activity is being refreshed"
         );
     }
 
