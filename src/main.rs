@@ -581,7 +581,10 @@ fn format_stream_event(event: StreamEvent) -> String {
         } => format!(
             "session trace_id={trace_id} resolved_start_block={resolved_start_block} chain_head={chain_head}"
         ),
-        StreamEvent::Progress { modules } => format!("progress modules={modules}"),
+        StreamEvent::Progress {
+            running_jobs,
+            processed_blocks,
+        } => format!("progress running_jobs={running_jobs} processed_blocks={processed_blocks}"),
         StreamEvent::Block {
             number,
             id,

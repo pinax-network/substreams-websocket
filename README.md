@@ -24,7 +24,7 @@ tar xzf substreams-websocket.tar.gz
 cd substreams-websocket-linux-x86_64
 ```
 
-From source (Rust 1.90+, `protoc`):
+From source (Rust 1.90+, [`buf`](https://buf.build/docs/installation)):
 
 ```bash
 cargo install --git https://github.com/pinax-network/substreams-websocket --bin substreams-websocket
