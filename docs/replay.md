@@ -56,7 +56,7 @@ Server behavior, per subscribed `<network>@<table>` selector (`n` is the resume 
 - **`n` in window** (`n >= oldest_retained`): replay matching blocks, oldest first, before live takes over.
 - **`n` below window** (`n < oldest_retained`): emit one `gap` lifecycle message, then continue live.
 - **`n` at or above newest retained**: no replay, continue live.
-- **Wildcard selector** (`*@swaps`, `solana-mainnet@*`, `*@*`): skipped — no single `(network, table)` to anchor replay on. Wildcards always start live. (`from_block` is rejected for wildcards before this point.)
+- **Wildcard selector** (`*@swaps`, `solana-mainnet@*`, `*@*`): replays too (timestamp mode). `from_timestamp` is chain-agnostic, so a `*` resolves against every matching replay file and each retained block is expanded into concrete per-`network@table` frames (one frame per matched table), oldest first, before live takes over. `oldest_retained` for the gap check is the earliest timestamp across every matched file. Replayed frames carry their concrete `network`/`table` (and, in wrap mode, a concrete `network@table` envelope) — never the wildcard. The per-stream `tables` allowlist is honored for free: only allowed tables were ever written to the log, so expanding `*` never surfaces a dropped table. **Note:** wildcard replay is `from_timestamp` only — `from_block` is per-chain and rejected for wildcard/multi-selector connections.
 
 `gap` envelope — the fields match the resume unit you used:
 
@@ -95,7 +95,6 @@ On `BlockUndoSignal`, the server truncates the affected spkg's replay log to dro
 - **No durable guarantee on power loss.** No fsync per write. Last few blocks may be lost on hard kernel crash.
 - **No cross-replica fan-out.** Replay is per-process on local disk. Multiple containers behind a load balancer each have their own log; clients hitting different replicas get different windows.
 - **No historical backfill.** Beyond `REPLAY_SECONDS`, use Substreams gRPC directly.
-- **No wildcard replay.** `*@table`, `network@*`, `*@*` do not replay — they always start live.
 
 ## PaaS deployment
 

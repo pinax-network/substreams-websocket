@@ -213,7 +213,7 @@ If the resume point falls below the oldest retained value, the server emits a `g
   "reason": "requested block outside replay window" }
 ```
 
-Wildcard selectors (`*@swaps`, `solana-mainnet@*`) skip replay — there is no concrete file to scan. Cursor handling stays internal to the server.
+Wildcard selectors (`*@swaps`, `solana-mainnet@*`, `*@*`) replay too (timestamp mode): the server resolves the wildcard against every matching stream and replays concrete per-`network@table` frames, oldest first, before the live stream resumes. Each replayed frame carries its real `network`/`table` (the wildcard `gap` envelope echoes `*` in those fields). `from_block` resume is per-chain — single concrete selector only. Cursor handling stays internal to the server.
 
 ## Heartbeats
 
@@ -235,7 +235,7 @@ Or just connect to `wss://<host>/ws/*@*` and read the `session` message — it a
 - `ModuleNotFoundError: No module named 'websockets'` — install the Python `websockets` package (add to `requirements.txt`, `pyproject.toml`, etc.).
 - `TypeError: ... unexpected keyword argument ...` on connect — your WebSocket library renamed a kwarg between versions (e.g. `extra_headers` vs `additional_headers` in Python `websockets`). Match the kwarg to the installed version.
 - Silent disconnects or close code `1009` (`message too big`) on busy chains (Solana especially) — raise your client's max frame/message size to at least `32 MiB` (Python: `max_size=32 * 1024 * 1024`).
-- Socket opens but no payloads — re-check your selector (`<network>@<table>`), confirm the table exists in `/streams` or `session.streams[].tables`, and remember wildcard selectors (`*@*`, `*@swaps`, `solana-mainnet@*`) skip replay (live-only).
+- Socket opens but no payloads — re-check your selector (`<network>@<table>`), confirm the table exists in `/streams` or `session.streams[].tables`. Wildcard selectors (`*@*`, `*@swaps`, `solana-mainnet@*`) do replay on `?from_timestamp=` (the server expands them to concrete per-`network@table` frames).
 - Stream lifecycle frames with `"status":"error"` or `"status":"fatal"` carry upstream errors — surface `message` to the user and reconnect with `?from_timestamp=` if you want to resume.
 
 ## Common agent recipes

@@ -1150,7 +1150,7 @@ ws://host/ws/solana-mainnet@swaps?from_block=350000001</pre>
   "requested_block": 100,
   "oldest_buffered_block": 350000000,
   "reason": "requested block outside replay window" }</pre>
-    <p>Wildcards (<code>*@swaps</code>, <code>solana-mainnet@*</code>) skip replay — there is no concrete log file to scan for them. Cursors stay internal to the server.</p>
+    <p>Wildcards (<code>*@swaps</code>, <code>solana-mainnet@*</code>, <code>*@*</code>) replay too (timestamp mode): the server expands them to concrete per-<code>network@table</code> frames, oldest first. <code>from_block</code> is per-chain — single concrete selector only. Cursors stay internal to the server.</p>
   </section>
 
   <section id="heartbeats">

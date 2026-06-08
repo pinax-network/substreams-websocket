@@ -232,11 +232,15 @@ impl ReplayLog {
         Ok(())
     }
 
-    /// Read every retained block with `timestamp_seconds > from_timestamp`
-    /// that carries at least one event whose `@table == target_table`.
-    /// Scans every `.jsonl` file in the directory whose name starts with
-    /// `<network>-` (or all files when `network_filter` is `None`). Returns
-    /// per-table sub-blocks ordered by `timestamp_seconds`.
+    /// Read every retained block with `timestamp_seconds > from_timestamp` and
+    /// split it into per-table sub-blocks. Scans every `.jsonl` file in the
+    /// directory whose name starts with `<network>-` (or all files when
+    /// `network_filter` is `None` — a `*` network wildcard). When
+    /// `target_table` is `Some`, only that table is returned; when `None` (a
+    /// `*` table wildcard), every table present is returned as its own frame.
+    /// Returns [`ReplayBlock`]s ordered by `timestamp_seconds`, each carrying
+    /// its concrete `network` + `table` so a wildcard caller can build the
+    /// right `network@table` envelope.
     pub async fn read_from(
         &self,
         network_filter: Option<&str>,
@@ -265,7 +269,7 @@ impl ReplayLog {
             matched_files.push(entry.path());
         }
 
-        let mut blocks: Vec<(i64, String)> = Vec::new();
+        let mut blocks: Vec<ReplayBlock> = Vec::new();
         let mut oldest: Option<i64> = None;
 
         for path in matched_files {
@@ -275,7 +279,7 @@ impl ReplayLog {
                 if line.is_empty() {
                     continue;
                 }
-                let mut value: Value = serde_json::from_str(&line)?;
+                let value: Value = serde_json::from_str(&line)?;
                 let ts = value
                     .get("timestamp_seconds")
                     .and_then(Value::as_i64)
@@ -286,27 +290,27 @@ impl ReplayLog {
                 if ts <= from_timestamp {
                     continue;
                 }
-                if let Some(table) = target_table {
-                    filter_events_by_table(&mut value, table);
-                    let has_events = value
-                        .get("events")
-                        .and_then(Value::as_array)
-                        .map(|a| !a.is_empty())
-                        .unwrap_or(false);
-                    if !has_events {
-                        continue;
-                    }
-                    // Rewrite the top-level `table` field so the per-table
-                    // payload looks identical to a live broadcast.
-                    if let Some(obj) = value.as_object_mut() {
-                        obj.insert("table".to_owned(), Value::String(table.to_owned()));
-                    }
+                let network = value
+                    .get("network")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                // Split into per-table sub-blocks so a wildcard table selector
+                // (`network@*`, `*@*`) replays one frame per table, each
+                // identical in shape to a live broadcast. An explicit
+                // `target_table` keeps just that one.
+                for (table, sub) in split_block_by_table(&value, target_table) {
+                    blocks.push(ReplayBlock {
+                        timestamp_seconds: ts,
+                        network: network.clone(),
+                        table,
+                        payload: sub.to_string(),
+                    });
                 }
-                blocks.push((ts, value.to_string()));
             }
         }
 
-        blocks.sort_by_key(|(ts, _)| *ts);
+        blocks.sort_by_key(|b| b.timestamp_seconds);
         Ok(ReadResult { blocks, oldest })
     }
 
@@ -323,7 +327,7 @@ impl ReplayLog {
         network: &str,
         target_table: &str,
         from_block: u64,
-    ) -> Result<(Vec<(i64, String)>, Option<u64>), ReplayError> {
+    ) -> Result<(Vec<ReplayBlock>, Option<u64>), ReplayError> {
         let Some(inner) = &self.inner else {
             return Ok((Vec::new(), None));
         };
@@ -345,9 +349,9 @@ impl ReplayLog {
             matched_files.push(entry.path());
         }
 
-        // `(block_num, timestamp_seconds, per-table json)` so we can order by
-        // the chain-native block height before dropping `block_num`.
-        let mut rows: Vec<(u64, i64, String)> = Vec::new();
+        // Keep `block_num` alongside each frame so we can order by the
+        // chain-native block height before dropping it.
+        let mut rows: Vec<(u64, ReplayBlock)> = Vec::new();
         let mut oldest: Option<u64> = None;
 
         for path in matched_files {
@@ -357,7 +361,7 @@ impl ReplayLog {
                 if line.is_empty() {
                     continue;
                 }
-                let mut value: Value = serde_json::from_str(&line)?;
+                let value: Value = serde_json::from_str(&line)?;
                 let block_num = value.get("block_num").and_then(Value::as_u64).unwrap_or(0);
                 let ts = value
                     .get("timestamp_seconds")
@@ -369,26 +373,29 @@ impl ReplayLog {
                 if block_num <= from_block {
                     continue;
                 }
-                filter_events_by_table(&mut value, target_table);
-                let has_events = value
-                    .get("events")
-                    .and_then(Value::as_array)
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
-                if !has_events {
-                    continue;
+                let network_name = value
+                    .get("network")
+                    .and_then(Value::as_str)
+                    .unwrap_or(network)
+                    .to_owned();
+                // Reuse the shared per-table split so block-mode frames are
+                // identical in shape to a live broadcast / timestamp replay.
+                for (table, sub) in split_block_by_table(&value, Some(target_table)) {
+                    rows.push((
+                        block_num,
+                        ReplayBlock {
+                            timestamp_seconds: ts,
+                            network: network_name.clone(),
+                            table,
+                            payload: sub.to_string(),
+                        },
+                    ));
                 }
-                // Rewrite the top-level `table` field so the per-table payload
-                // looks identical to a live broadcast.
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("table".to_owned(), Value::String(target_table.to_owned()));
-                }
-                rows.push((block_num, ts, value.to_string()));
             }
         }
 
-        rows.sort_by_key(|(block_num, _, _)| *block_num);
-        let blocks = rows.into_iter().map(|(_, ts, json)| (ts, json)).collect();
+        rows.sort_by_key(|(block_num, _)| *block_num);
+        let blocks = rows.into_iter().map(|(_, block)| block).collect();
         Ok((blocks, oldest))
     }
 }
@@ -422,10 +429,59 @@ fn filter_events_by_table(block: &mut Value, target_table: &str) {
     }
 }
 
+/// Split one stored (unrouted) block into per-table sub-blocks matching the
+/// live broadcast shape: events filtered to a single `@table`, `@table`
+/// stripped from each event, top-level `table` set. When `only` is `Some`,
+/// emit at most one sub-block for that table; when `None`, emit one per
+/// distinct table present, in first-seen order. A table whose events all get
+/// filtered out yields no sub-block.
+fn split_block_by_table(block: &Value, only: Option<&str>) -> Vec<(String, Value)> {
+    let Some(events) = block.get("events").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut tables: Vec<String> = Vec::new();
+    for event in events {
+        let Some(t) = event.get("@table").and_then(Value::as_str) else {
+            continue;
+        };
+        if only.is_some_and(|want| want != t) {
+            continue;
+        }
+        if !tables.iter().any(|seen| seen == t) {
+            tables.push(t.to_owned());
+        }
+    }
+    tables
+        .into_iter()
+        .map(|table| {
+            let mut sub = block.clone();
+            filter_events_by_table(&mut sub, &table);
+            // Rewrite the top-level `table` field so the per-table payload
+            // looks identical to a live broadcast.
+            if let Some(obj) = sub.as_object_mut() {
+                obj.insert("table".to_owned(), Value::String(table.clone()));
+            }
+            (table, sub)
+        })
+        .collect()
+}
+
+/// One per-table replay frame, ready to send. `payload` is the block JSON with
+/// events filtered to `table` (and `@table` stripped), matching the live
+/// broadcast shape. `network` + `table` let the caller build the correct
+/// `network@table` envelope even when the subscription selector was a wildcard.
+#[derive(Debug, Clone)]
+pub struct ReplayBlock {
+    pub timestamp_seconds: i64,
+    pub network: String,
+    pub table: String,
+    pub payload: String,
+}
+
 #[derive(Default, Debug)]
 pub struct ReadResult {
-    /// `(timestamp_seconds, raw_json)` ordered ascending by timestamp.
-    pub blocks: Vec<(i64, String)>,
+    /// Per-table replay frames ordered ascending by `timestamp_seconds`.
+    pub blocks: Vec<ReplayBlock>,
     /// Smallest `timestamp_seconds` seen across every scanned file before
     /// the from-filter was applied. `None` if no files matched.
     pub oldest: Option<i64>,
@@ -594,13 +650,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.blocks.len(), 4);
-        for (ts, raw) in &result.blocks {
-            let v: Value = serde_json::from_str(raw).unwrap();
+        for b in &result.blocks {
+            assert_eq!(b.network, "solana-mainnet");
+            assert_eq!(b.table, "swaps");
+            let v: Value = serde_json::from_str(&b.payload).unwrap();
             assert_eq!(v["table"], "swaps");
             let events = v["events"].as_array().unwrap();
             assert_eq!(events.len(), 1);
             assert!(events[0].get("@table").is_none(), "@table must be stripped");
-            assert_eq!(events[0]["id"], format!("evt-{ts}-swaps"));
+            assert_eq!(
+                events[0]["id"],
+                format!("evt-{}-swaps", b.timestamp_seconds)
+            );
         }
         assert_eq!(result.oldest, Some(1_000_000));
     }
@@ -630,8 +691,16 @@ mod tests {
             .unwrap();
         // Window allows up to 10s + 1s headroom; the trim cutoff is
         // newest_ts - 10, so the oldest retained line is at most 10s old.
-        let oldest_kept = result.blocks.first().map(|(ts, _)| *ts).unwrap_or(0);
-        let newest_kept = result.blocks.last().map(|(ts, _)| *ts).unwrap_or(0);
+        let oldest_kept = result
+            .blocks
+            .first()
+            .map(|b| b.timestamp_seconds)
+            .unwrap_or(0);
+        let newest_kept = result
+            .blocks
+            .last()
+            .map(|b| b.timestamp_seconds)
+            .unwrap_or(0);
         assert!(
             newest_kept - oldest_kept <= 11,
             "expected window <= 11s, got {}",
@@ -668,7 +737,7 @@ mod tests {
             .read_from(Some("solana-mainnet"), Some("swaps"), 0)
             .await
             .unwrap();
-        let ts: Vec<i64> = result.blocks.iter().map(|(t, _)| *t).collect();
+        let ts: Vec<i64> = result.blocks.iter().map(|b| b.timestamp_seconds).collect();
         assert_eq!(ts, vec![1_000_000, 1_000_001]);
     }
 
@@ -699,6 +768,132 @@ mod tests {
         assert_eq!(result.blocks.len(), 5);
     }
 
+    fn block_on_network(
+        network: &str,
+        timestamp_seconds: i64,
+        block_num: u64,
+        tables: &[&str],
+    ) -> String {
+        let events: Vec<serde_json::Value> = tables
+            .iter()
+            .map(|t| serde_json::json!({ "@table": *t, "id": format!("evt-{timestamp_seconds}-{t}") }))
+            .collect();
+        serde_json::json!({
+            "network": network,
+            "block_num": block_num,
+            "timestamp_seconds": timestamp_seconds,
+            "events": events,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn table_wildcard_splits_block_into_one_frame_per_table() {
+        let dir = tmpdir("table_wildcard");
+        let log = ReplayLog::new(&dir, 600);
+        for n in 0..3 {
+            let ts = 1_000_000 + n;
+            log.append(
+                "solana-mainnet",
+                PKG,
+                VER,
+                HASH,
+                ts,
+                &block_with_tables(ts, 100 + n as u64, &["swaps", "transfers"]),
+            )
+            .await
+            .unwrap();
+        }
+        // `solana-mainnet@*` → target_table None → one frame per table.
+        let result = log
+            .read_from(Some("solana-mainnet"), None, 0)
+            .await
+            .unwrap();
+        assert_eq!(result.blocks.len(), 6, "3 blocks × 2 tables");
+        let swaps = result.blocks.iter().filter(|b| b.table == "swaps").count();
+        let transfers = result
+            .blocks
+            .iter()
+            .filter(|b| b.table == "transfers")
+            .count();
+        assert_eq!((swaps, transfers), (3, 3));
+        for b in &result.blocks {
+            assert_eq!(b.network, "solana-mainnet");
+            let v: Value = serde_json::from_str(&b.payload).unwrap();
+            assert_eq!(v["table"], b.table.as_str());
+            let events = v["events"].as_array().unwrap();
+            assert_eq!(events.len(), 1, "events filtered to this table only");
+            assert!(events[0].get("@table").is_none(), "@table must be stripped");
+        }
+    }
+
+    #[tokio::test]
+    async fn network_wildcard_merges_across_chains_for_one_table() {
+        let dir = tmpdir("net_wildcard");
+        let log = ReplayLog::new(&dir, 600);
+        log.append(
+            "solana-mainnet",
+            "svm_dex",
+            "v0.5.0",
+            "aaaa",
+            1_000_000,
+            &block_on_network("solana-mainnet", 1_000_000, 100, &["swaps", "transfers"]),
+        )
+        .await
+        .unwrap();
+        log.append(
+            "ethereum-mainnet",
+            "evm_dex",
+            "v0.7.0",
+            "bbbb",
+            1_000_001,
+            &block_on_network("ethereum-mainnet", 1_000_001, 200, &["swaps"]),
+        )
+        .await
+        .unwrap();
+        // `*@swaps` → network None, target_table Some → both chains, swaps only.
+        let result = log.read_from(None, Some("swaps"), 0).await.unwrap();
+        assert_eq!(result.blocks.len(), 2);
+        let nets: Vec<&str> = result.blocks.iter().map(|b| b.network.as_str()).collect();
+        assert!(nets.contains(&"solana-mainnet"));
+        assert!(nets.contains(&"ethereum-mainnet"));
+        assert!(result.blocks.iter().all(|b| b.table == "swaps"));
+        // ordered ascending by timestamp.
+        assert_eq!(result.blocks[0].timestamp_seconds, 1_000_000);
+        assert_eq!(result.blocks[1].timestamp_seconds, 1_000_001);
+    }
+
+    #[tokio::test]
+    async fn full_wildcard_returns_every_network_and_table() {
+        let dir = tmpdir("full_wildcard");
+        let log = ReplayLog::new(&dir, 600);
+        log.append(
+            "solana-mainnet",
+            "svm_dex",
+            "v0.5.0",
+            "aaaa",
+            1_000_000,
+            &block_on_network("solana-mainnet", 1_000_000, 100, &["swaps", "transfers"]),
+        )
+        .await
+        .unwrap();
+        log.append(
+            "ethereum-mainnet",
+            "evm_dex",
+            "v0.7.0",
+            "bbbb",
+            1_000_001,
+            &block_on_network("ethereum-mainnet", 1_000_001, 200, &["swaps"]),
+        )
+        .await
+        .unwrap();
+        // `*@*` → both None → every network × every table.
+        let result = log.read_from(None, None, 0).await.unwrap();
+        // solana: swaps + transfers (2), ethereum: swaps (1) = 3 frames.
+        assert_eq!(result.blocks.len(), 3);
+        assert_eq!(result.oldest, Some(1_000_000));
+    }
+
     #[tokio::test]
     async fn read_from_block_returns_blocks_above_from_block() {
         let dir = tmpdir("from_block");
@@ -723,8 +918,10 @@ mod tests {
             .unwrap();
         assert_eq!(blocks.len(), 5);
         assert_eq!(oldest, Some(100), "smallest retained block_num");
-        for (_ts, raw) in &blocks {
-            let v: Value = serde_json::from_str(raw).unwrap();
+        for b in &blocks {
+            assert_eq!(b.network, "solana-mainnet");
+            assert_eq!(b.table, "swaps");
+            let v: Value = serde_json::from_str(&b.payload).unwrap();
             assert_eq!(v["table"], "swaps");
             let events = v["events"].as_array().unwrap();
             assert_eq!(events.len(), 1, "filtered to swaps only");
@@ -764,8 +961,8 @@ mod tests {
         assert_eq!(oldest, Some(200));
         let block_nums: Vec<u64> = blocks
             .iter()
-            .map(|(_, raw)| {
-                serde_json::from_str::<Value>(raw).unwrap()["block_num"]
+            .map(|b| {
+                serde_json::from_str::<Value>(&b.payload).unwrap()["block_num"]
                     .as_u64()
                     .unwrap()
             })

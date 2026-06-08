@@ -93,7 +93,7 @@ This order is especially useful on Railway when log tailing is delayed.
 
 - **No data despite successful connect**
   - Signal: socket opens but no block payloads arrive
-  - Fix: verify selector correctness (`<network>@<table>`), confirm table existence in `/streams` or `session.streams[].tables`, and avoid assuming wildcard replay behavior (`*@*` is live-only).
+  - Fix: verify selector correctness (`<network>@<table>`), confirm table existence in `/streams` or `session.streams[].tables`. Wildcards (`*@*`, `*@swaps`) do replay on `?from_timestamp=` — the server expands them to concrete per-`network@table` frames.
 
 ## References
 
