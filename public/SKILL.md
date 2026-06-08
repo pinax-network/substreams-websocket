@@ -87,7 +87,7 @@ One message per `(network, table)` group per block. A spkg that emits both `swap
 Field reference:
 
 - `network` + `table` — together identify the subscription channel.
-- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`. `block_num` is also the resume key for reconnects.
+- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`. `block_num` and the block timestamp are both reconnect resume keys (`?from_block=` and `?from_timestamp=` — see [Reconnects and replay](#reconnects-and-replay)).
 - `module_hash` — canonical 40-hex SHA-1 of the Substreams output module. Use it to detect spkg upgrades.
 - `events` — array of rows for this table only, in source order. The per-event `@table` prefix is dropped since the parent payload already names the table.
 - All values inside `events[*]` are strings on the wire (per DatabaseChanges proto). Numeric types are stringified; the agent must parse.
