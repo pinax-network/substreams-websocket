@@ -179,24 +179,38 @@ Filters accept only strings or arrays of strings. Max keys and values are server
 
 ## Reconnects and replay
 
-The server retains a recent time window per spkg on disk (default 3600 seconds, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS`). On reconnect, pass `?from_timestamp=<n>` (Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`) to receive every block with `timestamp_seconds > n` from the on-disk window before the live stream resumes.
+The server retains a recent time window per spkg on disk (default 3600 seconds, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS`). On reconnect, resume by passing **one** of two mutually exclusive query parameters before the live stream resumes:
+
+- `?from_timestamp=<n>` — Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`. Chain-agnostic, works for any selector. Replays blocks with `timestamp_seconds > n`.
+- `?from_block=<n>` — block number. Replays blocks with `block_num > n`. Per-chain, so accepted **only for a single concrete `<network>@<table>` selector** — a wildcard or multi-selector connection returns HTTP 400. Pass `block_num + 1` from the last payload you processed.
 
 ```
 ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
 ws://host/stream?streams=solana-mainnet@swaps&from_timestamp=2026-05-13T17:00:00Z
+ws://host/ws/solana-mainnet@swaps?from_block=350000001
 ```
 
-If `from_timestamp` falls below the oldest retained timestamp, the server emits a `gap` lifecycle message instead and continues live:
+Passing both parameters, or `from_block` with a wildcard/multi-selector, returns HTTP 400.
+
+If the resume point falls below the oldest retained value, the server emits a `gap` lifecycle message instead and continues live. The `gap` fields match the unit you resumed with:
 
 ```json
+// after ?from_timestamp=
 { "type": "stream", "status": "gap",
-  "network": "solana-mainnet",
+  "network": "solana-mainnet", "table": "swaps",
+  "requested_timestamp": 1715000000,
+  "oldest_buffered_timestamp": 1715619300,
+  "reason": "requested timestamp outside replay window" }
+
+// after ?from_block=
+{ "type": "stream", "status": "gap",
+  "network": "solana-mainnet", "table": "swaps",
   "requested_block": 100,
-  "oldest_buffered_block": 500,
+  "oldest_buffered_block": 350000000,
   "reason": "requested block outside replay window" }
 ```
 
-Use `block_num + 1` from the latest payload you successfully processed. Wildcard selectors (`*@swaps`, `solana-mainnet@*`) skip replay — there is no concrete file to scan. Cursor handling stays internal to the server; clients deal in block numbers only.
+Wildcard selectors (`*@swaps`, `solana-mainnet@*`) skip replay — there is no concrete file to scan. Cursor handling stays internal to the server.
 
 ## Heartbeats
 

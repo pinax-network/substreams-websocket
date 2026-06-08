@@ -413,15 +413,18 @@ async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
                       "schema": { "type": "string" },
                       "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
                     { "name": "from_timestamp", "in": "query", "required": false,
-                      "description": "Resume from this Unix epoch seconds value or `YYYY-MM-DD HH:MM:SS` UTC. Replays buffered blocks for explicit selectors.",
+                      "description": "Resume from this Unix epoch seconds value or `YYYY-MM-DD HH:MM:SS` UTC. Replays buffered blocks for explicit selectors. Chain-agnostic — works for any selector. Mutually exclusive with `from_block`.",
                       "schema": { "type": "string" } },
+                    { "name": "from_block", "in": "query", "required": false,
+                      "description": "Resume from this block number (`block_num > from_block`). Per-chain, so only accepted for a single concrete `network@table` selector — wildcard or multi-selector connections return 400. Mutually exclusive with `from_timestamp`.",
+                      "schema": { "type": "integer", "format": "int64", "minimum": 0 } },
                     { "name": "filter", "in": "query", "required": false,
                       "description": "URL-encoded JSON `{field: value|[values]}`. Server-side row filter, fields AND, values OR.",
                       "schema": { "type": "string" } }
                 ],
                 "responses": {
                     "101": { "description": "Switching Protocols — WebSocket open" },
-                    "400": { "description": "Invalid selector / filter / from_timestamp" },
+                    "400": { "description": "Invalid selector / filter / from_timestamp / from_block" },
                     "503": { "description": "max_clients reached" }
                 }
             }
@@ -440,12 +443,15 @@ async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
                       "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
                     { "name": "from_timestamp", "in": "query", "required": false,
                       "schema": { "type": "string" } },
+                    { "name": "from_block", "in": "query", "required": false,
+                      "description": "Per-chain block resume; single concrete `network@table` selector only. Mutually exclusive with `from_timestamp`.",
+                      "schema": { "type": "integer", "format": "int64", "minimum": 0 } },
                     { "name": "filter", "in": "query", "required": false,
                       "schema": { "type": "string" } }
                 ],
                 "responses": {
                     "101": { "description": "Switching Protocols — WebSocket open" },
-                    "400": { "description": "Invalid `streams` / filter / from_timestamp" },
+                    "400": { "description": "Invalid `streams` / filter / from_timestamp / from_block" },
                     "503": { "description": "max_clients reached" }
                 }
             }
@@ -1382,7 +1388,7 @@ async fn websocket_path(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let from_timestamp = match parse_from_timestamp(raw_query.as_deref()) {
+    let resume = match resolve_resume(raw_query.as_deref(), &entries) {
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
@@ -1402,7 +1408,7 @@ async fn websocket_path(
         wrap_envelope,
         event_filters,
     };
-    ws.on_upgrade(move |socket| handle_socket(state, filter, from_timestamp, socket))
+    ws.on_upgrade(move |socket| handle_socket(state, filter, resume, socket))
         .into_response()
 }
 
@@ -1432,7 +1438,7 @@ async fn websocket_stream_query(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let from_timestamp = match parse_from_timestamp(Some(&raw)) {
+    let resume = match resolve_resume(Some(&raw), &entries) {
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
@@ -1450,7 +1456,7 @@ async fn websocket_stream_query(
         wrap_envelope: true,
         event_filters,
     };
-    ws.on_upgrade(move |socket| handle_socket(state, filter, from_timestamp, socket))
+    ws.on_upgrade(move |socket| handle_socket(state, filter, resume, socket))
         .into_response()
 }
 
@@ -1485,16 +1491,18 @@ fn parse_filter_query(
     Ok(set)
 }
 
-/// Replay buffered blocks for every explicit `<network>@<table>` selector
-/// with `timestamp_seconds > from_timestamp`. Wildcard selectors are skipped
-/// — replay is anchored to a single `(network, table)` pair. For each
-/// explicit selector with at least one retained block, either replay matching
-/// blocks (oldest first) or emit a `gap` lifecycle message when
-/// `from_timestamp` falls below the oldest retained timestamp.
+/// Replay buffered blocks for every explicit `<network>@<table>` selector,
+/// resuming from the [`Resume`] cursor: `timestamp_seconds > from_timestamp`
+/// (chain-agnostic) or `block_num > from_block` (per-chain, single concrete
+/// selector only). Wildcard selectors are skipped — replay is anchored to a
+/// single `(network, table)` pair. For each explicit selector with at least
+/// one retained block, either replay matching blocks (oldest first) or emit a
+/// `gap` lifecycle message when the resume point falls below the oldest
+/// retained value.
 async fn replay_for_client(
     replay: &ReplayLog,
     filter: &StreamFilter,
-    from_timestamp: i64,
+    resume: Resume,
     client_id: ClientId,
     outbound: &mpsc::Sender<Message>,
     last_activity_at: &RwLock<Instant>,
@@ -1507,37 +1515,69 @@ async fn replay_for_client(
         let (Some(network), Some(table)) = (entry.network.as_deref(), entry.stream.as_deref())
         else {
             // Wildcards skipped — no single `(network, table)` to resume on.
+            // Block-mode connections never reach a wildcard (the handler
+            // rejects `from_block` for them); timestamp mode starts live.
             continue;
         };
         let stream = table;
 
-        let result = replay
-            .read_from(Some(network), Some(stream), from_timestamp)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let oldest = match result.oldest {
-            Some(v) => v,
-            None => continue,
+        // Resolve the blocks to replay (or a `gap` envelope) for this selector
+        // from the resume cursor. The block path only runs for the single
+        // concrete selector the handler allowed — block numbers are per-chain.
+        let (blocks, gap) = match resume {
+            Resume::Timestamp(from_ts) => {
+                let result = replay
+                    .read_from(Some(network), Some(stream), from_ts)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let Some(oldest) = result.oldest else {
+                    continue;
+                };
+                if from_ts < oldest {
+                    let gap = serde_json::json!({
+                        "type": "stream",
+                        "status": "gap",
+                        "network": network,
+                        "table": stream,
+                        "requested_timestamp": from_ts,
+                        "oldest_buffered_timestamp": oldest,
+                        "reason": "requested timestamp outside replay window",
+                    });
+                    (Vec::new(), Some(gap))
+                } else {
+                    (result.blocks, None)
+                }
+            }
+            Resume::Block(from_block) => {
+                let (blocks, oldest) = replay
+                    .read_from_block(network, stream, from_block)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let Some(oldest) = oldest else {
+                    continue;
+                };
+                if from_block < oldest {
+                    let gap = serde_json::json!({
+                        "type": "stream",
+                        "status": "gap",
+                        "network": network,
+                        "table": stream,
+                        "requested_block": from_block,
+                        "oldest_buffered_block": oldest,
+                        "reason": "requested block outside replay window",
+                    });
+                    (Vec::new(), Some(gap))
+                } else {
+                    (blocks, None)
+                }
+            }
         };
 
-        if from_timestamp < oldest {
-            // Resume point below the retained window — tell client there is a
-            // gap and continue with live stream only.
-            let gap = serde_json::json!({
-                "type": "stream",
-                "status": "gap",
-                "network": network,
-                "table": stream,
-                "requested_timestamp": from_timestamp,
-                "oldest_buffered_timestamp": oldest,
-                "reason": "requested timestamp outside replay window",
-            });
+        if let Some(gap) = gap {
+            // Resume point below the retained window — tell the client there is
+            // a gap and continue with the live stream only.
             let text = if filter.wrap_envelope {
-                format!(
-                    r#"{{"stream":"{network}@{stream}","data":{}}}"#,
-                    gap.to_string()
-                )
+                format!(r#"{{"stream":"{network}@{stream}","data":{gap}}}"#)
             } else {
                 gap.to_string()
             };
@@ -1545,14 +1585,7 @@ async fn replay_for_client(
                 return Err("outbound channel closed during replay".to_owned());
             }
             *last_activity_at.write().await = Instant::now();
-            info!(
-                client_id,
-                network,
-                stream,
-                from_timestamp,
-                oldest_buffered_timestamp = oldest,
-                "replay gap"
-            );
+            info!(client_id, network, stream, "replay gap");
             metrics::counter!(
                 "substreams_websocket_replay_reads_total",
                 "network" => network.to_owned(),
@@ -1566,7 +1599,7 @@ async fn replay_for_client(
         let selector = format!("{network}@{stream}");
         let matching_filters = filter.event_filters.matching(network, stream);
         let mut replayed: usize = 0;
-        for (_ts, raw_text) in result.blocks {
+        for (_ts, raw_text) in blocks {
             let payload_text = if !matching_filters.is_empty() {
                 let mut block = match serde_json::from_str::<serde_json::Value>(&raw_text) {
                     Ok(v) => v,
@@ -1607,10 +1640,7 @@ async fn replay_for_client(
         }
 
         if replayed > 0 {
-            info!(
-                client_id,
-                network, stream, from_timestamp, replayed, "replay delivered"
-            );
+            info!(client_id, network, stream, replayed, "replay delivered");
             metrics::counter!(
                 "substreams_websocket_replay_reads_total",
                 "network" => network.to_owned(),
@@ -1657,6 +1687,66 @@ fn parse_from_timestamp(raw_query: Option<&str>) -> Result<Option<i64>, String> 
     parse_iso_timestamp(&value).map(Some).ok_or_else(|| {
         format!("from_timestamp must be epoch seconds or `YYYY-MM-DD HH:MM:SS` UTC; got {value:?}")
     })
+}
+
+/// How a reconnecting client resumes replay. `Timestamp` is chain-agnostic and
+/// works for any selector; `Block` is per-chain so the handler only accepts it
+/// for a single concrete `network@table` selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resume {
+    Timestamp(i64),
+    Block(u64),
+}
+
+/// Parse `?from_block=<n>` as an unsigned block number.
+fn parse_from_block(raw_query: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(raw) = raw_query else {
+        return Ok(None);
+    };
+    let Some((_, value)) = url_query_pairs(raw).find(|(k, _)| k == "from_block") else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value.parse::<u64>().map(Some).map_err(|_| {
+        format!("from_block must be a non-negative integer block number; got {value:?}")
+    })
+}
+
+/// Resolve the replay resume cursor from the query string. Accepts at most one
+/// of `?from_timestamp=` / `?from_block=`. `from_block` is per-chain, so it is
+/// rejected for wildcard or multi-selector connections — those must use the
+/// chain-agnostic `from_timestamp`.
+fn resolve_resume(raw_query: Option<&str>, entries: &[StreamId]) -> Result<Option<Resume>, String> {
+    let from_timestamp = parse_from_timestamp(raw_query)?;
+    let from_block = parse_from_block(raw_query)?;
+    match (from_timestamp, from_block) {
+        (Some(_), Some(_)) => {
+            Err("pass either `from_timestamp` or `from_block`, not both".to_owned())
+        }
+        (Some(ts), None) => Ok(Some(Resume::Timestamp(ts))),
+        (None, Some(block)) => {
+            // Block numbers are per-chain; only a single concrete selector has
+            // an unambiguous block axis. Wildcards and multi-network / multi-
+            // selector connections must resume by the chain-agnostic timestamp.
+            if entries.len() != 1 {
+                return Err(format!(
+                    "`from_block` requires a single concrete `network@table` selector; got {} selectors — use `from_timestamp` to resume across chains",
+                    entries.len()
+                ));
+            }
+            let entry = &entries[0];
+            if entry.network.is_none() || entry.stream.is_none() {
+                return Err(
+                    "`from_block` is per-chain and not supported for wildcard selectors; use `from_timestamp`"
+                        .to_owned(),
+                );
+            }
+            Ok(Some(Resume::Block(block)))
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 /// Tiny UTC timestamp parser. Accepts the formats we actually emit:
@@ -1713,7 +1803,7 @@ const WRITER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 async fn handle_socket(
     state: AppState,
     filter: StreamFilter,
-    from_timestamp: Option<i64>,
+    resume: Option<Resume>,
     socket: WebSocket,
 ) {
     let Some((client, filter_handle)) = state.clients.register(&state.config, filter.clone()).await
@@ -1785,12 +1875,12 @@ async fn handle_socket(
             {
                 return false;
             }
-            if let Some(from) = from_timestamp
+            if let Some(resume) = resume
                 && let Err(reason) =
                     replay_for_client(
                         &state.replay,
                         &filter,
-                        from,
+                        resume,
                         client_id,
                         &outbound,
                         &last_activity_at,
@@ -3748,6 +3838,198 @@ mod tests {
         assert_eq!(value["oldest_buffered_timestamp"], 5_000_000);
 
         socket.close(None).await.expect("clean close");
+    }
+
+    #[test]
+    fn resolve_resume_rejects_both_cursors() {
+        let entries = vec![StreamId::parse("solana-mainnet@swaps").unwrap()];
+        let err = resolve_resume(Some("from_timestamp=100&from_block=5"), &entries).unwrap_err();
+        assert!(err.contains("not both"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_resume_accepts_timestamp_for_any_selector() {
+        let wild = vec![StreamId::parse("*@swaps").unwrap()];
+        assert_eq!(
+            resolve_resume(Some("from_timestamp=100"), &wild).unwrap(),
+            Some(Resume::Timestamp(100))
+        );
+    }
+
+    #[test]
+    fn resolve_resume_block_requires_single_concrete_selector() {
+        // network wildcard
+        let net_wild = vec![StreamId::parse("*@swaps").unwrap()];
+        assert!(resolve_resume(Some("from_block=5"), &net_wild).is_err());
+        // table wildcard
+        let table_wild = vec![StreamId::parse("solana-mainnet@*").unwrap()];
+        assert!(resolve_resume(Some("from_block=5"), &table_wild).is_err());
+        // multiple selectors (also covers comma-expanded multi-network)
+        let multi = vec![
+            StreamId::parse("solana-mainnet@swaps").unwrap(),
+            StreamId::parse("ethereum-mainnet@swaps").unwrap(),
+        ];
+        assert!(resolve_resume(Some("from_block=5"), &multi).is_err());
+        // single concrete selector → accepted
+        let one = vec![StreamId::parse("solana-mainnet@swaps").unwrap()];
+        assert_eq!(
+            resolve_resume(Some("from_block=5"), &one).unwrap(),
+            Some(Resume::Block(5))
+        );
+    }
+
+    #[test]
+    fn resolve_resume_none_when_absent() {
+        let entries = vec![StreamId::parse("solana-mainnet@swaps").unwrap()];
+        assert_eq!(resolve_resume(None, &entries).unwrap(), None);
+        assert_eq!(
+            resolve_resume(Some("filter=%7B%7D"), &entries).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_from_block_rejects_non_numeric() {
+        assert!(parse_from_block(Some("from_block=abc")).is_err());
+        assert_eq!(parse_from_block(Some("from_block=42")).unwrap(), Some(42));
+        assert_eq!(parse_from_block(Some("from_block=")).unwrap(), None);
+        assert_eq!(parse_from_block(None).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn websocket_replays_from_block() {
+        let replay_dir = tempfile::tempdir().expect("replay tempdir");
+        let mut cfg = config();
+        cfg.replay = ReplayConfig {
+            max_seconds: 3600,
+            dir: replay_dir.path().to_path_buf(),
+        };
+        let server = TestServer::start(cfg).await;
+
+        for n in 0..5u64 {
+            let ts = 1_000_000 + n as i64;
+            let payload = serde_json::json!({
+                "network": "solana-mainnet",
+                "block_num": 100 + n,
+                "timestamp_seconds": ts,
+                "events": [{ "@table": "swaps", "user": format!("u{n}") }],
+            })
+            .to_string();
+            server
+                .replay
+                .append(
+                    "solana-mainnet",
+                    "svm_swaps",
+                    "v0.1.0",
+                    "deadbeef",
+                    ts,
+                    &payload,
+                )
+                .await
+                .expect("seed replay");
+        }
+
+        // block_num 103, 104 are > 102.
+        let (mut socket, _) = connect_async(format!(
+            "ws://{}/ws/solana-mainnet@swaps?from_block=102",
+            server.addr
+        ))
+        .await
+        .expect("websocket connects");
+
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("replay block arrives")
+                .expect("websocket open")
+                .expect("frame");
+            let text = match msg {
+                TungsteniteMessage::Text(t) => t.to_string(),
+                other => panic!("expected text, got {other:?}"),
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+            got.push(value["block_num"].as_u64().expect("block_num"));
+        }
+        assert_eq!(got, vec![103, 104]);
+
+        socket.close(None).await.expect("clean close");
+    }
+
+    #[tokio::test]
+    async fn websocket_emits_block_gap_when_from_block_below_window() {
+        let replay_dir = tempfile::tempdir().expect("replay tempdir");
+        let mut cfg = config();
+        cfg.replay = ReplayConfig {
+            max_seconds: 3600,
+            dir: replay_dir.path().to_path_buf(),
+        };
+        let server = TestServer::start(cfg).await;
+
+        for n in 0..5u64 {
+            let ts = 5_000_000 + n as i64;
+            let payload = serde_json::json!({
+                "network": "solana-mainnet",
+                "block_num": 500 + n,
+                "timestamp_seconds": ts,
+                "events": [{ "@table": "swaps", "user": format!("u{n}") }],
+            })
+            .to_string();
+            server
+                .replay
+                .append(
+                    "solana-mainnet",
+                    "svm_swaps",
+                    "v0.1.0",
+                    "deadbeef",
+                    ts,
+                    &payload,
+                )
+                .await
+                .expect("seed replay");
+        }
+
+        let (mut socket, _) = connect_async(format!(
+            "ws://{}/ws/solana-mainnet@swaps?from_block=10",
+            server.addr
+        ))
+        .await
+        .expect("websocket connects");
+
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("gap arrives")
+            .expect("open")
+            .expect("frame");
+        let text = match msg {
+            TungsteniteMessage::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(value["type"], "stream");
+        assert_eq!(value["status"], "gap");
+        assert_eq!(value["requested_block"], 10);
+        assert_eq!(value["oldest_buffered_block"], 500);
+        assert!(
+            value["reason"].as_str().unwrap().contains("block"),
+            "block-shaped gap reason"
+        );
+
+        socket.close(None).await.expect("clean close");
+    }
+
+    #[tokio::test]
+    async fn from_block_rejected_for_wildcard_selector() {
+        let server = TestServer::start(config()).await;
+        let result = connect_async(format!("ws://{}/ws/*@swaps?from_block=5", server.addr)).await;
+        assert!(
+            result.is_err(),
+            "wildcard + from_block must be rejected at upgrade (HTTP 400)"
+        );
     }
 
     #[tokio::test]

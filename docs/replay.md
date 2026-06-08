@@ -36,43 +36,55 @@ Lazy. Trim fires once the window (`newest_seen_ts - oldest_seen_ts`) grows past 
 
 ## Reconnect protocol
 
-Clients pass `?from_timestamp=<n>` on either URL mode. The value is either:
+Clients resume by passing **one** of two mutually exclusive query parameters on either URL mode:
 
-- A Unix epoch integer (seconds): `?from_timestamp=1715619600`
-- A UTC timestamp string: `?from_timestamp=2026-05-13%2017:00:00` (URL-encode the space) or `?from_timestamp=2026-05-13T17:00:00Z`
+- `?from_timestamp=<n>` — chain-agnostic, works for any selector. The value is either a Unix epoch integer (`?from_timestamp=1715619600`) or a UTC timestamp string (`?from_timestamp=2026-05-13%2017:00:00`, URL-encode the space; or `?from_timestamp=2026-05-13T17:00:00Z`). Replays blocks with `timestamp_seconds > n`.
+- `?from_block=<n>` — per-chain block number. Replays blocks with `block_num > n`. Because block numbers mean different things on different chains, this is **only accepted for a single concrete `<network>@<table>` selector**; a wildcard (`*@…`, `…@*`) or multi-selector connection returns `400`. Resume the next block with `block_num + 1` from the last payload you processed.
+
+Passing both, or `from_block` with a wildcard/multi-selector, is a `400`.
 
 ```
 ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
 ws://host/stream?streams=solana-mainnet@swaps&from_timestamp=1715619600
+ws://host/ws/solana-mainnet@swaps?from_block=350000000
 ```
 
-Server behavior, per subscribed `<network>@<table>` selector:
+Server behavior, per subscribed `<network>@<table>` selector (`n` is the resume cursor in the chosen unit):
 
 - Scans every `<network>-*.jsonl` in the directory (multiple spkgs can feed the same table; their replay logs are merged on read).
-- For each line with `timestamp_seconds > n`, filters `events[]` to rows whose `@table == <table>`. Strips `@table` from each event. Adds top-level `table` to the payload. Sends if any events survived.
-- **`n` in window** (`n >= oldest_retained_timestamp`): replay matching blocks, oldest first, before live takes over.
-- **`n` below window** (`n < oldest_retained_timestamp`): emit one `gap` lifecycle message, then continue live.
+- For each line past `n` (`timestamp_seconds > n` or `block_num > n`), filters `events[]` to rows whose `@table == <table>`. Strips `@table` from each event. Adds top-level `table` to the payload. Sends if any events survived. Block-mode results are ordered ascending by `block_num`.
+- **`n` in window** (`n >= oldest_retained`): replay matching blocks, oldest first, before live takes over.
+- **`n` below window** (`n < oldest_retained`): emit one `gap` lifecycle message, then continue live.
 - **`n` at or above newest retained**: no replay, continue live.
-- **Wildcard selector** (`*@swaps`, `solana-mainnet@*`, `*@*`): skipped — no single `(network, table)` to anchor replay on. Wildcards always start live.
+- **Wildcard selector** (`*@swaps`, `solana-mainnet@*`, `*@*`): skipped — no single `(network, table)` to anchor replay on. Wildcards always start live. (`from_block` is rejected for wildcards before this point.)
 
-`gap` envelope:
+`gap` envelope — the fields match the resume unit you used:
 
 ```json
+// from_timestamp
 { "type": "stream", "status": "gap",
-  "network": "solana-mainnet",
-  "table": "swaps",
+  "network": "solana-mainnet", "table": "swaps",
   "requested_timestamp": 1715000000,
   "oldest_buffered_timestamp": 1715619300,
   "reason": "requested timestamp outside replay window" }
+
+// from_block
+{ "type": "stream", "status": "gap",
+  "network": "solana-mainnet", "table": "swaps",
+  "requested_block": 100,
+  "oldest_buffered_block": 350000000,
+  "reason": "requested block outside replay window" }
 ```
 
-Clients seeing `gap` should either accept the hole or open a Substreams gRPC stream from `requested_timestamp` to backfill before consuming the live feed.
+Clients seeing `gap` should either accept the hole or open a Substreams gRPC stream from the requested point to backfill before consuming the live feed.
 
-## Why timestamp, not block number
+## Timestamp vs block number
 
-Block numbers are per-chain. A Solana block at slot 350,000,000 has no relationship to an Ethereum block at height 22,000,000. The same `block_num` value would mean different things on different networks, and combining replay across chains under a single selector (`*@swaps`) was impossible to anchor.
+Both resume keys are first-class; pick by how you track progress.
 
-Unix epoch seconds is a chain-agnostic, monotonic time index. A client tracking activity across `solana-mainnet@swaps` and `ethereum-mainnet@swaps` uses one `from_timestamp` value for both.
+`?from_timestamp=` is the chain-agnostic default. A Solana block at slot 350,000,000 has no relationship to an Ethereum block at height 22,000,000, so block numbers can't anchor a cross-chain resume — but Unix epoch seconds can. A client tracking `solana-mainnet@swaps` and `ethereum-mainnet@swaps` uses one `from_timestamp` for both, and it's the only option for wildcard/multi-network selectors.
+
+`?from_block=` exists because most consumers already track `block_num + 1` from the last payload they processed — resuming by block skips a chain-by-chain block↔timestamp mapping step. It's scoped to a single concrete `<network>@<table>` since the block axis is per-chain.
 
 ## Reorg handling
 

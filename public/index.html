@@ -1128,16 +1128,29 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values</pre>
 
   <section id="reconnect">
     <h2>Reconnects</h2>
-    <p>The server retains a <code>REPLAY_SECONDS</code> time window per spkg on disk (default 600s). On reconnect, pass <code>?from_timestamp=&lt;n&gt;</code> (Unix epoch seconds or UTC <code>YYYY-MM-DD HH:MM:SS</code>) on either URL mode:</p>
+    <p>The server retains a <code>REPLAY_SECONDS</code> time window per spkg on disk (default 600s). On reconnect, resume with <strong>one</strong> of two mutually exclusive query parameters on either URL mode:</p>
+    <ul>
+      <li><code>?from_timestamp=&lt;n&gt;</code> — Unix epoch seconds or UTC <code>YYYY-MM-DD HH:MM:SS</code>. Chain-agnostic; works for any selector. Replays blocks with <code>timestamp_seconds &gt; n</code>.</li>
+      <li><code>?from_block=&lt;n&gt;</code> — block number. Replays blocks with <code>block_num &gt; n</code>. Per-chain, so accepted only for a single concrete <code>network@table</code> selector — wildcard or multi-selector connections return HTTP 400.</li>
+    </ul>
 <pre>ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
-ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:00:00Z</pre>
-    <p>Every retained block with <code>block_num &gt; n</code> is replayed (oldest first) before the live stream resumes. If <code>n</code> falls below the oldest retained block, a <code>gap</code> lifecycle message is emitted instead and the client should backfill the hole via Substreams gRPC directly:</p>
-<pre>{ "type": "stream", "status": "gap",
-  "network": "solana-mainnet",
+ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:00:00Z
+ws://host/ws/solana-mainnet@swaps?from_block=350000001</pre>
+    <p>Retained blocks past the resume point are replayed oldest first before the live stream resumes. If the resume point falls below the oldest retained value, a <code>gap</code> lifecycle message is emitted instead (fields match the unit you used) and the client should backfill the hole via Substreams gRPC directly:</p>
+<pre>// after ?from_timestamp=
+{ "type": "stream", "status": "gap",
+  "network": "solana-mainnet", "table": "swaps",
+  "requested_timestamp": 1715000000,
+  "oldest_buffered_timestamp": 1715619300,
+  "reason": "requested timestamp outside replay window" }
+
+// after ?from_block=
+{ "type": "stream", "status": "gap",
+  "network": "solana-mainnet", "table": "swaps",
   "requested_block": 100,
-  "oldest_buffered_block": 500,
+  "oldest_buffered_block": 350000000,
   "reason": "requested block outside replay window" }</pre>
-    <p>Wildcards (<code>*@swaps</code>, <code>solana-mainnet@*</code>) skip replay — there is no concrete log file to scan for them. Cursors stay internal; clients deal in block numbers only.</p>
+    <p>Wildcards (<code>*@swaps</code>, <code>solana-mainnet@*</code>) skip replay — there is no concrete log file to scan for them. Cursors stay internal to the server.</p>
   </section>
 
   <section id="heartbeats">
