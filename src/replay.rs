@@ -309,6 +309,88 @@ impl ReplayLog {
         blocks.sort_by_key(|(ts, _)| *ts);
         Ok(ReadResult { blocks, oldest })
     }
+
+    /// Block-number resume for a single concrete `(network, table)`. Returns
+    /// every retained block with `block_num > from_block` that carries at least
+    /// one event for `target_table`, filtered to that table and ordered
+    /// ascending by `block_num`, plus the smallest `block_num` retained across
+    /// the matched file(s) (used for the gap check). Block numbers are
+    /// per-chain, so this is only meaningful for one network + one table —
+    /// callers reject wildcard / multi-network selectors before calling, since
+    /// the same `block_num` means different blocks on different chains.
+    pub async fn read_from_block(
+        &self,
+        network: &str,
+        target_table: &str,
+        from_block: u64,
+    ) -> Result<(Vec<(i64, String)>, Option<u64>), ReplayError> {
+        let Some(inner) = &self.inner else {
+            return Ok((Vec::new(), None));
+        };
+        if !inner.dir.exists() {
+            return Ok((Vec::new(), None));
+        }
+
+        let prefix = format!("{}-", sanitize(network));
+        let mut dir = tokio::fs::read_dir(&inner.dir).await?;
+        let mut matched_files = Vec::new();
+        while let Some(entry) = dir.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            if !stem.starts_with(&prefix) {
+                continue;
+            }
+            matched_files.push(entry.path());
+        }
+
+        // `(block_num, timestamp_seconds, per-table json)` so we can order by
+        // the chain-native block height before dropping `block_num`.
+        let mut rows: Vec<(u64, i64, String)> = Vec::new();
+        let mut oldest: Option<u64> = None;
+
+        for path in matched_files {
+            let file = File::open(&path).await?;
+            let mut reader = BufReader::new(file).lines();
+            while let Some(line) = reader.next_line().await? {
+                if line.is_empty() {
+                    continue;
+                }
+                let mut value: Value = serde_json::from_str(&line)?;
+                let block_num = value.get("block_num").and_then(Value::as_u64).unwrap_or(0);
+                let ts = value
+                    .get("timestamp_seconds")
+                    .and_then(Value::as_i64)
+                    .ok_or(ReplayError::MissingTimestamp)?;
+                if oldest.map_or(true, |o| block_num < o) {
+                    oldest = Some(block_num);
+                }
+                if block_num <= from_block {
+                    continue;
+                }
+                filter_events_by_table(&mut value, target_table);
+                let has_events = value
+                    .get("events")
+                    .and_then(Value::as_array)
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if !has_events {
+                    continue;
+                }
+                // Rewrite the top-level `table` field so the per-table payload
+                // looks identical to a live broadcast.
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("table".to_owned(), Value::String(target_table.to_owned()));
+                }
+                rows.push((block_num, ts, value.to_string()));
+            }
+        }
+
+        rows.sort_by_key(|(block_num, _, _)| *block_num);
+        let blocks = rows.into_iter().map(|(_, ts, json)| (ts, json)).collect();
+        Ok((blocks, oldest))
+    }
 }
 
 fn filter_events_by_table(block: &mut Value, target_table: &str) {
@@ -615,6 +697,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.blocks.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn read_from_block_returns_blocks_above_from_block() {
+        let dir = tmpdir("from_block");
+        let log = ReplayLog::new(&dir, 600);
+        for n in 0..10u64 {
+            let ts = 1_000_000 + n as i64;
+            log.append(
+                "solana-mainnet",
+                PKG,
+                VER,
+                HASH,
+                ts,
+                &block_with_tables(ts, 100 + n, &["swaps", "transfers"]),
+            )
+            .await
+            .unwrap();
+        }
+        // block_num 105..=109 are > 104.
+        let (blocks, oldest) = log
+            .read_from_block("solana-mainnet", "swaps", 104)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), 5);
+        assert_eq!(oldest, Some(100), "smallest retained block_num");
+        for (_ts, raw) in &blocks {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(v["table"], "swaps");
+            let events = v["events"].as_array().unwrap();
+            assert_eq!(events.len(), 1, "filtered to swaps only");
+            assert!(events[0].get("@table").is_none(), "@table stripped");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_from_block_orders_by_block_num_across_files() {
+        let dir = tmpdir("from_block_cross");
+        let log = ReplayLog::new(&dir, 600);
+        // Two spkgs feed swaps on the same chain; block heights interleave.
+        log.append(
+            "solana-mainnet",
+            "svm_dex",
+            "v0.5.0",
+            "aaaa",
+            1_000_002,
+            &block_with_tables(1_000_002, 300, &["swaps"]),
+        )
+        .await
+        .unwrap();
+        log.append(
+            "solana-mainnet",
+            "svm_pump",
+            "v0.2.0",
+            "bbbb",
+            1_000_000,
+            &block_with_tables(1_000_000, 200, &["swaps"]),
+        )
+        .await
+        .unwrap();
+        let (blocks, oldest) = log
+            .read_from_block("solana-mainnet", "swaps", 0)
+            .await
+            .unwrap();
+        assert_eq!(oldest, Some(200));
+        let block_nums: Vec<u64> = blocks
+            .iter()
+            .map(|(_, raw)| {
+                serde_json::from_str::<Value>(raw).unwrap()["block_num"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(block_nums, vec![200, 300], "ascending by block_num");
     }
 
     #[tokio::test]
