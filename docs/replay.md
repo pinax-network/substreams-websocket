@@ -21,10 +21,14 @@ SUBSTREAMS_WEBSOCKET_REPLAY_DIR/
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS` | `600` | Retention window in seconds per spkg. `0` disables the replay log entirely. |
+| `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS` | `3600` | Retention window in seconds per spkg. `0` disables the replay log entirely. |
 | `SUBSTREAMS_WEBSOCKET_REPLAY_DIR` | `./replay` | Directory for JSONL files. Mount on the same volume as `cursors/` for PaaS deploys. |
 
-Window is chain-agnostic — same setting works across Solana (~400ms/block), Ethereum (~12s/block), TVM, etc. Default 600s (10 minutes) covers a typical Railway / Fly redeploy.
+Window is chain-agnostic — same setting works across Solana (~400ms/block), Ethereum (~12s/block), TVM, etc. Default 3600s (1 hour) covers a typical Railway / Fly redeploy plus cron-like consumers (a 15-minute alerter or hourly indexer) that wake well past a 10-minute window. Tune down on small PaaS volumes — see disk usage below.
+
+### Per-tier retention is a proxy concern
+
+There is intentionally no per-subscriber or per-tier retention knob. The server has no client auth (fan-out is not a security boundary — see [`decisions.md`](decisions.md)); a single global window is retained and every subscriber picks any point within it via `?from_timestamp=`. Gate access to a longer window in front of the server (Cloudflare Access, nginx `auth_request`), not here.
 
 ## Trim policy
 
@@ -89,4 +93,4 @@ Mount a volume at `SUBSTREAMS_WEBSOCKET_REPLAY_DIR` so the log survives containe
 
 - Wipe one spkg's replay log: `rm <REPLAY_DIR>/<network>-<package_name>@<package_version>-<module_hash>.jsonl`.
 - Inspect: `tail <REPLAY_DIR>/<file>.jsonl | jq .`.
-- Disk usage estimate: `spkgs × (REPLAY_SECONDS / avg_block_time) × avg_block_bytes`. For 30 Solana spkgs × (600s / 0.4s) × 5 KB ≈ ~225 MB.
+- Disk usage estimate: `spkgs × (REPLAY_SECONDS / avg_block_time) × avg_block_bytes`. Scales linearly with the window. For 30 Solana spkgs × (3600s / 0.4s) × 5 KB ≈ ~1.35 GB at the default 3600s (the same fleet at the old 600s default was ≈ ~225 MB). On a small PaaS volume, lower `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS` accordingly.

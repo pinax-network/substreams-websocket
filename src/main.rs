@@ -67,11 +67,11 @@ struct ServeArgs {
 
     /// Replay log retention window in seconds. The server keeps every block
     /// whose `timestamp_seconds` is within `[newest_seen - N, newest_seen]`
-    /// per spkg. Default 600s (10 minutes). `0` disables the replay log.
+    /// per spkg. Default 3600s (1 hour). `0` disables the replay log.
     #[arg(
         long,
         env = "SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS",
-        default_value_t = 600
+        default_value_t = 3600
     )]
     replay_seconds: u64,
 

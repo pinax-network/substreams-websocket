@@ -94,8 +94,8 @@ impl ReplayLog {
         if max_seconds == 0 {
             return Self::disabled();
         }
-        // 10% headroom — Solana at ~400ms/block means trim fires once per ~60s
-        // window at the default 600s retention. Ethereum at ~12s/block trims
+        // 10% headroom — Solana at ~400ms/block means trim fires once per ~360s
+        // window at the default 3600s retention. Ethereum at ~12s/block trims
         // roughly the same number of times because the file grows slower.
         let trim_headroom_seconds = (max_seconds as f32 * 0.10).ceil() as u64;
         Self {
