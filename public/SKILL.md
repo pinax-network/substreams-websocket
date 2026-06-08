@@ -112,9 +112,12 @@ Same connection, separate envelope identified by `"type": "stream"`. Lifecycle m
 { "type": "stream", "status": "error",     ..., "message": "..." }
 { "type": "stream", "status": "fatal",     ..., "message": "..." }
 { "type": "stream", "status": "undo",      ..., "last_valid_block": 350000000 }
+{ "type": "stream", "status": "dropped",   "count": 42, "last_block": 350000000, "last_timestamp": 1715619300, "reason": "client buffer overflow; frames were dropped" }
 ```
 
 `undo` fires on chain reorganizations. Roll back any state materialized past `last_valid_block`.
+
+`dropped` fires when your connection was too slow: the server's bounded per-client buffer overflowed and `count` frames were dropped on the floor. It is sent **once, on the first frame that gets through after the gap** — `last_block` and `last_timestamp` (Unix epoch seconds) mark where delivery resumed, so the hole sits between the last block you processed and that point. `count` is connection-wide (the outbound buffer is shared across all your subscribed channels, so a drop can't be pinned to one `network@table`). Reconcile the gap from another source — e.g. reconnect with `?from_timestamp=` (or `?from_block=` for a single concrete selector, where supported) — instead of shipping incomplete data downstream. If you never want to be dropped, drain your socket faster or run a server-to-server consumer with `SLOW_CLIENT_DROP_LIMIT=0`. In wrap-envelope (combined-stream) mode the frame arrives as `{"stream":"<network>@__dropped__","data":{...}}`.
 
 ## Live SUBSCRIBE / UNSUBSCRIBE / LIST_SUBSCRIPTIONS
 
