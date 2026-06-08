@@ -30,7 +30,7 @@ Authoritative upstream references:
 
 - **`undo` lifecycle messages.** Reorg handling is chain-native; Binance has nothing analogous.
 - **`block_num` field on every block.** Chain-native resume key; not present in Binance's order-book feeds.
-- **`?from_timestamp=<n>` reconnect protocol.** Binance has no concept of time-indexed replay. We retain a time window of recent blocks (default 600s) as JSONL per spkg and replay matching ones on connect. See [`replay.md`](replay.md).
+- **`?from_timestamp=<n>` reconnect protocol.** Binance has no concept of time-indexed replay. We retain a time window of recent blocks (default 3600s) as JSONL per spkg and replay matching ones on connect. See [`replay.md`](replay.md).
 - **`gap` lifecycle status.** Emitted when `from_timestamp` falls below the retained window. Tells the client to backfill via Substreams gRPC directly.
 - **Welcome (`session`) message.** Binance does not send one. We do, so clients can discover available streams and confirm their parsed subscriptions.
 

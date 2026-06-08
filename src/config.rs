@@ -20,8 +20,8 @@ pub struct Config {
 pub struct ReplayConfig {
     /// Time window (seconds) retained per spkg as JSONL on disk. The trim
     /// keeps every block whose `timestamp_seconds` is within
-    /// `[newest_seen - max_seconds, newest_seen]`. `0` disables the replay
-    /// log entirely.
+    /// `[newest_seen - max_seconds, newest_seen]`. Default 3600s (1 hour).
+    /// `0` disables the replay log entirely.
     pub max_seconds: u64,
     pub dir: std::path::PathBuf,
 }

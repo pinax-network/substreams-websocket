@@ -179,7 +179,7 @@ Filters accept only strings or arrays of strings. Max keys and values are server
 
 ## Reconnects and replay
 
-The server retains a recent time window per spkg on disk (default 600 seconds, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS`). On reconnect, pass `?from_timestamp=<n>` (Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`) to receive every block with `timestamp_seconds > n` from the on-disk window before the live stream resumes.
+The server retains a recent time window per spkg on disk (default 3600 seconds, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS`). On reconnect, pass `?from_timestamp=<n>` (Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`) to receive every block with `timestamp_seconds > n` from the on-disk window before the live stream resumes.
 
 ```
 ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
@@ -260,7 +260,7 @@ Compare each broadcast's `module_hash` with the one you saw in the welcome messa
 
 ## What this server does NOT do
 
-- **Bounded replay only.** The on-disk replay log holds a `REPLAY_SECONDS` window per spkg (default 600s). For older history, use Substreams gRPC directly with the desired `start_block`.
+- **Bounded replay only.** The on-disk replay log holds a `REPLAY_SECONDS` window per spkg (default 3600s). For older history, use Substreams gRPC directly with the desired `start_block`.
 - **No payload transformation.** Field values are pass-through strings from the source DatabaseChanges. Numeric parsing, decimal handling, base58 / hex encoding are the consumer's responsibility.
 - **No persistence of historical messages.** Once a block is broadcast, it's gone unless a connected subscriber received it.
 
