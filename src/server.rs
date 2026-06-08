@@ -2166,6 +2166,7 @@ impl ClientRegistry {
         let filter = Arc::new(RwLock::new(filter));
         let consecutive_drops = Arc::new(AtomicU64::new(0));
         let total_drops = Arc::new(AtomicU64::new(0));
+        let pending_dropped = Arc::new(AtomicU64::new(0));
         clients.insert(
             name,
             ClientHandle {
@@ -2173,6 +2174,7 @@ impl ClientRegistry {
                 filter: Arc::clone(&filter),
                 consecutive_drops: consecutive_drops.clone(),
                 total_drops: total_drops.clone(),
+                pending_dropped,
             },
         );
 
@@ -2314,9 +2316,14 @@ impl ClientRegistry {
             .and_then(serde_json::Value::as_array)
             .map(Vec::len)
             .unwrap_or(0) as u64;
+        let block_num = block
+            .get("block_num")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let clients = self.clients.read().await;
         let mut delivered: usize = 0;
         let mut dropped: u64 = 0;
+        let mut dropped_notices: u64 = 0;
         let mut filter_skipped: u64 = 0;
         let mut slow_to_close: Vec<ClientId> = Vec::new();
 
@@ -2350,10 +2357,16 @@ impl ClientRegistry {
             } else {
                 unfiltered_text.clone()
             };
+            let wrap = filter.wrap_envelope;
             drop(filter);
             let outcome = backpressured_send(*client_id, client, Message::Text(text.into()), limit);
             if outcome.delivered {
                 delivered += 1;
+                // This frame got through — if the client had been dropping,
+                // tell it how much it missed and where delivery resumed.
+                if maybe_emit_dropped_notice(client, network, block_num, wrap) {
+                    dropped_notices += 1;
+                }
             } else {
                 dropped += 1;
             }
@@ -2404,6 +2417,10 @@ impl ClientRegistry {
                 "table" => stream.to_owned()
             )
             .increment(filter_skipped);
+        }
+        if dropped_notices > 0 {
+            metrics::counter!("substreams_websocket_dropped_notices_total")
+                .increment(dropped_notices);
         }
 
         self.close_slow(&slow_to_close).await;
@@ -2478,6 +2495,9 @@ fn backpressured_send(
         Err(_) => {
             let consecutive = client.consecutive_drops.fetch_add(1, Ordering::Relaxed) + 1;
             client.total_drops.fetch_add(1, Ordering::Relaxed);
+            // Accrue toward the client-facing `dropped` notice emitted on the
+            // next frame that gets through.
+            client.pending_dropped.fetch_add(1, Ordering::Relaxed);
             // Log throttle — first drop, every 100th after that — so a
             // saturated client doesn't flood the log between threshold
             // crossings.
@@ -2495,6 +2515,48 @@ fn backpressured_send(
     }
 }
 
+/// On the first frame that gets through after a drop streak, tell the client
+/// how many frames it missed so it can reconcile from another source instead
+/// of silently shipping a hole. Emitted *after* the recovered frame, so
+/// `last_block` is the block delivery resumed at — the gap sits between the
+/// client's last good block and `last_block`. `count` is connection-wide: the
+/// outbound buffer is shared across the connection's channels, so a drop can't
+/// be attributed to one `network@table`. Best-effort: if the buffer is full
+/// again the notice is skipped and the count restored for the next frame.
+/// Returns `true` when a notice was delivered.
+fn maybe_emit_dropped_notice(
+    client: &ClientHandle,
+    network: &str,
+    last_block: u64,
+    wrap_envelope: bool,
+) -> bool {
+    let count = client.pending_dropped.swap(0, Ordering::Relaxed);
+    if count == 0 {
+        return false;
+    }
+    let notice = serde_json::json!({
+        "type": "stream",
+        "status": "dropped",
+        "count": count,
+        "last_block": last_block,
+        "reason": "client buffer overflow; frames were dropped",
+    });
+    let text = if wrap_envelope {
+        // Mirror the `@__lifecycle__` wrap convention so combined-stream
+        // clients can route the frame; the payload itself is connection-wide.
+        format!(r#"{{"stream":"{network}@__dropped__","data":{notice}}}"#)
+    } else {
+        notice.to_string()
+    };
+    if client.tx.try_send(Message::Text(text.into())).is_err() {
+        // Couldn't notify; restore the count so the next delivered frame retries.
+        client.pending_dropped.fetch_add(count, Ordering::Relaxed);
+        false
+    } else {
+        true
+    }
+}
+
 #[derive(Clone)]
 struct ClientHandle {
     tx: mpsc::Sender<Message>,
@@ -2506,6 +2568,11 @@ struct ClientHandle {
     /// Total dropped frames over the lifetime of the connection. Surfaced
     /// in the disconnect log so operators can see who was slow.
     total_drops: Arc<AtomicU64>,
+    /// Drops not yet reported to the client. Bumped on every dropped frame and
+    /// cleared (claimed via `swap`) when a `dropped` lifecycle notice is
+    /// successfully delivered on the next frame that gets through. The buffer
+    /// is shared across the connection's channels, so this is connection-wide.
+    pending_dropped: Arc<AtomicU64>,
 }
 
 struct RegisteredClient {
@@ -4009,12 +4076,14 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
         let consecutive_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let total_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let pending_dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
         let client = super::ClientHandle {
             tx,
             filter,
             consecutive_drops: consecutive_drops.clone(),
             total_drops: total_drops.clone(),
+            pending_dropped: pending_dropped.clone(),
         };
         let frame = || axum::extract::ws::Message::Text("payload".into());
 
@@ -4049,12 +4118,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
         let consecutive_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let total_drops = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let pending_dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let filter = std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default()));
         let client = super::ClientHandle {
             tx,
             filter,
             consecutive_drops: consecutive_drops.clone(),
             total_drops: total_drops.clone(),
+            pending_dropped: pending_dropped.clone(),
         };
         let frame = || axum::extract::ws::Message::Text("payload".into());
 
@@ -4078,6 +4149,123 @@ mod tests {
         );
         // Total drops should still reflect the 2 misses earlier.
         assert_eq!(total_drops.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    fn handle_with_channel(
+        cap: usize,
+        pending: u64,
+    ) -> (
+        super::ClientHandle,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(cap);
+        let client = super::ClientHandle {
+            tx,
+            filter: std::sync::Arc::new(tokio::sync::RwLock::new(StreamFilter::default())),
+            consecutive_drops: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_drops: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_dropped: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(pending)),
+        };
+        (client, rx)
+    }
+
+    #[tokio::test]
+    async fn dropped_notice_emitted_after_drops_then_recovery() {
+        // 2-slot buffer: fill it, accrue 3 drops, drain, then emit the notice.
+        let (client, mut rx) = handle_with_channel(2, 0);
+        let frame = || axum::extract::ws::Message::Text("block".into());
+        assert!(super::backpressured_send(1, &client, frame(), 0).delivered);
+        assert!(super::backpressured_send(1, &client, frame(), 0).delivered);
+        for _ in 0..3 {
+            assert!(!super::backpressured_send(1, &client, frame(), 0).delivered);
+        }
+        assert_eq!(
+            client
+                .pending_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+
+        // Drain so the buffer has room, then the notice gets through.
+        while rx.try_recv().is_ok() {}
+        assert!(super::maybe_emit_dropped_notice(
+            &client,
+            "solana-mainnet",
+            350_000_001,
+            false
+        ));
+        assert_eq!(
+            client
+                .pending_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "count claimed once reported"
+        );
+
+        let msg = rx.try_recv().expect("notice queued");
+        let text = match msg {
+            axum::extract::ws::Message::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["type"], "stream");
+        assert_eq!(v["status"], "dropped");
+        assert_eq!(v["count"], 3);
+        assert_eq!(v["last_block"], 350_000_001u64);
+
+        // Nothing pending now → no-op, no extra frame.
+        assert!(!super::maybe_emit_dropped_notice(
+            &client,
+            "solana-mainnet",
+            350_000_002,
+            false
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dropped_notice_restores_count_when_buffer_full() {
+        // Buffer already full (cap 1, one queued) → notice can't be sent, and
+        // the pending count is preserved for the next attempt.
+        let (client, _rx) = handle_with_channel(1, 4);
+        client
+            .tx
+            .try_send(axum::extract::ws::Message::Text("queued".into()))
+            .unwrap();
+        assert!(!super::maybe_emit_dropped_notice(
+            &client,
+            "solana-mainnet",
+            10,
+            false
+        ));
+        assert_eq!(
+            client
+                .pending_dropped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            4,
+            "count restored when notice can't be delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_notice_wraps_under_dropped_stream_key() {
+        let (client, mut rx) = handle_with_channel(4, 5);
+        assert!(super::maybe_emit_dropped_notice(
+            &client,
+            "solana-mainnet",
+            42,
+            true
+        ));
+        let msg = rx.try_recv().expect("notice");
+        let text = match msg {
+            axum::extract::ws::Message::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["stream"], "solana-mainnet@__dropped__");
+        assert_eq!(v["data"]["status"], "dropped");
+        assert_eq!(v["data"]["count"], 5);
+        assert_eq!(v["data"]["last_block"], 42);
     }
 
     struct TestServer {
