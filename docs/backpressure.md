@@ -58,10 +58,11 @@ The server now tracks **un-reported drops** per client (a connection-wide counte
 { "type": "stream", "status": "dropped",
   "count": 42,
   "last_block": 350000000,
+  "last_timestamp": 1715619300,
   "reason": "client buffer overflow; frames were dropped" }
 ```
 
-- It is sent **after** the recovered frame, so `last_block` is the block delivery resumed at — the hole sits between the consumer's last processed block and `last_block`.
+- It is sent **after** the recovered frame, so `last_block` / `last_timestamp` (Unix epoch seconds) mark where delivery resumed — the hole sits between the consumer's last processed block and that point. `last_timestamp` lets a consumer reconnect with `?from_timestamp=<last_timestamp>` directly.
 - `count` is connection-wide: a full buffer drops whatever frame is next regardless of channel, so the loss can't be attributed to a single `network@table`.
 - Best-effort: it uses `try_send`, so if the buffer is still full the notice is skipped and the count is preserved for the next frame that lands. It never blocks the broadcast loop.
 - In wrap-envelope mode it arrives as `{"stream":"<network>@__dropped__","data":{...}}`, mirroring the `@__lifecycle__` convention.

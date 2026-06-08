@@ -2320,6 +2320,10 @@ impl ClientRegistry {
             .get("block_num")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
+        let last_timestamp = block
+            .get("timestamp_seconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
         let clients = self.clients.read().await;
         let mut delivered: usize = 0;
         let mut dropped: u64 = 0;
@@ -2364,7 +2368,7 @@ impl ClientRegistry {
                 delivered += 1;
                 // This frame got through — if the client had been dropping,
                 // tell it how much it missed and where delivery resumed.
-                if maybe_emit_dropped_notice(client, network, block_num, wrap) {
+                if maybe_emit_dropped_notice(client, network, block_num, last_timestamp, wrap) {
                     dropped_notices += 1;
                 }
             } else {
@@ -2518,8 +2522,10 @@ fn backpressured_send(
 /// On the first frame that gets through after a drop streak, tell the client
 /// how many frames it missed so it can reconcile from another source instead
 /// of silently shipping a hole. Emitted *after* the recovered frame, so
-/// `last_block` is the block delivery resumed at — the gap sits between the
-/// client's last good block and `last_block`. `count` is connection-wide: the
+/// `last_block` / `last_timestamp` mark where delivery resumed — the gap sits
+/// between the client's last good block and that point. `last_timestamp` is the
+/// recovered block's Unix epoch seconds, so a client can reconnect with
+/// `?from_timestamp=<last_timestamp>` directly. `count` is connection-wide: the
 /// outbound buffer is shared across the connection's channels, so a drop can't
 /// be attributed to one `network@table`. Best-effort: if the buffer is full
 /// again the notice is skipped and the count restored for the next frame.
@@ -2528,6 +2534,7 @@ fn maybe_emit_dropped_notice(
     client: &ClientHandle,
     network: &str,
     last_block: u64,
+    last_timestamp: i64,
     wrap_envelope: bool,
 ) -> bool {
     let count = client.pending_dropped.swap(0, Ordering::Relaxed);
@@ -2539,6 +2546,7 @@ fn maybe_emit_dropped_notice(
         "status": "dropped",
         "count": count,
         "last_block": last_block,
+        "last_timestamp": last_timestamp,
         "reason": "client buffer overflow; frames were dropped",
     });
     let text = if wrap_envelope {
@@ -4192,6 +4200,7 @@ mod tests {
             &client,
             "solana-mainnet",
             350_000_001,
+            1_778_770_800,
             false
         ));
         assert_eq!(
@@ -4212,12 +4221,14 @@ mod tests {
         assert_eq!(v["status"], "dropped");
         assert_eq!(v["count"], 3);
         assert_eq!(v["last_block"], 350_000_001u64);
+        assert_eq!(v["last_timestamp"], 1_778_770_800i64);
 
         // Nothing pending now → no-op, no extra frame.
         assert!(!super::maybe_emit_dropped_notice(
             &client,
             "solana-mainnet",
             350_000_002,
+            1_778_770_900,
             false
         ));
         assert!(rx.try_recv().is_err());
@@ -4236,6 +4247,7 @@ mod tests {
             &client,
             "solana-mainnet",
             10,
+            1_778_770_800,
             false
         ));
         assert_eq!(
@@ -4254,6 +4266,7 @@ mod tests {
             &client,
             "solana-mainnet",
             42,
+            1_778_770_800,
             true
         ));
         let msg = rx.try_recv().expect("notice");
@@ -4266,6 +4279,7 @@ mod tests {
         assert_eq!(v["data"]["status"], "dropped");
         assert_eq!(v["data"]["count"], 5);
         assert_eq!(v["data"]["last_block"], 42);
+        assert_eq!(v["data"]["last_timestamp"], 1_778_770_800i64);
     }
 
     struct TestServer {
