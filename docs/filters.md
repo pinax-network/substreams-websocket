@@ -86,7 +86,7 @@ Overflow returns `{"error":"filter exceeds max fields/values","id":...}` and lea
 
 The replay log stores **unfiltered** block JSON. On `?from_timestamp=<n>` resume, the server applies the client's current filter to each replayed block before sending. This means a client can change filters between disconnect and reconnect and the replay respects the new filter.
 
-Wildcard selectors stay live-only (already documented in [`replay.md`](replay.md)).
+Wildcard selectors replay too (see [`replay.md`](replay.md)): the server expands a `*` to concrete per-`network@table` frames, and any client filter is matched against each frame's real `network`/`table` before sending — wildcards still pass every event through unfiltered, exactly as on the live path.
 
 ## Common filter shapes
 

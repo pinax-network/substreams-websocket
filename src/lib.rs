@@ -17,6 +17,6 @@ pub use decoder::{
     SUPPORTED_OUTPUT_TYPE_URL, decode_database_changes,
 };
 pub use event_filter::{EventFilter, EventFilterError, EventFilterSet, apply_filter_in_place};
-pub use replay::{ReadResult, ReplayError, ReplayLog};
+pub use replay::{ReadResult, ReplayBlock, ReplayError, ReplayLog};
 pub use server::{ServerError, serve};
 pub use substreams::{StreamEvent, SubstreamsClient, SubstreamsError};

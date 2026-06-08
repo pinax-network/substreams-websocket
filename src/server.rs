@@ -1491,13 +1491,15 @@ fn parse_filter_query(
     Ok(set)
 }
 
-/// Replay buffered blocks for every explicit `<network>@<table>` selector,
-/// resuming from the [`Resume`] cursor: `timestamp_seconds > from_timestamp`
-/// (chain-agnostic) or `block_num > from_block` (per-chain, single concrete
-/// selector only). Wildcard selectors are skipped — replay is anchored to a
-/// single `(network, table)` pair. For each explicit selector with at least
-/// one retained block, either replay matching blocks (oldest first) or emit a
-/// `gap` lifecycle message when the resume point falls below the oldest
+/// Replay buffered blocks for every subscribed selector, resuming from the
+/// [`Resume`] cursor: `timestamp_seconds > from_timestamp` (chain-agnostic) or
+/// `block_num > from_block` (per-chain). Timestamp mode replays wildcard
+/// selectors too (`*@table`, `network@*`, `*@*`) — the wildcard resolves
+/// against every matching replay file and each retained block is expanded into
+/// concrete per-`network@table` frames. Block mode is per-chain, so the handler
+/// only allows it for a single concrete selector. For each selector with at
+/// least one retained block, either replay matching blocks (oldest first) or
+/// emit a `gap` lifecycle message when the resume point falls below the oldest
 /// retained value.
 async fn replay_for_client(
     replay: &ReplayLog,
@@ -1512,33 +1514,36 @@ async fn replay_for_client(
     }
 
     for entry in &filter.entries {
-        let (Some(network), Some(table)) = (entry.network.as_deref(), entry.stream.as_deref())
-        else {
-            // Wildcards skipped — no single `(network, table)` to resume on.
-            // Block-mode connections never reach a wildcard (the handler
-            // rejects `from_block` for them); timestamp mode starts live.
-            continue;
-        };
-        let stream = table;
+        // `*` on either side maps to a `None` read filter — Timestamp mode
+        // scans every network / every table accordingly and replays wildcards
+        // (`from_timestamp` is chain-agnostic). Block mode is per-chain, so the
+        // handler only allows a single concrete selector; `net_label` /
+        // `table_label` are concrete there.
+        let network_filter = entry.network.as_deref();
+        let table_filter = entry.stream.as_deref();
+        let net_label = network_filter.unwrap_or("*");
+        let table_label = table_filter.unwrap_or("*");
 
-        // Resolve the blocks to replay (or a `gap` envelope) for this selector
-        // from the resume cursor. The block path only runs for the single
-        // concrete selector the handler allowed — block numbers are per-chain.
+        // Resolve the blocks to replay (or a `gap` envelope) from the resume
+        // cursor. Both reads yield per-`network@table` `ReplayBlock`s so the
+        // send loop below is identical.
         let (blocks, gap) = match resume {
             Resume::Timestamp(from_ts) => {
                 let result = replay
-                    .read_from(Some(network), Some(stream), from_ts)
+                    .read_from(network_filter, table_filter, from_ts)
                     .await
                     .map_err(|e| e.to_string())?;
                 let Some(oldest) = result.oldest else {
                     continue;
                 };
                 if from_ts < oldest {
+                    // For a wildcard selector `oldest` is the earliest
+                    // timestamp across every matched file.
                     let gap = serde_json::json!({
                         "type": "stream",
                         "status": "gap",
-                        "network": network,
-                        "table": stream,
+                        "network": net_label,
+                        "table": table_label,
                         "requested_timestamp": from_ts,
                         "oldest_buffered_timestamp": oldest,
                         "reason": "requested timestamp outside replay window",
@@ -1549,8 +1554,10 @@ async fn replay_for_client(
                 }
             }
             Resume::Block(from_block) => {
+                // Concrete-only (handler rejects wildcards for `from_block`),
+                // so `net_label` / `table_label` are the real network + table.
                 let (blocks, oldest) = replay
-                    .read_from_block(network, stream, from_block)
+                    .read_from_block(net_label, table_label, from_block)
                     .await
                     .map_err(|e| e.to_string())?;
                 let Some(oldest) = oldest else {
@@ -1560,8 +1567,8 @@ async fn replay_for_client(
                     let gap = serde_json::json!({
                         "type": "stream",
                         "status": "gap",
-                        "network": network,
-                        "table": stream,
+                        "network": net_label,
+                        "table": table_label,
                         "requested_block": from_block,
                         "oldest_buffered_block": oldest,
                         "reason": "requested block outside replay window",
@@ -1577,7 +1584,7 @@ async fn replay_for_client(
             // Resume point below the retained window — tell the client there is
             // a gap and continue with the live stream only.
             let text = if filter.wrap_envelope {
-                format!(r#"{{"stream":"{network}@{stream}","data":{gap}}}"#)
+                format!(r#"{{"stream":"{net_label}@{table_label}","data":{gap}}}"#)
             } else {
                 gap.to_string()
             };
@@ -1585,29 +1592,36 @@ async fn replay_for_client(
                 return Err("outbound channel closed during replay".to_owned());
             }
             *last_activity_at.write().await = Instant::now();
-            info!(client_id, network, stream, "replay gap");
+            info!(
+                client_id,
+                network = net_label,
+                table = table_label,
+                "replay gap"
+            );
             metrics::counter!(
                 "substreams_websocket_replay_reads_total",
-                "network" => network.to_owned(),
-                "table" => stream.to_owned(),
+                "network" => net_label.to_owned(),
+                "table" => table_label.to_owned(),
                 "outcome" => "gap"
             )
             .increment(1);
             continue;
         }
 
-        let selector = format!("{network}@{stream}");
-        let matching_filters = filter.event_filters.matching(network, stream);
         let mut replayed: usize = 0;
-        for (_ts, raw_text) in blocks {
+        for block in blocks {
+            // Every frame carries its concrete network + table even when the
+            // subscription selector was a wildcard, so client filters and the
+            // wrap envelope resolve against the real channel.
+            let matching_filters = filter.event_filters.matching(&block.network, &block.table);
             let payload_text = if !matching_filters.is_empty() {
-                let mut block = match serde_json::from_str::<serde_json::Value>(&raw_text) {
+                let mut value = match serde_json::from_str::<serde_json::Value>(&block.payload) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
                 let mut remaining = 0usize;
                 for f in &matching_filters {
-                    remaining = apply_filter_in_place(&mut block, f);
+                    remaining = apply_filter_in_place(&mut value, f);
                     if remaining == 0 {
                         break;
                     }
@@ -1615,11 +1629,12 @@ async fn replay_for_client(
                 if remaining == 0 {
                     continue;
                 }
-                block.to_string()
+                value.to_string()
             } else {
-                raw_text
+                block.payload
             };
             let text = if filter.wrap_envelope {
+                let selector = format!("{}@{}", block.network, block.table);
                 format!(r#"{{"stream":"{selector}","data":{payload_text}}}"#)
             } else {
                 payload_text
@@ -1640,25 +1655,31 @@ async fn replay_for_client(
         }
 
         if replayed > 0 {
-            info!(client_id, network, stream, replayed, "replay delivered");
+            info!(
+                client_id,
+                network = net_label,
+                table = table_label,
+                replayed,
+                "replay delivered"
+            );
             metrics::counter!(
                 "substreams_websocket_replay_reads_total",
-                "network" => network.to_owned(),
-                "table" => stream.to_owned(),
+                "network" => net_label.to_owned(),
+                "table" => table_label.to_owned(),
                 "outcome" => "replayed"
             )
             .increment(1);
             metrics::counter!(
                 "substreams_websocket_replay_blocks_delivered_total",
-                "network" => network.to_owned(),
-                "table" => stream.to_owned()
+                "network" => net_label.to_owned(),
+                "table" => table_label.to_owned()
             )
             .increment(replayed as u64);
         } else {
             metrics::counter!(
                 "substreams_websocket_replay_reads_total",
-                "network" => network.to_owned(),
-                "table" => stream.to_owned(),
+                "network" => net_label.to_owned(),
+                "table" => table_label.to_owned(),
                 "outcome" => "empty"
             )
             .increment(1);
@@ -4105,6 +4126,173 @@ mod tests {
             result.is_err(),
             "wildcard + from_block must be rejected at upgrade (HTTP 400)"
         );
+    }
+
+    #[tokio::test]
+    async fn wildcard_network_replays_across_chains() {
+        let replay_dir = tempfile::tempdir().expect("replay tempdir");
+        let mut cfg = config();
+        cfg.replay = ReplayConfig {
+            max_seconds: 3600,
+            dir: replay_dir.path().to_path_buf(),
+        };
+        let server = TestServer::start(cfg).await;
+
+        // Interleave two chains' swaps logs across timestamps.
+        let seed = [
+            (
+                "solana-mainnet",
+                "svm_dex",
+                "v0.5.0",
+                "aaaa",
+                1_000_000i64,
+                100u64,
+            ),
+            (
+                "ethereum-mainnet",
+                "evm_dex",
+                "v0.7.0",
+                "bbbb",
+                1_000_001,
+                200,
+            ),
+            (
+                "solana-mainnet",
+                "svm_dex",
+                "v0.5.0",
+                "aaaa",
+                1_000_002,
+                101,
+            ),
+            (
+                "ethereum-mainnet",
+                "evm_dex",
+                "v0.7.0",
+                "bbbb",
+                1_000_003,
+                201,
+            ),
+        ];
+        for (network, pkg, ver, hash, ts, block_num) in seed {
+            let payload = serde_json::json!({
+                "network": network,
+                "block_num": block_num,
+                "timestamp_seconds": ts,
+                "events": [{ "@table": "swaps", "user": format!("u{ts}") }],
+            })
+            .to_string();
+            server
+                .replay
+                .append(network, pkg, ver, hash, ts, &payload)
+                .await
+                .expect("seed replay");
+        }
+
+        // `*@swaps` resumes across every chain from the shared timestamp axis.
+        let (mut socket, _) = connect_async(format!(
+            "ws://{}/ws/*@swaps?from_timestamp=1000000",
+            server.addr
+        ))
+        .await
+        .expect("websocket connects");
+
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("replay block arrives")
+                .expect("websocket open")
+                .expect("frame");
+            let text = match msg {
+                TungsteniteMessage::Text(t) => t.to_string(),
+                other => panic!("expected text, got {other:?}"),
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+            got.push((
+                value["timestamp_seconds"].as_i64().expect("ts"),
+                value["network"].as_str().expect("network").to_owned(),
+                value["table"].as_str().expect("table").to_owned(),
+            ));
+        }
+        assert_eq!(
+            got,
+            vec![
+                (1_000_001, "ethereum-mainnet".to_owned(), "swaps".to_owned()),
+                (1_000_002, "solana-mainnet".to_owned(), "swaps".to_owned()),
+                (1_000_003, "ethereum-mainnet".to_owned(), "swaps".to_owned()),
+            ]
+        );
+
+        socket.close(None).await.expect("clean close");
+    }
+
+    #[tokio::test]
+    async fn wildcard_table_replays_one_frame_per_table() {
+        let replay_dir = tempfile::tempdir().expect("replay tempdir");
+        let mut cfg = config();
+        cfg.replay = ReplayConfig {
+            max_seconds: 3600,
+            dir: replay_dir.path().to_path_buf(),
+        };
+        let server = TestServer::start(cfg).await;
+
+        // Seed two timestamps; `from_timestamp` sits on the oldest (so no gap)
+        // and only the newer block replays — expanded into one frame per table.
+        for ts in [1_000_000i64, 1_000_001] {
+            let payload = serde_json::json!({
+                "network": "solana-mainnet",
+                "block_num": ts,
+                "timestamp_seconds": ts,
+                "events": [
+                    { "@table": "swaps", "user": format!("s{ts}") },
+                    { "@table": "transfers", "user": format!("t{ts}") },
+                ],
+            })
+            .to_string();
+            server
+                .replay
+                .append("solana-mainnet", "svm_dex", "v0.5.0", "aaaa", ts, &payload)
+                .await
+                .expect("seed replay");
+        }
+
+        // `solana-mainnet@*` expands each stored block into per-table frames.
+        let (mut socket, _) = connect_async(format!(
+            "ws://{}/ws/solana-mainnet@*?from_timestamp=1000000",
+            server.addr
+        ))
+        .await
+        .expect("websocket connects");
+
+        let _welcome = socket.next().await.expect("welcome").expect("welcome ok");
+
+        let mut tables = Vec::new();
+        for _ in 0..2 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("replay frame arrives")
+                .expect("websocket open")
+                .expect("frame");
+            let text = match msg {
+                TungsteniteMessage::Text(t) => t.to_string(),
+                other => panic!("expected text, got {other:?}"),
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).expect("json");
+            let events = value["events"].as_array().expect("events");
+            assert_eq!(
+                events.len(),
+                1,
+                "each frame carries only its table's events"
+            );
+            assert!(events[0].get("@table").is_none(), "@table stripped");
+            tables.push(value["table"].as_str().expect("table").to_owned());
+        }
+        tables.sort();
+        assert_eq!(tables, vec!["swaps".to_owned(), "transfers".to_owned()]);
+
+        socket.close(None).await.expect("clean close");
     }
 
     #[tokio::test]
