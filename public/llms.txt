@@ -32,7 +32,7 @@ Clients subscribe by `<network>@<table>` where `<table>` is a DatabaseChanges ta
 }
 ```
 
-One payload per `(network, table)` group per block. All event field values are strings on the wire. The per-event `@table` prefix is dropped because the parent payload already carries `table` at the top level. On reconnect, pass `?from_timestamp=<n>` (Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`) to receive every retained block with `timestamp_seconds > n`. Default retention is 600 seconds per spkg; outside that window the server emits a `gap` lifecycle message and clients must backfill via Substreams gRPC directly.
+One payload per `(network, table)` group per block. All event field values are strings on the wire. The per-event `@table` prefix is dropped because the parent payload already carries `table` at the top level. On reconnect, pass `?from_timestamp=<n>` (Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`) to receive every retained block with `timestamp_seconds > n`. Default retention is 3600 seconds (1 hour) per spkg; outside that window the server emits a `gap` lifecycle message and clients must backfill via Substreams gRPC directly.
 
 ## Live commands
 
