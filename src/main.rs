@@ -104,6 +104,17 @@ struct SubstreamsServeDefaults {
     #[arg(long, env = "SUBSTREAMS_FINAL_BLOCKS_ONLY")]
     final_blocks_only: bool,
 
+    /// Max decoded size (bytes) for an inbound gRPC message. Raise for chains
+    /// whose per-block DatabaseChanges output exceeds 64 MiB after
+    /// decompression (e.g. Hyperliquid hypercore). Per-stream `max_decode_message_bytes`
+    /// in the streams file overrides this default.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES",
+        default_value_t = substreams_websocket::config::DEFAULT_MAX_DECODE_MESSAGE_BYTES
+    )]
+    max_decode_message_bytes: usize,
+
     #[arg(long, env = "SUBSTREAMS_PLAINTEXT")]
     plaintext: bool,
 
@@ -175,6 +186,15 @@ struct SubstreamsArgs {
 
     #[arg(long, env = "SUBSTREAMS_FINAL_BLOCKS_ONLY")]
     final_blocks_only: bool,
+
+    /// Max decoded size (bytes) for an inbound gRPC message. Raise for chains
+    /// whose per-block DatabaseChanges output exceeds 64 MiB after decompression.
+    #[arg(
+        long,
+        env = "SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES",
+        default_value_t = substreams_websocket::config::DEFAULT_MAX_DECODE_MESSAGE_BYTES
+    )]
+    max_decode_message_bytes: usize,
 
     #[arg(long, env = "SUBSTREAMS_TOKEN", hide_env_values = true)]
     token: Option<String>,
@@ -453,6 +473,7 @@ impl SubstreamsArgs {
             api_key: self.api_key,
             api_key_header: self.api_key_header,
             auth_url: self.auth_url,
+            max_decode_message_bytes: self.max_decode_message_bytes,
         }
     }
 }
@@ -481,6 +502,7 @@ struct FileStreamConfig {
     auth_url: Option<String>,
     production_mode: Option<bool>,
     final_blocks_only: Option<bool>,
+    max_decode_message_bytes: Option<usize>,
 }
 
 impl FileStreamConfig {
@@ -506,6 +528,9 @@ impl FileStreamConfig {
                     .api_key_header
                     .unwrap_or_else(|| defaults.api_key_header.clone()),
                 auth_url: self.auth_url.or_else(|| defaults.auth_url.clone()),
+                max_decode_message_bytes: self
+                    .max_decode_message_bytes
+                    .unwrap_or(defaults.max_decode_message_bytes),
             },
         }
     }
@@ -526,6 +551,7 @@ fn log_serve_args(args: &ServeArgs) {
         streams_toml_inline = args.streams_toml.is_some(),
         production_mode = d.production_mode,
         final_blocks_only = d.final_blocks_only,
+        max_decode_message_bytes = d.max_decode_message_bytes,
         plaintext = d.plaintext,
         insecure = d.insecure,
         token_set = d.token.is_some(),
@@ -655,6 +681,26 @@ streams:
         assert_eq!(cfg.streams.len(), 1);
         assert_eq!(cfg.streams[0].network, "solana-mainnet");
         assert_eq!(cfg.streams[0].tables, vec!["swaps".to_owned()]);
+    }
+
+    #[test]
+    fn parses_optional_max_decode_message_bytes() {
+        const WITH: &str = r#"
+streams:
+  - network: hyperliquid
+    endpoint: https://hyperliquid.substreams.pinax.network:443
+    manifest: https://example.com/hypercore-v0.4.0.spkg
+    max_decode_message_bytes: 268435456
+"#;
+        let cfg: FileConfig = StreamsFormat::Yaml.parse(WITH).expect("yaml");
+        assert_eq!(
+            cfg.streams[0].max_decode_message_bytes,
+            Some(256 * 1024 * 1024)
+        );
+
+        // Absent in the file -> None, so `into_config` falls back to the default.
+        let cfg: FileConfig = StreamsFormat::Yaml.parse(YAML).expect("yaml");
+        assert_eq!(cfg.streams[0].max_decode_message_bytes, None);
     }
 
     #[test]

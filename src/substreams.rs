@@ -192,11 +192,13 @@ impl SubstreamsClient {
         ensure_module_exists(&package, &self.config.module)?;
         let request = build_blocks_request(&self.config, package)?;
         let channel = connect_channel(&self.config).await?;
-        // 64 MiB decoded message cap. Substreams DatabaseChanges payloads for
-        // chains with many transactions per block (e.g. Solana SPL transfers)
-        // routinely exceed tonic's 4 MiB default after gzip decompression.
+        // Decoded message cap (default 64 MiB, configurable per stream).
+        // Substreams DatabaseChanges payloads for chains with many transactions
+        // per block (e.g. Solana SPL transfers) routinely exceed tonic's 4 MiB
+        // default after gzip decompression; some chains exceed 64 MiB and raise
+        // this via `SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES` / per-stream config.
         let mut client = StreamClient::new(channel)
-            .max_decoding_message_size(64 * 1024 * 1024)
+            .max_decoding_message_size(self.config.max_decode_message_bytes)
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd);
@@ -676,6 +678,7 @@ mod tests {
             api_key: None,
             api_key_header: "X-Api-Key".to_owned(),
             auth_url: None,
+            max_decode_message_bytes: crate::config::DEFAULT_MAX_DECODE_MESSAGE_BYTES,
         }
     }
 

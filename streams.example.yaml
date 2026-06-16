@@ -28,6 +28,11 @@
 #                 and acts as an allowlist: when set, rows for any other table
 #                 are dropped (not broadcast, not replayed). Omit to emit every
 #                 table the spkg produces.
+#   max_decode_message_bytes — per-stream gRPC decoded-message cap in bytes.
+#                 Default 67108864 (64 MiB), or SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES.
+#                 Raise for chains whose per-block output exceeds 64 MiB after
+#                 decompression (e.g. Hyperliquid hypercore), which otherwise
+#                 fail every block with "Error decompressing: size limit ...".
 
 streams:
   - network: solana

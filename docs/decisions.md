@@ -42,13 +42,13 @@ Rejected: default BTreeMap ordering.
 
 Why: humans reading the JSON want the columns in the order the module emitted them (typically pk → indexed cols → payload). Sort order makes diffs noisier and hides intent.
 
-## 64 MiB gRPC decode cap
+## 64 MiB gRPC decode cap (configurable)
 
-Bumped from tonic's 4 MiB default.
+Default bumped from tonic's 4 MiB to 64 MiB; configurable via `SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES` (global default) or a per-stream `max_decode_message_bytes` in the streams file.
 
 Rejected: keeping default and asking providers to split.
 
-Why: Solana SPL-transfer blocks routinely exceed 4 MiB after gzip decompression. The cap is per-message; oversizing it costs nothing on normal blocks and avoids a hard failure on the fat ones.
+Why: Solana SPL-transfer blocks routinely exceed 4 MiB after gzip decompression. The cap is per-message; oversizing it costs nothing on normal blocks and avoids a hard failure on the fat ones. Some chains (e.g. Hyperliquid hypercore) exceed even 64 MiB and would otherwise fail every block (`Error decompressing: size limit, of 67108864 bytes, exceeded`) — those raise the cap per stream rather than forcing a global bump.
 
 ## HTTP/2 + TCP keepalive
 

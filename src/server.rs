@@ -4874,6 +4874,7 @@ mod tests {
                     api_key: None,
                     api_key_header: "X-Api-Key".to_owned(),
                     auth_url: None,
+                    max_decode_message_bytes: crate::config::DEFAULT_MAX_DECODE_MESSAGE_BYTES,
                 },
             }],
             websocket: WebSocketConfig {

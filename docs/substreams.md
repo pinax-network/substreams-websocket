@@ -17,7 +17,7 @@ We use `sf.substreams.rpc.v2.Stream/Blocks`. The proto definitions are not vendo
 - BSR module: <https://buf.build/streamingfast/substreams>
 - Service proto source: <https://github.com/streamingfast/substreams/blob/develop/proto/sf/substreams/rpc/v2/service.proto>
 - We require **gzip request compression** — Pinax rejects uncompressed gRPC with `400 Bad Request` and body `no supported compression found.`
-- We bumped the tonic decoded-message cap to **64 MiB** (default 4 MiB) because Solana SPL transfers blocks routinely exceed 4 MiB after gzip decompression.
+- We bumped the tonic decoded-message cap to **64 MiB** (default 4 MiB) because Solana SPL transfers blocks routinely exceed 4 MiB after gzip decompression. The cap is configurable via `SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES` (global) or per-stream `max_decode_message_bytes`; raise it for chains whose per-block output exceeds 64 MiB (e.g. Hyperliquid hypercore, which otherwise fails every block with `Error decompressing: size limit, of 67108864 bytes, exceeded`).
 - HTTP/2 + TCP keepalive enabled to survive long-idle gRPC streams getting reaped by upstream proxies (`h2 protocol error: ... ConnectionReset`).
 
 ## DatabaseChanges sink
