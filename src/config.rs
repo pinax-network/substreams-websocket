@@ -1,5 +1,11 @@
 use std::{net::SocketAddr, time::Duration};
 
+/// Default gRPC decoded-message size cap (64 MiB). Substreams DatabaseChanges
+/// payloads for high-throughput chains can exceed tonic's 4 MiB default after
+/// decompression; chains with very large per-block output (e.g. Hyperliquid
+/// hypercore) can exceed even this and must raise it per stream.
+pub const DEFAULT_MAX_DECODE_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub streams: Vec<StreamConfig>,
@@ -64,6 +70,11 @@ pub struct SubstreamsConfig {
     pub api_key: Option<String>,
     pub api_key_header: String,
     pub auth_url: Option<String>,
+    /// Max decoded size (bytes) for an inbound gRPC `Response` message. Maps to
+    /// tonic's `max_decoding_message_size`. Default
+    /// [`DEFAULT_MAX_DECODE_MESSAGE_BYTES`]; raise for streams whose per-block
+    /// DatabaseChanges output exceeds 64 MiB after decompression.
+    pub max_decode_message_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +250,7 @@ mod tests {
                 api_key: None,
                 api_key_header: "X-Api-Key".to_owned(),
                 auth_url: None,
+                max_decode_message_bytes: DEFAULT_MAX_DECODE_MESSAGE_BYTES,
             },
         }
     }
