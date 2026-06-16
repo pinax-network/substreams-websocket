@@ -1533,9 +1533,22 @@ ws://host/ws/solana-mainnet@swaps?from_block=350000001</pre>
     return row;
   }
 
+  function formatDrift(ts) {
+    // Drift = wall-clock now minus the block timestamp. Positive means the
+    // block time lags local time (the usual case); negative means it is ahead.
+    if (!ts) return '';
+    var iso = /[zZ]$|[+-]\d\d:?\d\d$/.test(ts) ? ts : ts.replace(' ', 'T') + 'Z';
+    var t = Date.parse(iso);
+    if (isNaN(t)) return '';
+    var ms = Date.now() - t;
+    var sign = ms < 0 ? '-' : '+';
+    var abs = Math.abs(ms);
+    return ' (' + sign + (abs >= 1000 ? (abs / 1000).toFixed(3) + 's' : abs + 'ms') + ')';
+  }
+
   function describeJson(parsed) {
     // Build a one-line summary for the compact meta row.
-    // Block payloads (raw or wrapped) emit "block_num@time table=… (N events)".
+    // Block payloads (raw or wrapped) emit "#block_num time(drift) table=… (N events)".
     var inner = parsed && parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed;
     if (inner && Array.isArray(inner.events)) {
       var bn = inner.block_num != null ? inner.block_num : '?';
@@ -1549,7 +1562,7 @@ ws://host/ws/solana-mainnet@swaps?from_block=350000001</pre>
       var tableList = Object.keys(tables).join(',') || '(none)';
       return {
         compact: true,
-        summary: (net ? net + '  · ' : '') + 'block ' + bn + (ts ? '  ' + ts : '') + '  · ' + inner.events.length + ' event' + (inner.events.length === 1 ? '' : 's') + '  · ' + tableList,
+        summary: (net ? net + '  · ' : '') + '#' + bn + (ts ? '  ' + ts + formatDrift(ts) : '') + '  · ' + inner.events.length + ' event' + (inner.events.length === 1 ? '' : 's') + '  · ' + tableList,
       };
     }
     if (parsed && parsed.type === 'session') {
