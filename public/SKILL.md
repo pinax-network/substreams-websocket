@@ -165,7 +165,7 @@ Invalid commands do **not** close the connection.
 
 ## Event filters
 
-Reduce bandwidth by asking the server to drop non-matching events before delivery. Pass `?filter=<url-encoded-json>` on the WebSocket upgrade, or use the live `SET_FILTER` / `CLEAR_FILTER` / `LIST_FILTERS` JSON commands. Filters are scoped per explicit `network@stream` selector. Wildcards always pass everything through.
+Reduce bandwidth by asking the server to drop non-matching events before delivery. Pass `?filter=<url-encoded-json>` on the WebSocket upgrade, or use the live `SET_FILTER` / `CLEAR_FILTER` / `LIST_FILTERS` JSON commands. A filter is scoped to a `network@stream` selector and applies to every block whose `(network, table)` that selector matches — including wildcard selectors (`*@*`, `<network>@*`, `*@<table>`). When several stored filters match the same outgoing event, **all** of them must pass.
 
 ```
 ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%7D
@@ -175,11 +175,15 @@ ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%
 { "method": "SET_FILTER",
   "params": ["solana-mainnet@swaps", { "protocol": "raydium_cpmm", "user": ["a","b"] }],
   "id": 1 }
+// -> { "result": null, "id": 1 }   on accept
+// -> { "error":  "...", "id": 1 }   on reject (previous filter left unchanged)
 ```
 
-Semantics: string equality only; fields are AND'd; values within a field are OR'd; events missing the filtered field are dropped. If every event of a block is dropped, the block is skipped for that client. Top-level fields (`block_num`, `network`, `module_hash`) are not filterable.
+`SET_FILTER` **replaces** the filter for that selector — it does not accumulate, so two `SET_FILTER` for the same selector keep only the last. `CLEAR_FILTER` removes it. `LIST_FILTERS` returns the active selector→filter map; an empty `{}` means **no filter is active** — use it to confirm one actually took effect.
 
-Filters accept only strings or arrays of strings. Max keys and values are server-configured (`SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS`, `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES`), and invalid payloads return an `error` reply without closing the socket.
+Semantics: **string equality only**, exact and **case-sensitive** — match the on-wire casing of the value (e.g. EVM addresses are lowercased on the wire). **Fields are AND'd; values within a field are OR'd.** There is **no OR across fields**: `{a:[...], b:[...]}` requires both `a` **and** `b` to match, so you cannot express "value X appears in field `a` OR field `b`" in a single filter. Only scalar string fields are matched (an array-valued row field will not match). Events missing the filtered field are dropped; if every event of a block is dropped, the block is skipped for that client. Top-level fields (`block_num`, `network`, `module_hash`) are not filterable.
+
+Filters accept only strings or arrays of strings. Limits are server-configured: `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` (default 16) and `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` (default 64) — the value cap is the **total across all fields**, not per field, so multiple fields share one 64-value budget. A payload over a cap or otherwise invalid returns an `error` reply (e.g. `filter exceeds max values (total across all fields): 192 > 64`) and **leaves the previous filter unchanged**; the socket stays open. Always read the `SET_FILTER` reply — a silently-ignored `error` looks exactly like "the filter did nothing" (you keep receiving the full stream).
 
 ## Reconnects (live-only feed)
 

@@ -1058,7 +1058,7 @@
 
   <section id="set-filter">
     <h2>SET_FILTER</h2>
-    <p>Drop non-matching events from the wire for the given selector. String equality only; fields AND, values OR; missing field on an event is a miss. Wildcard selectors rejected.</p>
+    <p>Drop non-matching events from the wire for the given selector. String equality only (exact, case-sensitive); fields AND, values OR; <strong>no OR across fields</strong>; missing field on an event is a miss. Wildcard selectors are accepted and applied to every matching channel. <code>SET_FILTER</code> <strong>replaces</strong> the filter for that selector (not accumulate) — read the <code>{"result"|"error"}</code> reply, and use <code>LIST_FILTERS</code> to confirm one is active.</p>
 <pre>// request
 { "method": "SET_FILTER",
   "params": ["solana-mainnet@swaps", { "protocol": "raydium_cpmm", "user": ["a","b"] }],
@@ -1104,11 +1104,12 @@
       <li><strong>Schema-agnostic.</strong> Server doesn't know swap / transfer schemas. Any column name works.</li>
       <li><strong>Top-level fields not filterable.</strong> Only keys inside <code>events[*]</code>.</li>
       <li><strong>Zero matches = block skipped</strong> for that client. No zero-event broadcasts.</li>
-      <li><strong>Wildcards skip filtering.</strong> <code>*@swaps</code> and <code>solana-mainnet@*</code> always pass every event through.</li>
+      <li><strong>Filters apply to wildcard selectors too.</strong> A filter on <code>*@*</code> / <code>*@swaps</code> / <code>solana-mainnet@*</code> is resolved against each outgoing <code>(network, table)</code> at broadcast time.</li>
+      <li><strong>No OR across fields.</strong> Fields are AND'd; only values within a field are OR'd. A value that may appear in any of several columns (e.g. a wallet as <code>tx_from</code>, <code>maker</code>, or <code>taker</code>) is not expressible in one filter.</li>
     </ul>
-    <p>Bounds:</p>
+    <p>Bounds — the value cap is the <strong>total across all fields</strong>, not per field; over-cap rejects the whole filter:</p>
 <pre>SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS=16   # max keys per filter
-SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values</pre>
+SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values (summed over all fields)</pre>
     <p>Common filter shapes per stream — server does not enforce these, just operator-friendly examples matching commonly-present columns:</p>
 <pre>// SVM swaps
 { "protocol": "raydium_cpmm",

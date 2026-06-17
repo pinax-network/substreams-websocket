@@ -51,7 +51,7 @@ Replies are `{"result": null | [...] | {...}, "id": <echoed>}`. Errors are `{"er
 
 ## Event filters
 
-Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream. String equality only; fields AND, values OR; missing-field=miss; zero matches = block skipped. Wildcard selectors never filter. Full command and semantics reference is in `/SKILL.md`.
+Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream (it replaces the filter for that selector; read the `{"result"|"error"}` reply, and `LIST_FILTERS` to confirm). String equality only (exact, case-sensitive); fields AND, values OR (no OR across fields); missing-field=miss; zero matches = block skipped. Filters apply to wildcard selectors too. The value cap (`MAX_FILTER_VALUES`, default 64) is the total across all fields, not per field; over-cap rejects the whole filter. Full command and semantics reference is in `/SKILL.md`.
 
 ## Discovery
 

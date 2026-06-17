@@ -13,7 +13,7 @@ pub enum EventFilterError {
     #[error("filter exceeds max fields: {actual} > {max}")]
     TooManyFields { actual: usize, max: usize },
 
-    #[error("filter exceeds max values: {actual} > {max}")]
+    #[error("filter exceeds max values (total across all fields): {actual} > {max}")]
     TooManyValues { actual: usize, max: usize },
 
     #[error("failed to parse filter JSON: {0}")]

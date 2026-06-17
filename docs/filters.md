@@ -11,8 +11,8 @@ Per-subscription field filters on the `events[]` array. Subscribers only receive
 }
 ```
 
-- **String equality only.** No regex, no range, no substring.
-- **Field-level AND.** Every key in the filter must match.
+- **String equality only.** Exact and **case-sensitive** — match the on-wire casing of the value (EVM addresses are lowercased on the wire). No regex, no range, no substring.
+- **Field-level AND.** Every key in the filter must match. There is no OR *across* fields (see [What it does not do](#what-it-does-not-do)).
 - **Value-level OR.** A value can be a string (exact match) or an array of strings (any of). Empty array matches nothing.
 - **Missing fields are a miss.** Filtering on `protocol` against an event that has no `protocol` column drops the event.
 - **Schema-agnostic.** The server does not know the swap / transfer schema. Any column name works.
@@ -27,7 +27,7 @@ ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%
 ws://host/stream?streams=solana-mainnet@swaps&filter=%7B%22user%22%3A%5B%22a%22%2C%22b%22%5D%7D
 ```
 
-The filter applies to **every explicit `network@table` selector** in the URL. Wildcard selectors (`*@swaps`, `solana-mainnet@*`) skip filtering — they always receive every event.
+The filter applies to **every selector** in the URL, including wildcards: `EventFilterSet` resolves wildcard selectors (`*@*`, `*@swaps`, `solana-mainnet@*`) against each outgoing `(network, table)` at broadcast time, so `/ws/*@*?filter=...` filters every channel.
 
 For different filters per channel on one connection, use the live `SET_FILTER` command.
 
@@ -80,7 +80,7 @@ Returns the current filter map. Keys sorted alphabetically.
 | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` | `16` | Max keys in one filter object. |
 | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` | `64` | Max total string values across all keys. |
 
-Overflow returns `{"error":"filter exceeds max fields/values","id":...}` and leaves the previous filter in place.
+The value cap is the **total across all fields**, not per field — three fields share one 64-value budget. Overflow (or any invalid payload) returns an `error` reply (e.g. `filter exceeds max values (total across all fields): 192 > 64`) and **leaves the previous filter in place**; the socket stays open, so always read the reply — an ignored `error` looks exactly like the filter doing nothing.
 
 ## Common filter shapes
 
@@ -135,4 +135,5 @@ JSON re-serialization per filtered client is the real cost. v1 re-serializes per
 - **No cross-event filtering.** Filter operates per-event. You cannot ask "give me the block only if it contains at least one matching event" without also filtering events out — that is what skipping happens for already (zero matches = no broadcast).
 - **No numeric / range / regex matching.** String equality only. Operators pre-compute their allowlist.
 - **No subtraction.** "Everything except X" is not expressible. List the values you want explicitly.
+- **No OR across fields.** Fields are AND'd; only values *within* a field are OR'd. You cannot match "value X appears in field `a` OR field `b`" in one filter — so a value that may land in any of several columns (e.g. a wallet as `tx_from`, `maker`, **or** `taker`) is not expressible server-side today. Workarounds: one filtered connection per field (union client-side), or a single upstream column that already carries the value.
 - **No filter on lifecycle messages.** `started`, `error`, `undo`, `dropped` always pass through regardless of filter.
