@@ -270,13 +270,13 @@ struct WebSocketArgs {
     )]
     max_filter_fields: usize,
 
-    /// Maximum total number of terms in one filter expression. Default 256 —
-    /// enough to track >250 wallets as bare terms (`0xW1 || 0xW2 || …`) or ~85
+    /// Maximum total number of terms in one filter expression. Default 512 —
+    /// enough to track >500 wallets as bare terms (`0xW1 || 0xW2 || …`) or ~170
     /// across three explicit columns (`tx_from:/maker:/taker:`).
     #[arg(
         long,
         env = "SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES",
-        default_value_t = 256
+        default_value_t = 512
     )]
     max_filter_values: usize,
 
