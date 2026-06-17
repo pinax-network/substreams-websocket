@@ -407,7 +407,7 @@ async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
                       "schema": { "type": "string" },
                       "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
                     { "name": "filter", "in": "query", "required": false,
-                      "description": "URL-encoded JSON `{field: value|[values]}`. Server-side row filter, fields AND, values OR.",
+                      "description": "URL-encoded SQE filter expression (alias `sqe`), e.g. `maker:0xW || taker:0xW`. Operators: `||`, `&&` (or whitespace), `!`, `( )`; `field:value` is exact equality, a bare `value` matches any column. See /SKILL.md.",
                       "schema": { "type": "string" } }
                 ],
                 "responses": {
@@ -430,6 +430,7 @@ async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
                       "schema": { "type": "string" },
                       "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
                     { "name": "filter", "in": "query", "required": false,
+                      "description": "URL-encoded SQE filter expression (alias `sqe`), e.g. `maker:0xW || taker:0xW`. See /SKILL.md.",
                       "schema": { "type": "string" } }
                 ],
                 "responses": {
@@ -1489,7 +1490,7 @@ fn parse_filter_query(
     let Some(raw) = raw_query else {
         return Ok(EventFilterSet::default());
     };
-    let Some((_, value)) = url_query_pairs(raw).find(|(k, _)| k == "filter") else {
+    let Some((_, value)) = url_query_pairs(raw).find(|(k, _)| k == "filter" || k == "sqe") else {
         return Ok(EventFilterSet::default());
     };
     if value.is_empty() {
@@ -2466,7 +2467,8 @@ impl std::fmt::Display for DisconnectReason {
 /// - `SUBSCRIBE`           — params: `["network@stream", ...]`
 /// - `UNSUBSCRIBE`         — params: `["network@stream", ...]`
 /// - `LIST_SUBSCRIPTIONS`  — no params, returns the current subscriptions
-/// - `SET_FILTER`          — params: `["network@stream", { "field": "value" | [...] }]`
+/// - `SET_FILTER`          — params: `["network@stream", "<filter expression>"]`
+///   (SQE-style: `maker:0xW || taker:0xW`, `&&`, `!`, `( )`, bare terms)
 /// - `CLEAR_FILTER`        — params: `["network@stream"]`
 /// - `LIST_FILTERS`        — no params, returns the current filter map
 async fn handle_subscription_command(
@@ -2606,7 +2608,7 @@ async fn handle_subscription_command(
         "SET_FILTER" => {
             if cmd.params.len() != 2 {
                 return serde_json::json!({
-                    "error": "SET_FILTER expects [selector, filter-object]",
+                    "error": "SET_FILTER expects [selector, filter-expression-string]",
                     "id": id,
                 })
                 .to_string();
@@ -3566,8 +3568,8 @@ mod tests {
             ("raydium_cpmm", "user_c"),
         ]);
 
-        // Connect with ?filter=protocol=raydium_cpmm
-        let filter_param = urlencoding::encode(r#"{"protocol":"raydium_cpmm"}"#).to_string();
+        // Connect with ?filter=protocol:raydium_cpmm (SQE expression)
+        let filter_param = urlencoding::encode("protocol:raydium_cpmm").to_string();
         let url = format!(
             "ws://{}/ws/solana-mainnet@swaps?filter={}",
             server.addr, filter_param
@@ -3635,7 +3637,7 @@ mod tests {
         // Apply SET_FILTER live.
         socket
             .send(TungsteniteMessage::Text(
-                r#"{"method":"SET_FILTER","params":["solana-mainnet@swaps",{"user":"user_b"}],"id":1}"#
+                r#"{"method":"SET_FILTER","params":["solana-mainnet@swaps","user:user_b"],"id":1}"#
                     .into(),
             ))
             .await

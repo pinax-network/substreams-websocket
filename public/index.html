@@ -1058,15 +1058,17 @@
 
   <section id="set-filter">
     <h2>SET_FILTER</h2>
-    <p>Drop non-matching events from the wire for the given selector. String equality only (exact, case-sensitive); fields AND, values OR; <strong>no OR across fields</strong>; missing field on an event is a miss. Wildcard selectors are accepted and applied to every matching channel. <code>SET_FILTER</code> <strong>replaces</strong> the filter for that selector (not accumulate) — read the <code>{"result"|"error"}</code> reply, and use <code>LIST_FILTERS</code> to confirm one is active.</p>
+    <p>Drop non-matching events from the wire for the given selector. <code>params[1]</code> is an <strong>SQE expression string</strong> (the same language as Firehose <code>substreams run -t</code>): <code>field:value</code> string equality (exact, case-sensitive), bare <code>value</code> matches any column, combined with <code>||</code> (OR), <code>&amp;&amp;</code> / whitespace (AND), <code>!</code> (NOT), and <code>( )</code> grouping. Missing field on an event is a miss. Wildcard selectors are accepted and applied to every matching channel. <code>SET_FILTER</code> <strong>replaces</strong> the filter for that selector (not accumulate — combine with <code>||</code> in one expression) — read the <code>{"result"|"error"}</code> reply, and use <code>LIST_FILTERS</code> to confirm one is active.</p>
 <pre>// request
 { "method": "SET_FILTER",
-  "params": ["solana-mainnet@swaps", { "protocol": "raydium_cpmm", "user": ["a","b"] }],
+  "params": ["solana-mainnet@swaps", "protocol:raydium_cpmm && user:F2MUE…"],
   "id": 1 }
 
-// reply
-{ "result": null, "id": 1 }</pre>
-    <p>Replaces any existing filter for that selector. <code>{}</code> is valid and matches every event (effectively no-op). Top-level fields (<code>block_num</code>, <code>network</code>, <code>module_hash</code>) are not filterable — only keys inside <code>events[*]</code>.</p>
+// reply (accept)
+{ "result": null, "id": 1 }
+// reply (reject — previous filter left unchanged)
+{ "error": "…", "id": 1 }</pre>
+    <p>Replaces any existing filter for that selector. Top-level fields (<code>block_num</code>, <code>network</code>, <code>module_hash</code>) are not filterable — only columns inside <code>events[*]</code>.</p>
   </section>
 
   <section id="clear-filter">
@@ -1087,42 +1089,42 @@
 { "method": "LIST_FILTERS", "id": 3 }
 
 // reply
-{ "result": { "solana-mainnet@swaps": { "protocol": "raydium_cpmm" } }, "id": 3 }</pre>
-    <p>Keys sorted alphabetically.</p>
+{ "result": { "solana-mainnet@swaps": "protocol:raydium_cpmm" }, "id": 3 }</pre>
+    <p>Returns the selector → expression-string map. An empty <code>{}</code> means no filter is active.</p>
   </section>
 
   <section id="filters">
     <h2>Event filters</h2>
-    <p>Per-subscription filters drop events from <code>events[]</code> before delivery. Pass <code>?filter=&lt;url-encoded-json&gt;</code> on connect, or use the live <code>SET_FILTER</code> / <code>CLEAR_FILTER</code> / <code>LIST_FILTERS</code> commands.</p>
-<pre>ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%7D</pre>
+    <p>Per-subscription filters drop events from <code>events[]</code> before delivery. The filter is an <strong>SQE expression string</strong> (StreamingFast Substreams Query Expression — the same language as Firehose <code>substreams run -t</code>). Pass <code>?filter=&lt;url-encoded-expr&gt;</code> (alias <code>?sqe=</code>) on connect, or use the live <code>SET_FILTER</code> / <code>CLEAR_FILTER</code> / <code>LIST_FILTERS</code> commands.</p>
+<pre># ?filter=protocol:raydium_cpmm
+ws://host/ws/solana-mainnet@swaps?filter=protocol%3Araydium_cpmm</pre>
     <p>Semantics:</p>
     <ul>
-      <li><strong>String equality only.</strong> No regex, range, substring.</li>
-      <li><strong>Field-level AND.</strong> Every key must match.</li>
-      <li><strong>Value-level OR.</strong> A value can be a string (exact) or an array of strings (any of). Empty array matches nothing.</li>
-      <li><strong>Missing field = miss.</strong> Events without the filtered key are dropped.</li>
+      <li><strong><code>field:value</code> — string equality only.</strong> Exact, case-sensitive. No regex, range, substring.</li>
+      <li><strong>bare <code>value</code> (no <code>field:</code>).</strong> Matches when <em>any</em> string column of the event equals it (e.g. <code>0xWALLET</code>).</li>
+      <li><strong>Operators.</strong> <code>||</code> (OR), <code>&amp;&amp;</code> or whitespace (AND), <code>!</code> (NOT), <code>( )</code> grouping; <code>&amp;&amp;</code> binds tighter than <code>||</code>. Quote values containing spaces or <code>( ) | &amp; ' "</code> using <code>'…'</code> or <code>"…"</code>.</li>
+      <li><strong>OR across columns works.</strong> A wallet that may appear in any of several columns (e.g. <code>tx_from</code>, <code>maker</code>, or <code>taker</code>) is expressible: <code>tx_from:0xW || maker:0xW || taker:0xW</code>, or just the bare term <code>0xW</code>.</li>
+      <li><strong>Missing field = miss.</strong> Events without the filtered column are dropped.</li>
       <li><strong>Schema-agnostic.</strong> Server doesn't know swap / transfer schemas. Any column name works.</li>
-      <li><strong>Top-level fields not filterable.</strong> Only keys inside <code>events[*]</code>.</li>
+      <li><strong>Top-level fields not filterable.</strong> Only columns inside <code>events[*]</code>.</li>
       <li><strong>Zero matches = block skipped</strong> for that client. No zero-event broadcasts.</li>
       <li><strong>Filters apply to wildcard selectors too.</strong> A filter on <code>*@*</code> / <code>*@swaps</code> / <code>solana-mainnet@*</code> is resolved against each outgoing <code>(network, table)</code> at broadcast time.</li>
-      <li><strong>No OR across fields.</strong> Fields are AND'd; only values within a field are OR'd. A value that may appear in any of several columns (e.g. a wallet as <code>tx_from</code>, <code>maker</code>, or <code>taker</code>) is not expressible in one filter.</li>
     </ul>
-    <p>Bounds — the value cap is the <strong>total across all fields</strong>, not per field; over-cap rejects the whole filter:</p>
-<pre>SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS=16   # max keys per filter
-SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values (summed over all fields)</pre>
+    <p>Bounds — the values cap is the <strong>total number of terms across the whole expression</strong>, not per field; over-cap (or a parse error / non-string) rejects the filter and leaves the previous one in place:</p>
+<pre>SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS=16   # max distinct field names
+SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total terms in the expression</pre>
     <p>Common filter shapes per stream — server does not enforce these, just operator-friendly examples matching commonly-present columns:</p>
-<pre>// SVM swaps
-{ "protocol": "raydium_cpmm",
-  "amm_pool": "8ZT5BBW3WRpvCwPiadE6jiocQfriMjW7DSfXR2pF6YcT",
-  "user":     "F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8",
-  "input_mint":  "So11111111111111111111111111111111111111112",
-  "output_mint": "13muFYDBUvgNpyDQSZ4eQTVHNoWaGhykonvyZWdGbonk" }
+<pre># SVM swaps — Raydium CPMM by user
+protocol:raydium_cpmm && user:F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8
 
-// SVM SPL transfers
-{ "source": "&lt;wallet&gt;", "destination": "&lt;wallet&gt;", "mint": "&lt;mint&gt;" }
+# SVM swaps — WSOL on either leg
+input_mint:So11111111111111111111111111111111111111112 || output_mint:So11111111111111111111111111111111111111112
 
-// SVM system transfers
-{ "program_id": "11111111111111111111111111111111", "fee_payer": "&lt;wallet&gt;" }</pre>
+# SVM SPL transfers — a wallet as source OR destination
+source:&lt;wallet&gt; || destination:&lt;wallet&gt;
+
+# SVM system transfers — system program touching a wallet in any role
+program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destination:&lt;wallet&gt; || fee_payer:&lt;wallet&gt;)</pre>
     <p>Full spec: <a href="https://github.com/pinax-network/substreams-websocket/blob/main/docs/filters.md"><code>docs/filters.md</code></a>.</p>
   </section>
 
@@ -1247,14 +1249,14 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values (summed ov
             <option value="kyber_elastic">kyber_elastic</option>
           </optgroup>
         </select>
-        <button data-filter-preset='{"protocol":["raydium_cpmm","pumpfun","jupiter_v6","orca_whirlpool"]}'>top SVM DEXs</button>
-        <button data-filter-preset='{"protocol":["uniswap_v2","uniswap_v3","uniswap_v4","curvefi"]}'>top EVM DEXs</button>
-        <button data-filter-preset='{"input_mint":"So11111111111111111111111111111111111111112"}'>input_mint=SOL</button>
-        <button data-filter-preset='{"user":"F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8"}'>user=&lt;wallet&gt;</button>
-        <button data-filter-preset='{"program_id":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}'>program_id=SPL Token</button>
-        <button data-filter-preset='{"log_address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"}'>log_address=USDC</button>
-        <button data-filter-preset='{"from":"0x0000000000000000000000000000000000000000"}'>from=mint (0x0)</button>
-        <button data-filter-preset='{"to":"0x0000000000000000000000000000000000000000"}'>to=burn (0x0)</button>
+        <button data-filter-preset='protocol:raydium_cpmm || protocol:pumpfun || protocol:jupiter_v6 || protocol:orca_whirlpool'>top SVM DEXs</button>
+        <button data-filter-preset='protocol:uniswap_v2 || protocol:uniswap_v3 || protocol:uniswap_v4 || protocol:curvefi'>top EVM DEXs</button>
+        <button data-filter-preset='input_mint:So11111111111111111111111111111111111111112'>input_mint=SOL</button>
+        <button data-filter-preset='user:F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8'>user=&lt;wallet&gt;</button>
+        <button data-filter-preset='program_id:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'>program_id=SPL Token</button>
+        <button data-filter-preset='log_address:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'>log_address=USDC</button>
+        <button data-filter-preset='from:0x0000000000000000000000000000000000000000'>from=mint (0x0)</button>
+        <button data-filter-preset='to:0x0000000000000000000000000000000000000000'>to=burn (0x0)</button>
       </div>
     </header>
     <div id="log"></div>
@@ -1995,11 +1997,11 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values (summed ov
   // URL's `?filter=` query so a subsequent Connect applies it at upgrade
   // time (the auto-disconnect cap makes the live SET_FILTER path a tight
   // window).
-  function applyFilterPreset(filterObj) {
+  function applyFilterPreset(expr) {
       counter += 1;
       var sel = document.getElementById('stream-select');
       var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : 'solana-mainnet@swaps';
-      var body = { method: 'SET_FILTER', params: [selector, filterObj], id: counter };
+      var body = { method: 'SET_FILTER', params: [selector, expr], id: counter };
       cmdEl.value = JSON.stringify(body);
 
       // Rewrite the URL field: strip any existing `?filter=` then append the
@@ -2014,7 +2016,7 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values (summed ov
       var pairs = qs.split('&').filter(function (p) {
         return p && p.split('=')[0] !== 'filter';
       });
-      pairs.push('filter=' + encodeURIComponent(JSON.stringify(filterObj)));
+      pairs.push('filter=' + encodeURIComponent(expr));
       urlEl.value = path + '?' + pairs.join('&') + hash;
 
       cmdEl.focus();
@@ -2022,18 +2024,16 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values (summed ov
 
   Array.prototype.forEach.call(document.querySelectorAll('[data-filter-preset]'), function (btn) {
     btn.onclick = function () {
-      try {
-        applyFilterPreset(JSON.parse(btn.getAttribute('data-filter-preset')));
-      } catch (e) { /* ignore */ }
+      applyFilterPreset(btn.getAttribute('data-filter-preset'));
     };
   });
 
-  // Protocol dropdown: emit a `{ "protocol": "<picked>" }` filter on change.
+  // Protocol dropdown: emit a `protocol:<picked>` SQE filter on change.
   var protoSel = document.getElementById('protocol-preset');
   if (protoSel) {
     protoSel.addEventListener('change', function () {
       if (!protoSel.value) return;
-      applyFilterPreset({ protocol: protoSel.value });
+      applyFilterPreset('protocol:' + protoSel.value);
     });
   }
 

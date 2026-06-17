@@ -42,7 +42,7 @@ Send a JSON text frame on the connected socket:
 { "method": "SUBSCRIBE",         "params": ["solana-mainnet@swaps"], "id": 1 }
 { "method": "UNSUBSCRIBE",       "params": ["solana-mainnet@swaps"], "id": 2 }
 { "method": "LIST_SUBSCRIPTIONS", "id": 3 }
-{ "method": "SET_FILTER",        "params": ["solana-mainnet@swaps", {"protocol":"raydium_cpmm","user":["a","b"]}], "id": 4 }
+{ "method": "SET_FILTER",        "params": ["solana-mainnet@swaps", "protocol:raydium_cpmm && user:F2MUE…"], "id": 4 }
 { "method": "CLEAR_FILTER",      "params": ["solana-mainnet@swaps"], "id": 5 }
 { "method": "LIST_FILTERS",      "id": 6 }
 ```
@@ -51,7 +51,7 @@ Replies are `{"result": null | [...] | {...}, "id": <echoed>}`. Errors are `{"er
 
 ## Event filters
 
-Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url-encoded-json>` on the upgrade, or use `SET_FILTER` mid-stream (it replaces the filter for that selector; read the `{"result"|"error"}` reply, and `LIST_FILTERS` to confirm). String equality only (exact, case-sensitive); fields AND, values OR (no OR across fields); missing-field=miss; zero matches = block skipped. Filters apply to wildcard selectors too. The value cap (`MAX_FILTER_VALUES`, default 64) is the total across all fields, not per field; over-cap rejects the whole filter. Full command and semantics reference is in `/SKILL.md`.
+Reduce bandwidth by dropping non-matching events server-side. The filter is an **SQE expression string** (same language as Firehose `substreams run -t`): `field:value` exact case-sensitive equality, bare `value` matches any column, combined with `||` (OR), `&&`/whitespace (AND), `!` (NOT), `( )` grouping. Pass `?filter=<url-encoded-expr>` (alias `?sqe=`) on the upgrade, or use `SET_FILTER` mid-stream — `params[1]` is the expression **string** (it replaces the filter for that selector, so combine with `||` rather than sending multiple; read the `{"result"|"error"}` reply, and `LIST_FILTERS` to confirm). OR-across-columns now works (`tx_from:0xW || maker:0xW || taker:0xW`, or just bare `0xW`). Missing-field=miss; zero matches = block skipped. Filters apply to wildcard selectors too. `MAX_FILTER_VALUES` (default 64) caps the total number of terms in the expression, `MAX_FILTER_FIELDS` (default 16) caps distinct field names; over-cap or parse error rejects the filter. Full command and semantics reference is in `/SKILL.md`.
 
 ## Discovery
 
