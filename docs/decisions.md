@@ -66,6 +66,14 @@ Rejected: per-token allowlists, JWT verification, IP allowlists in-process.
 
 Why: this server is a fan-out, not a security boundary. Auth belongs in front (Cloudflare Access, nginx auth_request, Tailscale). Bolting auth in here would either duplicate the upstream's model badly or constrain operators who already have a reverse proxy.
 
+## Lifecycle frames scoped to the subscribed network
+
+`started`/`completed`/`error`/`decode_error`/`fatal`/`undo` frames are delivered only to clients whose selectors cover the frame's `network` (a `*@…` wildcard matches every network). The `dropped` frame stays connection-wide (it can't be attributed to one network — the outbound buffer is shared across a connection's channels).
+
+Rejected: broadcasting every lifecycle frame to every connected client regardless of subscription (the original behavior).
+
+Why: a client subscribed to `polymarket@*` would otherwise see `error`/`fatal` noise from every other configured network (e.g. an unrelated `hyperliquid` stream hitting the decode cap), which is confusing and forces client-side filtering. Frames are per-network, so scoping by the selector the client already supplied is the natural boundary. Provenance fields (`package_name`, `package_version`, `module_hash`) still let clients route per-package within a network.
+
 ## Single binary + inline YAML/TOML for PaaS
 
 `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` (or `_TOML`) env var wins over the file path.
