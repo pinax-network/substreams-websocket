@@ -94,7 +94,7 @@ Returns the current selector → expression-string map. An empty `{}` means no f
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` | `16` | Max distinct field names in one expression. |
-| `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` | `64` | Max total number of terms in the expression. |
+| `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` | `256` | Max total number of terms in the expression. |
 
 The values cap is the **total number of terms across the whole expression**, not per field. Over-cap, a parse error, or a non-string `params[1]` returns an `error` reply (e.g. `filter exceeds max terms (total across the expression): 192 > 64`) and **leaves the previous filter in place**; the socket stays open, so always read the reply — an ignored `error` looks exactly like the filter doing nothing.
 

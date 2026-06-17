@@ -1112,7 +1112,7 @@ ws://host/ws/solana-mainnet@swaps?filter=protocol%3Araydium_cpmm</pre>
     </ul>
     <p>Bounds — the values cap is the <strong>total number of terms across the whole expression</strong>, not per field; over-cap (or a parse error / non-string) rejects the filter and leaves the previous one in place:</p>
 <pre>SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS=16   # max distinct field names
-SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total terms in the expression</pre>
+SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=256  # max total terms in the expression</pre>
     <p>Common filter shapes per stream — server does not enforce these, just operator-friendly examples matching commonly-present columns:</p>
 <pre># SVM swaps — Raydium CPMM by user
 protocol:raydium_cpmm && user:F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8

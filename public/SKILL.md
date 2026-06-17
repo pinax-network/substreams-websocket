@@ -197,7 +197,9 @@ ws://host/ws/polymarket@ctfexchange_order_filled?filter=maker%3A0xW%20%7C%7C%20t
 
 `SET_FILTER` **replaces** the filter for that selector — it does not accumulate, so two `SET_FILTER` for the same selector keep only the last (combine with `||` in one expression instead). `CLEAR_FILTER` removes it. `LIST_FILTERS` returns the active selector→expression map; an empty `{}` means **no filter is active** — use it to confirm one took effect.
 
-Limits are server-configured: `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` (default 64) caps the **total number of terms** in the expression, and `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` (default 16) caps distinct field names. A payload over a cap, with a parse error, or that isn't a string returns an `error` reply (e.g. `filter exceeds max terms (total across the expression): 192 > 64`) and **leaves the previous filter unchanged**; the socket stays open. Always read the `SET_FILTER` reply — a silently-ignored `error` looks exactly like "the filter did nothing" (you keep receiving the full stream). If every event of a block is dropped, the block is skipped for that client.
+Each client receives a block carrying **only its matching events** — non-matching events are dropped from that client's copy before it's sent (so filtered streams aren't bloated with rows you didn't ask for), and if no event in a block matches, the block isn't sent to that client at all.
+
+Limits are server-configured: `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` (default 256) caps the **total number of terms** in the expression, and `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` (default 16) caps distinct field names. A payload over a cap, with a parse error, or that isn't a string returns an `error` reply (e.g. `filter exceeds max terms (total across the expression): 300 > 256`) and **leaves the previous filter unchanged**; the socket stays open. Always read the `SET_FILTER` reply — a silently-ignored `error` looks exactly like "the filter did nothing" (you keep receiving the full stream). If every event of a block is dropped, the block is skipped for that client.
 
 ## Reconnects (live-only feed)
 
