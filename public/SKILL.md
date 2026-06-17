@@ -104,14 +104,15 @@ When `wrap_envelope` is `true`, the same object is delivered nested under `data`
 
 ## Stream lifecycle messages
 
-Same connection, separate envelope identified by `"type": "stream"`. Lifecycle messages are **scoped to the network you subscribed to**: a client only receives `started`/`completed`/`error`/`fatal`/`undo` frames for networks its selectors cover (a `*@…` wildcard on the network side matches every network). They carry spkg provenance (`package_name`, `package_version`, `module_hash`) so clients can still route per-package on their own. The `dropped` frame is connection-wide and always delivered (see below).
+Same connection, separate envelope identified by `"type": "stream"`. Lifecycle messages are **scoped to the network you subscribed to**: a client only receives `started`/`completed`/`error`/`decode_error`/`fatal`/`undo` frames for networks its selectors cover (a `*@…` wildcard on the network side matches every network). They carry spkg provenance (`package_name`, `package_version`, `module_hash`) so clients can still route per-package on their own. The `dropped` frame is connection-wide and always delivered (see below).
 
 ```
-{ "type": "stream", "status": "started",   "network": "...", "package_name": "...", "package_version": "...", "module_hash": "..." }
-{ "type": "stream", "status": "completed", ... }
-{ "type": "stream", "status": "error",     ..., "message": "..." }
-{ "type": "stream", "status": "fatal",     ..., "message": "..." }
-{ "type": "stream", "status": "undo",      ..., "last_valid_block": 350000000 }
+{ "type": "stream", "status": "started",      "network": "...", "package_name": "...", "package_version": "...", "module_hash": "..." }
+{ "type": "stream", "status": "completed",    ... }
+{ "type": "stream", "status": "error",        ..., "message": "..." }
+{ "type": "stream", "status": "decode_error", ..., "message": "..." }
+{ "type": "stream", "status": "fatal",        ..., "message": "..." }
+{ "type": "stream", "status": "undo",         ..., "last_valid_block": 350000000 }
 { "type": "stream", "status": "dropped",   "count": 42, "last_block": 350000000, "last_timestamp": 1715619300, "reason": "client buffer overflow; frames were dropped" }
 ```
 

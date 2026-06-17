@@ -2370,17 +2370,23 @@ impl ClientRegistry {
         }
     }
 
-    /// Lifecycle messages (`started`, `error`, `completed`, `decode_error`,
-    /// `fatal`, `undo`, `gap`) are delivered to **every** connected client
-    /// regardless of stream subscription. They carry spkg provenance
-    /// (`package_name`, `package_version`, `module_hash`) so clients can
-    /// route on their own. Per-connection envelope wrapping is respected.
+    /// Lifecycle messages (`started`, `error`, `decode_error`, `completed`,
+    /// `fatal`, `undo`) are delivered only to clients whose subscription
+    /// covers the frame's `network` (a `*@…` wildcard matches every network).
+    /// They carry spkg provenance (`package_name`, `package_version`,
+    /// `module_hash`) so clients can route per-package within a network.
+    /// Per-connection envelope wrapping is respected. (The `dropped` frame and
+    /// the replay `gap` frame are emitted per-client elsewhere, not here.)
     async fn broadcast_lifecycle(&self, value: serde_json::Value) -> usize {
         let raw_text = value.to_string();
         let network = value
             .get("network")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
+        // Selector for wrap-envelope mode. A frame with no network (purely
+        // defensive — all current frames carry one) wraps under `*` so the
+        // emitted selector stays syntactically valid.
+        let wrap_network = if network.is_empty() { "*" } else { network };
         let mut slow_to_close: Vec<ClientId> = Vec::new();
         let mut delivered: usize = 0;
         let limit = self.slow_client_drop_limit();
@@ -2390,12 +2396,12 @@ impl ClientRegistry {
                 let filter = client.filter.read().await;
                 // Lifecycle frames are per-network; only deliver to clients
                 // subscribed to that network. A frame with no network (purely
-                // defensive — all current frames carry one) goes to everyone.
+                // defensive) goes to everyone.
                 if !network.is_empty() && !filter.matches_network(network) {
                     continue;
                 }
                 let text = if filter.wrap_envelope {
-                    format!(r#"{{"stream":"{network}@__lifecycle__","data":{raw_text}}}"#)
+                    format!(r#"{{"stream":"{wrap_network}@__lifecycle__","data":{raw_text}}}"#)
                 } else {
                     raw_text.clone()
                 };

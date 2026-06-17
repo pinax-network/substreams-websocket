@@ -68,7 +68,7 @@ Why: this server is a fan-out, not a security boundary. Auth belongs in front (C
 
 ## Lifecycle frames scoped to the subscribed network
 
-`started`/`completed`/`error`/`fatal`/`undo` frames are delivered only to clients whose selectors cover the frame's `network` (a `*@…` wildcard matches every network). The `dropped` frame stays connection-wide (it can't be attributed to one network — the outbound buffer is shared across a connection's channels).
+`started`/`completed`/`error`/`decode_error`/`fatal`/`undo` frames are delivered only to clients whose selectors cover the frame's `network` (a `*@…` wildcard matches every network). The `dropped` frame stays connection-wide (it can't be attributed to one network — the outbound buffer is shared across a connection's channels).
 
 Rejected: broadcasting every lifecycle frame to every connected client regardless of subscription (the original behavior).
 
