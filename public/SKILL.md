@@ -104,7 +104,7 @@ When `wrap_envelope` is `true`, the same object is delivered nested under `data`
 
 ## Stream lifecycle messages
 
-Same connection, separate envelope identified by `"type": "stream"`. Lifecycle messages are delivered to **every** connected client regardless of stream subscription — they carry spkg provenance (`package_name`, `package_version`, `module_hash`) so clients can route on their own.
+Same connection, separate envelope identified by `"type": "stream"`. Lifecycle messages are **scoped to the network you subscribed to**: a client only receives `started`/`completed`/`error`/`fatal`/`undo` frames for networks its selectors cover (a `*@…` wildcard on the network side matches every network). They carry spkg provenance (`package_name`, `package_version`, `module_hash`) so clients can still route per-package on their own. The `dropped` frame is connection-wide and always delivered (see below).
 
 ```
 { "type": "stream", "status": "started",   "network": "...", "package_name": "...", "package_version": "...", "module_hash": "..." }
