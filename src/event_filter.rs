@@ -1,127 +1,390 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Map, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EventFilterError {
-    #[error("filter must be a JSON object")]
-    NotAnObject,
+    #[error("filter expression must be a string")]
+    NotAString,
 
-    #[error("filter field {field:?} has invalid value: must be a string or array of strings")]
-    InvalidFieldValue { field: String },
+    #[error("filter parse error at position {pos}: {msg}")]
+    Parse { pos: usize, msg: String },
 
-    #[error("filter exceeds max fields: {actual} > {max}")]
+    #[error("filter exceeds max terms (total across the expression): {actual} > {max}")]
+    TooManyTerms { actual: usize, max: usize },
+
+    #[error("filter references more fields than allowed: {actual} > {max}")]
     TooManyFields { actual: usize, max: usize },
 
-    #[error("filter exceeds max values: {actual} > {max}")]
-    TooManyValues { actual: usize, max: usize },
-
-    #[error("failed to parse filter JSON: {0}")]
-    Parse(String),
+    #[error("filter nests parentheses deeper than {max} levels")]
+    TooDeep { max: usize },
 }
 
-/// Per-subscription event filter. `{ "protocol": "raydium_cpmm", "user": ["a","b"] }`
-/// matches events where `protocol == "raydium_cpmm" AND user IN ("a","b")`.
+/// One node of a parsed filter expression (a [StreamingFast SQE]-style boolean
+/// query). A term is either `field:value` (exact equality on that event column)
+/// or a bare `value` (matches when *any* string column of the event equals it).
 ///
-/// Fields are AND'd; values within a field are OR'd. Events missing the
-/// filtered field are dropped (conservative — operators do not receive rows
-/// they cannot inspect for the filter key).
+/// [StreamingFast SQE]: https://github.com/streamingfast/substreams-rs
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Expr {
+    /// `field:value` when `field` is `Some`; a bare `value` when `None`.
+    Term {
+        field: Option<String>,
+        value: String,
+    },
+    Not(Box<Expr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
+}
+
+impl Expr {
+    fn eval(&self, event: &Map<String, Value>, bare_values: Option<&[&str]>) -> bool {
+        match self {
+            Expr::Term {
+                field: Some(field),
+                value,
+            } => event
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(value)),
+            Expr::Term { field: None, value } => {
+                bare_values.is_some_and(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case(value)))
+            }
+            Expr::Not(inner) => !inner.eval(event, bare_values),
+            Expr::And(children) => children.iter().all(|c| c.eval(event, bare_values)),
+            Expr::Or(children) => children.iter().any(|c| c.eval(event, bare_values)),
+        }
+    }
+
+    /// Accumulate cap inputs: total terms, the set of named fields, and whether
+    /// any bare (field-less) term exists.
+    fn walk(&self, terms: &mut usize, fields: &mut BTreeSet<String>, has_bare: &mut bool) {
+        match self {
+            Expr::Term { field, .. } => {
+                *terms += 1;
+                match field {
+                    Some(f) => {
+                        fields.insert(f.clone());
+                    }
+                    None => *has_bare = true,
+                }
+            }
+            Expr::Not(inner) => inner.walk(terms, fields, has_bare),
+            Expr::And(children) | Expr::Or(children) => {
+                children
+                    .iter()
+                    .for_each(|c| c.walk(terms, fields, has_bare));
+            }
+        }
+    }
+}
+
+/// Per-subscription event filter — a [StreamingFast SQE]-style boolean
+/// expression over `events[*]` columns. Examples:
+///
+/// ```text
+/// protocol:raydium_cpmm                       single field equality
+/// maker:0xabc || taker:0xabc                  OR across columns
+/// protocol:raydium_cpmm && user:0xabc         AND (also implied by whitespace)
+/// (maker:0xabc || taker:0xabc) && !amm:0xdead  grouping + negation
+/// 0xabc                                       bare term: any column == 0xabc
+/// ```
+///
+/// `field:value` is **ASCII-case-insensitive** string equality; a bare `value`
+/// (no field) matches when any string column of the event equals it. Operators:
+/// `||` (or), `&&` or whitespace (and), `!` (not), `( )` (grouping). Values
+/// containing whitespace or `() | & ' "` must be quoted (`'…'` or `"…"`). An
+/// empty expression matches every event. Events missing a referenced `field`
+/// are a miss (conservative).
+///
+/// [StreamingFast SQE]: https://github.com/streamingfast/substreams-rs
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventFilter {
-    /// Ordered for stable `list()` output. BTreeMap by field name.
-    fields: BTreeMap<String, Vec<String>>,
+    /// `None` = empty expression = matches every event.
+    root: Option<Expr>,
+    /// Original expression text, echoed verbatim by `LIST_FILTERS`.
+    source: String,
+    /// Whether any bare (field-less) term exists. When false, matching skips
+    /// building the per-event value set.
+    has_bare: bool,
 }
 
 impl EventFilter {
+    /// Max parenthesis nesting depth — guards against pathological payloads.
+    const MAX_DEPTH: usize = 16;
+
+    /// `true` when the filter imposes no constraint (empty expression). Used to
+    /// short-circuit broadcast-time filtering.
     pub fn is_empty(&self) -> bool {
-        self.fields.is_empty()
+        self.root.is_none()
     }
 
-    /// Parse a filter from a JSON value. Caller enforces field / value caps.
+    /// Parse a filter expression string. `max_values` caps the total number of
+    /// terms; `max_fields` caps the number of distinct named fields. An empty /
+    /// whitespace-only string is a valid match-everything filter.
+    pub fn parse(
+        raw: &str,
+        max_fields: usize,
+        max_values: usize,
+    ) -> Result<Self, EventFilterError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::default());
+        }
+        let mut parser = Parser::new(trimmed);
+        let expr = parser.parse_or(0)?;
+        parser.skip_ws();
+        if !parser.at_end() {
+            return Err(EventFilterError::Parse {
+                pos: parser.pos,
+                msg: "unexpected trailing input (use && / || between terms)".to_owned(),
+            });
+        }
+
+        let mut terms = 0usize;
+        let mut fields = BTreeSet::new();
+        let mut has_bare = false;
+        expr.walk(&mut terms, &mut fields, &mut has_bare);
+        if terms > max_values {
+            return Err(EventFilterError::TooManyTerms {
+                actual: terms,
+                max: max_values,
+            });
+        }
+        if fields.len() > max_fields {
+            return Err(EventFilterError::TooManyFields {
+                actual: fields.len(),
+                max: max_fields,
+            });
+        }
+
+        Ok(Self {
+            root: Some(expr),
+            source: trimmed.to_owned(),
+            has_bare,
+        })
+    }
+
+    /// Parse from a JSON value — accepts a string expression (the wire form for
+    /// `SET_FILTER` / `?filter=`). Non-strings are rejected.
     pub fn from_json(
         value: &Value,
         max_fields: usize,
         max_values: usize,
     ) -> Result<Self, EventFilterError> {
-        let obj = value.as_object().ok_or(EventFilterError::NotAnObject)?;
-        if obj.len() > max_fields {
-            return Err(EventFilterError::TooManyFields {
-                actual: obj.len(),
-                max: max_fields,
-            });
-        }
-
-        let mut fields = BTreeMap::new();
-        let mut total_values: usize = 0;
-        for (key, raw) in obj {
-            let values = match raw {
-                Value::String(s) => vec![s.clone()],
-                Value::Array(items) => {
-                    let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let Some(s) = item.as_str() else {
-                            return Err(EventFilterError::InvalidFieldValue { field: key.clone() });
-                        };
-                        out.push(s.to_owned());
-                    }
-                    out
-                }
-                _ => {
-                    return Err(EventFilterError::InvalidFieldValue { field: key.clone() });
-                }
-            };
-            total_values += values.len();
-            if total_values > max_values {
-                return Err(EventFilterError::TooManyValues {
-                    actual: total_values,
-                    max: max_values,
-                });
-            }
-            fields.insert(key.clone(), values);
-        }
-
-        Ok(Self { fields })
+        let raw = value.as_str().ok_or(EventFilterError::NotAString)?;
+        Self::parse(raw, max_fields, max_values)
     }
 
+    /// Convenience wrapper over [`EventFilter::parse`] for `&str` callers.
     pub fn from_str(
         raw: &str,
         max_fields: usize,
         max_values: usize,
     ) -> Result<Self, EventFilterError> {
-        let value: Value =
-            serde_json::from_str(raw).map_err(|e| EventFilterError::Parse(e.to_string()))?;
-        Self::from_json(&value, max_fields, max_values)
+        Self::parse(raw, max_fields, max_values)
     }
 
-    /// Check whether a single event row matches every field in the filter.
-    /// An empty filter matches every event.
+    /// Check whether a single event row matches the expression. An empty filter
+    /// matches every event.
     pub fn matches_event(&self, event: &Map<String, Value>) -> bool {
-        if self.fields.is_empty() {
+        let Some(root) = &self.root else {
             return true;
+        };
+        if self.has_bare {
+            let values: Vec<&str> = event.values().filter_map(Value::as_str).collect();
+            root.eval(event, Some(&values))
+        } else {
+            root.eval(event, None)
         }
-        for (key, allowed) in &self.fields {
-            let Some(actual) = event.get(key).and_then(Value::as_str) else {
-                return false;
-            };
-            if !allowed.iter().any(|v| v == actual) {
-                return false;
+    }
+
+    /// The filter's wire representation: its source expression as a JSON string
+    /// (round-trips through [`EventFilter::from_json`]).
+    pub fn to_json(&self) -> Value {
+        Value::String(self.source.clone())
+    }
+}
+
+/// Recursive-descent parser for the SQE-style grammar:
+///
+/// ```text
+/// or      := and ( '||' and )*
+/// and     := unary ( ('&&')? unary )*      // adjacency = implicit AND
+/// unary   := '!' unary | primary
+/// primary := '(' or ')' | term
+/// term    := (field ':')? value
+/// value   := '"' … '"' | '\'' … '\'' | unquoted
+/// ```
+struct Parser<'a> {
+    src: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(src: &'a str) -> Self {
+        Self {
+            src,
+            bytes: src.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(b) if b.is_ascii_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
+    /// True if the next two bytes are `op`.
+    fn peek2(&self, op: &[u8; 2]) -> bool {
+        self.bytes.get(self.pos..self.pos + 2) == Some(&op[..])
+    }
+
+    fn parse_or(&mut self, depth: usize) -> Result<Expr, EventFilterError> {
+        let mut children = vec![self.parse_and(depth)?];
+        loop {
+            self.skip_ws();
+            if self.peek2(b"||") {
+                self.pos += 2;
+                children.push(self.parse_and(depth)?);
+            } else {
+                break;
             }
         }
-        true
+        Ok(if children.len() == 1 {
+            children.pop().expect("len 1")
+        } else {
+            Expr::Or(children)
+        })
     }
 
-    pub fn to_json(&self) -> Value {
-        let mut obj = Map::new();
-        for (key, values) in &self.fields {
-            let v = if values.len() == 1 {
-                Value::String(values[0].clone())
+    fn parse_and(&mut self, depth: usize) -> Result<Expr, EventFilterError> {
+        let mut children = vec![self.parse_unary(depth)?];
+        loop {
+            self.skip_ws();
+            if self.peek2(b"&&") {
+                self.pos += 2;
+                children.push(self.parse_unary(depth)?);
+            } else if self.peek2(b"||") || matches!(self.peek(), Some(b')') | None) {
+                break;
             } else {
-                Value::Array(values.iter().map(|s| Value::String(s.clone())).collect())
-            };
-            obj.insert(key.clone(), v);
+                // Adjacency without an operator is an implicit AND.
+                children.push(self.parse_unary(depth)?);
+            }
         }
-        Value::Object(obj)
+        Ok(if children.len() == 1 {
+            children.pop().expect("len 1")
+        } else {
+            Expr::And(children)
+        })
     }
+
+    fn parse_unary(&mut self, depth: usize) -> Result<Expr, EventFilterError> {
+        self.skip_ws();
+        if self.peek() == Some(b'!') {
+            self.pos += 1;
+            return Ok(Expr::Not(Box::new(self.parse_unary(depth)?)));
+        }
+        self.parse_primary(depth)
+    }
+
+    fn parse_primary(&mut self, depth: usize) -> Result<Expr, EventFilterError> {
+        self.skip_ws();
+        if self.peek() == Some(b'(') {
+            if depth + 1 > EventFilter::MAX_DEPTH {
+                return Err(EventFilterError::TooDeep {
+                    max: EventFilter::MAX_DEPTH,
+                });
+            }
+            self.pos += 1;
+            let inner = self.parse_or(depth + 1)?;
+            self.skip_ws();
+            if self.peek() != Some(b')') {
+                return Err(EventFilterError::Parse {
+                    pos: self.pos,
+                    msg: "expected ')'".to_owned(),
+                });
+            }
+            self.pos += 1;
+            return Ok(inner);
+        }
+        self.parse_term()
+    }
+
+    fn parse_term(&mut self) -> Result<Expr, EventFilterError> {
+        self.skip_ws();
+        // Optional `field:` prefix — a run of field chars immediately followed
+        // by ':'. Otherwise the run is part of a bare value.
+        let mut field = None;
+        let ident_end = {
+            let mut i = self.pos;
+            while matches!(self.bytes.get(i), Some(b) if is_field_byte(*b)) {
+                i += 1;
+            }
+            i
+        };
+        if ident_end > self.pos && self.bytes.get(ident_end) == Some(&b':') {
+            field = Some(self.src[self.pos..ident_end].to_owned());
+            self.pos = ident_end + 1; // consume field and ':'
+        }
+        let value = self.parse_value()?;
+        Ok(Expr::Term { field, value })
+    }
+
+    fn parse_value(&mut self) -> Result<String, EventFilterError> {
+        match self.peek() {
+            Some(q @ (b'"' | b'\'')) => {
+                self.pos += 1;
+                let start = self.pos;
+                while let Some(b) = self.peek() {
+                    if b == q {
+                        let value = self.src[start..self.pos].to_owned();
+                        self.pos += 1;
+                        return Ok(value);
+                    }
+                    self.pos += 1;
+                }
+                Err(EventFilterError::Parse {
+                    pos: start,
+                    msg: "unterminated quoted value".to_owned(),
+                })
+            }
+            _ => {
+                let start = self.pos;
+                while matches!(self.peek(), Some(b) if is_value_byte(b)) {
+                    self.pos += 1;
+                }
+                if self.pos == start {
+                    return Err(EventFilterError::Parse {
+                        pos: self.pos,
+                        msg: "expected a term".to_owned(),
+                    });
+                }
+                Ok(self.src[start..self.pos].to_owned())
+            }
+        }
+    }
+}
+
+/// Bytes allowed in a `field` identifier (before the `:`).
+fn is_field_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'@' | b'.' | b'-')
+}
+
+/// Bytes allowed in an unquoted value — anything except whitespace, the
+/// grouping/operator characters, and quotes.
+fn is_value_byte(b: u8) -> bool {
+    !b.is_ascii_whitespace() && !matches!(b, b'(' | b')' | b'|' | b'&' | b'"' | b'\'')
 }
 
 /// Per-connection map of `network@table` selector → filter. Wildcards on
@@ -211,77 +474,143 @@ mod tests {
         m
     }
 
+    fn parse(expr: &str) -> EventFilter {
+        EventFilter::parse(expr, 16, 64).expect("parses")
+    }
+
     #[test]
     fn empty_filter_matches_every_event() {
-        let filter = EventFilter::default();
-        let evt = event(&[("protocol", "raydium_cpmm")]);
-        assert!(filter.matches_event(&evt));
+        assert!(EventFilter::default().matches_event(&event(&[("protocol", "raydium_cpmm")])));
+        assert!(parse("   ").is_empty());
+        assert!(parse("").matches_event(&event(&[("a", "b")])));
     }
 
     #[test]
-    fn single_field_string_equality_matches() {
-        let filter = EventFilter::from_str(r#"{"protocol":"raydium_cpmm"}"#, 16, 64).unwrap();
-        assert!(filter.matches_event(&event(&[("protocol", "raydium_cpmm")])));
-        assert!(!filter.matches_event(&event(&[("protocol", "pump_fun")])));
-    }
-
-    #[test]
-    fn array_value_matches_any() {
-        let filter = EventFilter::from_str(r#"{"user":["a","b"]}"#, 16, 64).unwrap();
-        assert!(filter.matches_event(&event(&[("user", "a")])));
-        assert!(filter.matches_event(&event(&[("user", "b")])));
-        assert!(!filter.matches_event(&event(&[("user", "c")])));
+    fn single_field_equality() {
+        let f = parse("protocol:raydium_cpmm");
+        assert!(f.matches_event(&event(&[("protocol", "raydium_cpmm")])));
+        assert!(!f.matches_event(&event(&[("protocol", "pump_fun")])));
     }
 
     #[test]
     fn missing_field_is_a_miss() {
-        let filter = EventFilter::from_str(r#"{"protocol":"raydium_cpmm"}"#, 16, 64).unwrap();
-        assert!(!filter.matches_event(&event(&[("user", "abc")])));
+        assert!(!parse("protocol:raydium_cpmm").matches_event(&event(&[("user", "abc")])));
     }
 
     #[test]
-    fn multi_field_is_and() {
-        let filter =
-            EventFilter::from_str(r#"{"protocol":"raydium_cpmm","user":"abc"}"#, 16, 64).unwrap();
-        assert!(filter.matches_event(&event(&[("protocol", "raydium_cpmm"), ("user", "abc")])));
-        assert!(!filter.matches_event(&event(&[("protocol", "raydium_cpmm"), ("user", "xyz")])));
-        assert!(!filter.matches_event(&event(&[("protocol", "pump_fun"), ("user", "abc")])));
+    fn field_equality_is_ascii_case_insensitive() {
+        // EVM addresses are lowercase on the wire; a checksummed query still
+        // matches so users don't have to normalize casing.
+        let f = parse("tx_from:0xABC");
+        assert!(f.matches_event(&event(&[("tx_from", "0xabc")])));
+        assert!(f.matches_event(&event(&[("tx_from", "0xABC")])));
+        // Bare terms are case-insensitive too.
+        assert!(parse("0xDEAD").matches_event(&event(&[("maker", "0xdead")])));
     }
 
     #[test]
-    fn empty_array_matches_nothing() {
-        let filter = EventFilter::from_str(r#"{"user":[]}"#, 16, 64).unwrap();
-        assert!(!filter.matches_event(&event(&[("user", "abc")])));
+    fn or_across_fields() {
+        // The headline use case: a wallet as maker OR taker OR tx_from.
+        let f = parse("tx_from:0xW || maker:0xW || taker:0xW");
+        assert!(f.matches_event(&event(&[("maker", "0xW"), ("taker", "0xZ")])));
+        assert!(f.matches_event(&event(&[("taker", "0xW")])));
+        assert!(f.matches_event(&event(&[("tx_from", "0xW")])));
+        assert!(!f.matches_event(&event(&[("maker", "0xA"), ("taker", "0xB")])));
     }
 
     #[test]
-    fn rejects_non_object() {
-        let err = EventFilter::from_str(r#"["protocol"]"#, 16, 64).unwrap_err();
-        assert!(matches!(err, EventFilterError::NotAnObject));
+    fn explicit_and() {
+        let f = parse("protocol:raydium_cpmm && user:0xabc");
+        assert!(f.matches_event(&event(&[("protocol", "raydium_cpmm"), ("user", "0xabc")])));
+        assert!(!f.matches_event(&event(&[("protocol", "raydium_cpmm"), ("user", "0xZ")])));
     }
 
     #[test]
-    fn rejects_non_string_value() {
-        let err = EventFilter::from_str(r#"{"protocol":42}"#, 16, 64).unwrap_err();
-        assert!(matches!(err, EventFilterError::InvalidFieldValue { .. }));
+    fn implicit_and_by_whitespace() {
+        let f = parse("protocol:raydium_cpmm user:0xabc");
+        assert!(f.matches_event(&event(&[("protocol", "raydium_cpmm"), ("user", "0xabc")])));
+        assert!(!f.matches_event(&event(&[("protocol", "raydium_cpmm")])));
     }
 
     #[test]
-    fn rejects_non_string_array_element() {
-        let err = EventFilter::from_str(r#"{"user":["a",42]}"#, 16, 64).unwrap_err();
-        assert!(matches!(err, EventFilterError::InvalidFieldValue { .. }));
+    fn grouping_and_precedence() {
+        // (a || b) && c
+        let f = parse("(maker:0xW || taker:0xW) && protocol:clob");
+        assert!(f.matches_event(&event(&[("maker", "0xW"), ("protocol", "clob")])));
+        assert!(!f.matches_event(&event(&[("maker", "0xW"), ("protocol", "amm")])));
+        // Without grouping, && binds tighter than ||.
+        let g = parse("maker:0xW || taker:0xW && protocol:clob");
+        assert!(g.matches_event(&event(&[("maker", "0xW"), ("protocol", "amm")])));
+    }
+
+    #[test]
+    fn negation() {
+        let f = parse("maker:0xW && !amm:0xdead");
+        assert!(f.matches_event(&event(&[("maker", "0xW"), ("amm", "0xlive")])));
+        assert!(!f.matches_event(&event(&[("maker", "0xW"), ("amm", "0xdead")])));
+    }
+
+    #[test]
+    fn bare_term_matches_any_field() {
+        let f = parse("0xWALLET");
+        assert!(f.matches_event(&event(&[("maker", "0xWALLET")])));
+        assert!(f.matches_event(&event(&[("tx_from", "0xWALLET")])));
+        assert!(!f.matches_event(&event(&[("maker", "0xother")])));
+    }
+
+    #[test]
+    fn quoted_value_with_spaces() {
+        let f = parse(r#"label:"hello world""#);
+        assert!(f.matches_event(&event(&[("label", "hello world")])));
+        let bare = parse("'some value'");
+        assert!(bare.matches_event(&event(&[("note", "some value")])));
+    }
+
+    #[test]
+    fn to_json_roundtrips() {
+        let src = "maker:0xW || taker:0xW";
+        let f = parse(src);
+        assert_eq!(f.to_json(), Value::String(src.to_owned()));
+        let again = EventFilter::from_json(&f.to_json(), 16, 64).unwrap();
+        assert_eq!(f, again);
+    }
+
+    #[test]
+    fn rejects_non_string_json() {
+        assert!(matches!(
+            EventFilter::from_json(&serde_json::json!({"a": 1}), 16, 64),
+            Err(EventFilterError::NotAString)
+        ));
+    }
+
+    #[test]
+    fn rejects_unterminated_quote_and_trailing_garbage() {
+        assert!(matches!(
+            EventFilter::parse(r#"label:"oops"#, 16, 64),
+            Err(EventFilterError::Parse { .. })
+        ));
+        assert!(matches!(
+            EventFilter::parse(")", 16, 64),
+            Err(EventFilterError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn enforces_max_terms() {
+        let err = EventFilter::parse("a:1 || b:2 || c:3 || d:4", 16, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            EventFilterError::TooManyTerms { actual: 4, max: 3 }
+        ));
     }
 
     #[test]
     fn enforces_max_fields() {
-        let err = EventFilter::from_str(r#"{"a":"1","b":"2","c":"3"}"#, 2, 64).unwrap_err();
-        assert!(matches!(err, EventFilterError::TooManyFields { .. }));
-    }
-
-    #[test]
-    fn enforces_max_values() {
-        let err = EventFilter::from_str(r#"{"user":["a","b","c","d"]}"#, 16, 3).unwrap_err();
-        assert!(matches!(err, EventFilterError::TooManyValues { .. }));
+        let err = EventFilter::parse("a:1 && b:2 && c:3", 2, 64).unwrap_err();
+        assert!(matches!(
+            err,
+            EventFilterError::TooManyFields { actual: 3, max: 2 }
+        ));
     }
 
     #[test]
@@ -289,26 +618,13 @@ mod tests {
         let mut block = serde_json::json!({
             "stream": "swaps",
             "events": [
-                { "@table": "swaps", "protocol": "raydium_cpmm", "user": "a" },
-                { "@table": "swaps", "protocol": "pump_fun", "user": "b" },
-                { "@table": "swaps", "protocol": "raydium_cpmm", "user": "c" }
+                { "@table": "swaps", "maker": "0xW", "taker": "0xA" },
+                { "@table": "swaps", "maker": "0xB", "taker": "0xW" },
+                { "@table": "swaps", "maker": "0xC", "taker": "0xD" }
             ]
         });
-        let filter = EventFilter::from_str(r#"{"protocol":"raydium_cpmm"}"#, 16, 64).unwrap();
-        let remaining = apply_filter_in_place(&mut block, &filter);
-        assert_eq!(remaining, 2);
-        let events = block["events"].as_array().unwrap();
-        assert_eq!(events[0]["user"], "a");
-        assert_eq!(events[1]["user"], "c");
-    }
-
-    #[test]
-    fn to_json_roundtrips_through_from_json() {
-        let original =
-            EventFilter::from_str(r#"{"protocol":"raydium_cpmm","user":["a","b"]}"#, 16, 64)
-                .unwrap();
-        let roundtripped = EventFilter::from_json(&original.to_json(), 16, 64).unwrap();
-        assert_eq!(original, roundtripped);
+        let f = parse("maker:0xW || taker:0xW");
+        assert_eq!(apply_filter_in_place(&mut block, &f), 2);
     }
 
     #[test]
@@ -316,17 +632,18 @@ mod tests {
         let mut set = EventFilterSet::default();
         set.set(
             "solana-mainnet@swaps".to_owned(),
-            EventFilter::from_str(r#"{"protocol":"raydium_cpmm"}"#, 16, 64).unwrap(),
+            parse("protocol:raydium_cpmm"),
         );
-        set.set(
-            "ethereum-mainnet@transfers".to_owned(),
-            EventFilter::from_str(r#"{"mint":"abc"}"#, 16, 64).unwrap(),
-        );
+        set.set("ethereum-mainnet@transfers".to_owned(), parse("mint:abc"));
         let listed = set.list();
         let keys: Vec<&String> = listed.keys().collect();
         assert_eq!(
             keys,
             vec!["ethereum-mainnet@transfers", "solana-mainnet@swaps"]
+        );
+        assert_eq!(
+            listed["solana-mainnet@swaps"],
+            Value::String("protocol:raydium_cpmm".to_owned())
         );
     }
 }

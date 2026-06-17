@@ -165,21 +165,43 @@ Invalid commands do **not** close the connection.
 
 ## Event filters
 
-Reduce bandwidth by asking the server to drop non-matching events before delivery. Pass `?filter=<url-encoded-json>` on the WebSocket upgrade, or use the live `SET_FILTER` / `CLEAR_FILTER` / `LIST_FILTERS` JSON commands. Filters are scoped per explicit `network@stream` selector. Wildcards always pass everything through.
+Reduce bandwidth by asking the server to drop non-matching events before delivery. The filter is an **SQE expression string** (StreamingFast Substreams Query Expression — the same language as Firehose `substreams run -t`). Pass `?filter=<url-encoded-expr>` (alias `?sqe=`) on the WebSocket upgrade, or use the live `SET_FILTER` / `CLEAR_FILTER` / `LIST_FILTERS` commands. A filter is scoped to a `network@stream` selector and applies to every block whose `(network, table)` that selector matches — including wildcard selectors (`*@*`, `<network>@*`, `*@<table>`). When several stored filters match the same outgoing event, **all** of them must pass.
+
+### Expression syntax
 
 ```
-ws://host/ws/solana-mainnet@swaps?filter=%7B%22protocol%22%3A%22raydium_cpmm%22%7D
+maker:0xW                          field equals value (case-insensitive)
+maker:0xW || taker:0xW             OR — wallet as maker OR taker
+protocol:clob && maker:0xW         AND (whitespace also means AND: `protocol:clob maker:0xW`)
+(maker:0xW || taker:0xW) && !amm:0xdead   grouping + negation
+0xWALLET                           bare term: matches when ANY column equals 0xWALLET
+"two words"  or  label:'a b'       quote values containing spaces or ( ) | & ' "
+```
+
+- `field:value` — **ASCII-case-insensitive** string equality on that event column, so a checksummed or lowercased EVM address both match. An event missing `field` is a miss. (Note: case-insensitivity is convenient for hex addresses but relaxes matching for case-significant values like Solana base58 keys — supply the exact value there.)
+- bare `value` (no `field:`) — matches when **any** string column of the event equals it. Great for "this wallet in any role": `0xW1 || 0xW2`.
+- operators: `||` (or), `&&` or whitespace (and), `!` (not), `( )` (grouping). `&&` binds tighter than `||`.
+- only `events[*]` columns are filtered; top-level `block_num` / `network` / `module_hash` are not.
+
+```
+ws://host/ws/polymarket@ctfexchange_order_filled?filter=maker%3A0xW%20%7C%7C%20taker%3A0xW
 ```
 
 ```json
 { "method": "SET_FILTER",
-  "params": ["solana-mainnet@swaps", { "protocol": "raydium_cpmm", "user": ["a","b"] }],
+  "params": ["polymarket@ctfexchange_order_filled", "tx_from:0xW || maker:0xW || taker:0xW"],
   "id": 1 }
+// -> { "result": null, "id": 1 }   on accept
+// -> { "error":  "...", "id": 1 }   on reject (previous filter left unchanged)
 ```
 
-Semantics: string equality only; fields are AND'd; values within a field are OR'd; events missing the filtered field are dropped. If every event of a block is dropped, the block is skipped for that client. Top-level fields (`block_num`, `network`, `module_hash`) are not filterable.
+**Acks differ by entry point.** A `?filter=`/`?sqe=` expression is validated at the WebSocket upgrade: if it's invalid you get **HTTP 400** and the connection is refused (there is no JSON ack frame — a successful upgrade means it was accepted). A `SET_FILTER` message instead replies with `{"result":null,"id":…}` on accept or `{"error":"…","id":…}` on reject, and the socket stays open either way.
 
-Filters accept only strings or arrays of strings. Max keys and values are server-configured (`SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS`, `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES`), and invalid payloads return an `error` reply without closing the socket.
+`SET_FILTER` **replaces** the filter for that selector — it does not accumulate, so two `SET_FILTER` for the same selector keep only the last (combine with `||` in one expression instead). `CLEAR_FILTER` removes it. `LIST_FILTERS` returns the active selector→expression map; an empty `{}` means **no filter is active** — use it to confirm one took effect.
+
+Each client receives a block carrying **only its matching events** — non-matching events are dropped from that client's copy before it's sent (so filtered streams aren't bloated with rows you didn't ask for), and if no event in a block matches, the block isn't sent to that client at all.
+
+Limits are server-configured: `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` (default 256) caps the **total number of terms** in the expression, and `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` (default 16) caps distinct field names. A payload over a cap, with a parse error, or that isn't a string returns an `error` reply (e.g. `filter exceeds max terms (total across the expression): 300 > 256`) and **leaves the previous filter unchanged**; the socket stays open. Always read the `SET_FILTER` reply — a silently-ignored `error` looks exactly like "the filter did nothing" (you keep receiving the full stream).
 
 ## Reconnects (live-only feed)
 
