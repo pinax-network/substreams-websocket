@@ -84,8 +84,9 @@ pub struct BlockContext {
     pub block_num: u64,
     pub block_hash: String,
     pub timestamp: String,
-    /// Unix epoch seconds for the block timestamp. Used as the chain-agnostic
-    /// resume key (`?from_timestamp=`) and for replay log time-window trim.
+    /// Unix epoch seconds for the block timestamp. Machine-friendly companion
+    /// to `timestamp`; surfaced in the block envelope so clients can compute
+    /// head drift.
     pub timestamp_seconds: i64,
     pub network: String,
     pub module_hash: String,
@@ -111,7 +112,7 @@ pub struct DatabaseChangesBlockMessage {
     pub block_hash: String,
     pub timestamp: String,
     /// Unix epoch seconds. Same value as `timestamp` but in a machine-friendly
-    /// integer form. Used by `?from_timestamp=` reconnect and the replay log.
+    /// integer form. Surfaced in the block envelope for client-side head drift.
     pub timestamp_seconds: i64,
     /// Canonical Substreams module hash of the configured output module.
     /// Subscribers can use it to detect spkg upgrades.

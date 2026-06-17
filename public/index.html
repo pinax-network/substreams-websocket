@@ -1122,35 +1122,14 @@ SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=64   # max total string values</pre>
 
 // SVM system transfers
 { "program_id": "11111111111111111111111111111111", "fee_payer": "&lt;wallet&gt;" }</pre>
-    <p>Replay log (see Reconnects) applies the client's current filter to each replayed block. Clients can change filters between disconnect and reconnect; replay respects the new filter.</p>
     <p>Full spec: <a href="https://github.com/pinax-network/substreams-websocket/blob/main/docs/filters.md"><code>docs/filters.md</code></a>.</p>
   </section>
 
   <section id="reconnect">
-    <h2>Reconnects</h2>
-    <p>The server retains a <code>REPLAY_SECONDS</code> time window per spkg on disk (default 600s). On reconnect, resume with <strong>one</strong> of two mutually exclusive query parameters on either URL mode:</p>
-    <ul>
-      <li><code>?from_timestamp=&lt;n&gt;</code> — Unix epoch seconds or UTC <code>YYYY-MM-DD HH:MM:SS</code>. Chain-agnostic; works for any selector. Replays blocks with <code>timestamp_seconds &gt; n</code>.</li>
-      <li><code>?from_block=&lt;n&gt;</code> — block number. Replays blocks with <code>block_num &gt; n</code>. Per-chain, so accepted only for a single concrete <code>network@table</code> selector — wildcard or multi-selector connections return HTTP 400.</li>
-    </ul>
-<pre>ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
-ws://host/stream?streams=solana-mainnet@swaps&amp;from_timestamp=2026-05-13T17:00:00Z
-ws://host/ws/solana-mainnet@swaps?from_block=350000001</pre>
-    <p>Retained blocks past the resume point are replayed oldest first before the live stream resumes. If the resume point falls below the oldest retained value, a <code>gap</code> lifecycle message is emitted instead (fields match the unit you used) and the client should backfill the hole via Substreams gRPC directly:</p>
-<pre>// after ?from_timestamp=
-{ "type": "stream", "status": "gap",
-  "network": "solana-mainnet", "table": "swaps",
-  "requested_timestamp": 1715000000,
-  "oldest_buffered_timestamp": 1715619300,
-  "reason": "requested timestamp outside replay window" }
-
-// after ?from_block=
-{ "type": "stream", "status": "gap",
-  "network": "solana-mainnet", "table": "swaps",
-  "requested_block": 100,
-  "oldest_buffered_block": 350000000,
-  "reason": "requested block outside replay window" }</pre>
-    <p>Wildcards (<code>*@swaps</code>, <code>solana-mainnet@*</code>, <code>*@*</code>) replay too (timestamp mode): the server expands them to concrete per-<code>network@table</code> frames, oldest first. <code>from_block</code> is per-chain — single concrete selector only. Cursors stay internal to the server.</p>
+    <h2>Reconnects (live-only)</h2>
+    <p>This is a <strong>live-only</strong> feed: blocks are delivered as they arrive and there is no server-side buffer of past blocks. On reconnect you simply resume the live stream — there is no catch-up.</p>
+    <p>The query parameters <code>?from_timestamp=</code> and <code>?from_block=</code> are <strong>not supported</strong> and return <strong>HTTP 400</strong> at the WebSocket upgrade. To backfill history, use <a href="https://docs.substreams.dev/">Substreams</a> directly — it resumes natively from any block, cursor, or timestamp and is the right tool for replay.</p>
+    <p>Cursor handling stays internal to the server: on restart each stream resumes from its persisted cursor so the live feed continues without operator action. The cursor is not exposed to clients.</p>
   </section>
 
   <section id="heartbeats">
@@ -1161,7 +1140,7 @@ ws://host/ws/solana-mainnet@swaps?from_block=350000001</pre>
   <section id="limits">
     <h2>Limits</h2>
     <ul>
-      <li><strong>Bounded replay.</strong> The on-disk replay log holds a <code>REPLAY_SECONDS</code> window per spkg (default 600s). For older history, backfill via Substreams gRPC directly.</li>
+      <li><strong>Live-only, no replay.</strong> There is no on-disk replay log; <code>?from_timestamp=</code> / <code>?from_block=</code> are rejected with HTTP 400. For any history, backfill via Substreams directly (by block, cursor, or timestamp).</li>
       <li><strong>One output type.</strong> Only <code>sf.substreams.sink.database.v1.DatabaseChanges</code>.</li>
       <li><strong>Per-connection client buffer.</strong> Slow consumers are dropped per-message rather than blocking the ingest loop. Defaults to 1024 messages, configurable via <code>SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE</code>.</li>
     </ul>
@@ -2023,7 +2002,7 @@ ws://host/ws/solana-mainnet@swaps?from_block=350000001</pre>
       cmdEl.value = JSON.stringify(body);
 
       // Rewrite the URL field: strip any existing `?filter=` then append the
-      // new one. `?from_timestamp=...` and other params are preserved.
+      // new one. Any other query params are preserved.
       var raw = urlEl.value || '';
       var hashIdx = raw.indexOf('#');
       var hash = hashIdx === -1 ? '' : raw.slice(hashIdx);

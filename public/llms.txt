@@ -32,7 +32,7 @@ Clients subscribe by `<network>@<table>` where `<table>` is a DatabaseChanges ta
 }
 ```
 
-One payload per `(network, table)` group per block. All event field values are strings on the wire. The per-event `@table` prefix is dropped because the parent payload already carries `table` at the top level. On reconnect, resume with one of two mutually exclusive params: `?from_timestamp=<n>` (Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`; chain-agnostic, any selector; replays `timestamp_seconds > n`) or `?from_block=<n>` (per-chain block number, single concrete `network@table` selector only — wildcards/multi-selector return 400; replays `block_num > n`). Default retention is 3600 seconds (1 hour) per spkg; outside that window the server emits a `gap` lifecycle message (fields match the resume unit) and clients must backfill via Substreams gRPC directly.
+One payload per `(network, table)` group per block. All event field values are strings on the wire. The per-event `@table` prefix is dropped because the parent payload already carries `table` at the top level. This is a live-only feed: there is no replay log. The params `?from_timestamp=` and `?from_block=` are not supported and return HTTP 400 at upgrade — use Substreams to backfill by block, cursor, or timestamp.
 
 ## Live commands
 
@@ -65,8 +65,8 @@ Reduce bandwidth by dropping non-matching events server-side. Pass `?filter=<url
 - `ModuleNotFoundError: No module named 'websockets'` — install the Python `websockets` package.
 - `TypeError: ... unexpected keyword argument ...` on connect — WebSocket library kwarg renamed across versions (e.g. `extra_headers` vs `additional_headers`). Match the installed version.
 - Close code `1009` (`message too big`) or silent disconnects on Solana-heavy streams — raise the client max frame/message size to at least 32 MiB (Python: `max_size=32 * 1024 * 1024`).
-- Socket opens, no payloads — recheck the selector, confirm the table in `/streams` or `session.streams[].tables`. Wildcards replay on `?from_timestamp=` (expanded to concrete per-`network@table` frames).
-- `{"type":"stream","status":"error|fatal"}` carries upstream errors — surface `message` to the user and reconnect with `?from_timestamp=` to resume.
+- Socket opens, no payloads — recheck the selector, confirm the table in `/streams` or `session.streams[].tables`.
+- `{"type":"stream","status":"error|fatal"}` carries upstream errors — surface `message` to the user and reconnect to resume the live stream.
 
 ## Resources
 

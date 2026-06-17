@@ -65,24 +65,6 @@ struct ServeArgs {
     )]
     cursors_dir: PathBuf,
 
-    /// Replay log retention window in seconds. The server keeps every block
-    /// whose `timestamp_seconds` is within `[newest_seen - N, newest_seen]`
-    /// per spkg. Default 3600s (1 hour). `0` disables the replay log.
-    #[arg(
-        long,
-        env = "SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS",
-        default_value_t = 3600
-    )]
-    replay_seconds: u64,
-
-    /// Directory where per-stream JSONL replay logs are persisted.
-    #[arg(
-        long,
-        env = "SUBSTREAMS_WEBSOCKET_REPLAY_DIR",
-        default_value = "./replay"
-    )]
-    replay_dir: PathBuf,
-
     /// Max age in seconds of a persisted cursor before it is ignored on
     /// startup. If a cursor file is older than this, the stream starts from
     /// its configured `start_block` (default `-1` = chain head) instead of
@@ -445,10 +427,6 @@ impl ServeArgs {
                 .collect(),
             websocket: self.websocket.into_config(),
             cursors_dir: self.cursors_dir,
-            replay: substreams_websocket::config::ReplayConfig {
-                max_seconds: self.replay_seconds,
-                dir: self.replay_dir,
-            },
             cursor_max_age_secs: self.cursor_max_age_secs,
         })
     }

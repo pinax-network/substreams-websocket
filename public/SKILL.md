@@ -87,7 +87,7 @@ One message per `(network, table)` group per block. A spkg that emits both `swap
 Field reference:
 
 - `network` + `table` — together identify the subscription channel.
-- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`. `block_num` and the block timestamp are both reconnect resume keys (`?from_block=` and `?from_timestamp=` — see [Reconnects and replay](#reconnects-and-replay)).
+- `block_num`, `block_hash`, `timestamp` — block-level metadata. Timestamps are UTC `YYYY-MM-DD HH:MM:SS`.
 - `module_hash` — canonical 40-hex SHA-1 of the Substreams output module. Use it to detect spkg upgrades.
 - `events` — array of rows for this table only, in source order. The per-event `@table` prefix is dropped since the parent payload already names the table.
 - All values inside `events[*]` are strings on the wire (per DatabaseChanges proto). Numeric types are stringified; the agent must parse.
@@ -117,7 +117,7 @@ Same connection, separate envelope identified by `"type": "stream"`. Lifecycle m
 
 `undo` fires on chain reorganizations. Roll back any state materialized past `last_valid_block`.
 
-`dropped` fires when your connection was too slow: the server's bounded per-client buffer overflowed and `count` frames were dropped on the floor. It is sent **once, on the first frame that gets through after the gap** — `last_block` and `last_timestamp` (Unix epoch seconds) mark where delivery resumed, so the hole sits between the last block you processed and that point. `count` is connection-wide (the outbound buffer is shared across all your subscribed channels, so a drop can't be pinned to one `network@table`). Reconcile the gap from another source — e.g. reconnect with `?from_timestamp=` (or `?from_block=` for a single concrete selector, where supported) — instead of shipping incomplete data downstream. If you never want to be dropped, drain your socket faster or run a server-to-server consumer with `SLOW_CLIENT_DROP_LIMIT=0`. In wrap-envelope (combined-stream) mode the frame arrives as `{"stream":"<network>@__dropped__","data":{...}}`.
+`dropped` fires when your connection was too slow: the server's bounded per-client buffer overflowed and `count` frames were dropped on the floor. It is sent **once, on the first frame that gets through after the gap** — `last_block` and `last_timestamp` (Unix epoch seconds) mark where delivery resumed, so the hole sits between the last block you processed and that point. `count` is connection-wide (the outbound buffer is shared across all your subscribed channels, so a drop can't be pinned to one `network@table`). Reconcile the gap from another source — this feed is live-only, so backfill the hole with Substreams (resume from `last_block` / `last_timestamp`) — instead of shipping incomplete data downstream. If you never want to be dropped, drain your socket faster or run a server-to-server consumer with `SLOW_CLIENT_DROP_LIMIT=0`. In wrap-envelope (combined-stream) mode the frame arrives as `{"stream":"<network>@__dropped__","data":{...}}`.
 
 ## Live SUBSCRIBE / UNSUBSCRIBE / LIST_SUBSCRIPTIONS
 
@@ -180,40 +180,13 @@ Semantics: string equality only; fields are AND'd; values within a field are OR'
 
 Filters accept only strings or arrays of strings. Max keys and values are server-configured (`SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS`, `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES`), and invalid payloads return an `error` reply without closing the socket.
 
-## Reconnects and replay
+## Reconnects (live-only feed)
 
-The server retains a recent time window per spkg on disk (default 3600 seconds, controlled by `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS`). On reconnect, resume by passing **one** of two mutually exclusive query parameters before the live stream resumes:
+This WebSocket is a **live-only** convenience feed: it delivers blocks as they arrive and does not buffer history for replay. On reconnect you simply resume the live stream — there is no server-side catch-up.
 
-- `?from_timestamp=<n>` — Unix epoch seconds or UTC `YYYY-MM-DD HH:MM:SS`. Chain-agnostic, works for any selector. Replays blocks with `timestamp_seconds > n`.
-- `?from_block=<n>` — block number. Replays blocks with `block_num > n`. Per-chain, so accepted **only for a single concrete `<network>@<table>` selector** — a wildcard or multi-selector connection returns HTTP 400. Pass `block_num + 1` from the last payload you processed.
+The query parameters `?from_timestamp=` and `?from_block=` are **not supported**. Passing either returns **HTTP 400 at the WebSocket upgrade**: the feed is live-only, so use **Substreams** to backfill by block or timestamp. Substreams natively resumes from any block, cursor, or timestamp and is the correct tool for historical replay.
 
-```
-ws://host/ws/solana-mainnet@swaps?from_timestamp=1715619600
-ws://host/stream?streams=solana-mainnet@swaps&from_timestamp=2026-05-13T17:00:00Z
-ws://host/ws/solana-mainnet@swaps?from_block=350000001
-```
-
-Passing both parameters, or `from_block` with a wildcard/multi-selector, returns HTTP 400.
-
-If the resume point falls below the oldest retained value, the server emits a `gap` lifecycle message instead and continues live. The `gap` fields match the unit you resumed with:
-
-```json
-// after ?from_timestamp=
-{ "type": "stream", "status": "gap",
-  "network": "solana-mainnet", "table": "swaps",
-  "requested_timestamp": 1715000000,
-  "oldest_buffered_timestamp": 1715619300,
-  "reason": "requested timestamp outside replay window" }
-
-// after ?from_block=
-{ "type": "stream", "status": "gap",
-  "network": "solana-mainnet", "table": "swaps",
-  "requested_block": 100,
-  "oldest_buffered_block": 350000000,
-  "reason": "requested block outside replay window" }
-```
-
-Wildcard selectors (`*@swaps`, `solana-mainnet@*`, `*@*`) replay too (timestamp mode): the server resolves the wildcard against every matching stream and replays concrete per-`network@table` frames, oldest first, before the live stream resumes. Each replayed frame carries its real `network`/`table` (the wildcard `gap` envelope echoes `*` in those fields). `from_block` resume is per-chain — single concrete selector only. Cursor handling stays internal to the server.
+Cursor handling stays internal to the server: on restart each stream resumes from its persisted cursor so the live feed continues without operator action. That cursor is not exposed to clients and is unrelated to client reconnects.
 
 ## Heartbeats
 
@@ -235,8 +208,8 @@ Or just connect to `wss://<host>/ws/*@*` and read the `session` message — it a
 - `ModuleNotFoundError: No module named 'websockets'` — install the Python `websockets` package (add to `requirements.txt`, `pyproject.toml`, etc.).
 - `TypeError: ... unexpected keyword argument ...` on connect — your WebSocket library renamed a kwarg between versions (e.g. `extra_headers` vs `additional_headers` in Python `websockets`). Match the kwarg to the installed version.
 - Silent disconnects or close code `1009` (`message too big`) on busy chains (Solana especially) — raise your client's max frame/message size to at least `32 MiB` (Python: `max_size=32 * 1024 * 1024`).
-- Socket opens but no payloads — re-check your selector (`<network>@<table>`), confirm the table exists in `/streams` or `session.streams[].tables`. Wildcard selectors (`*@*`, `*@swaps`, `solana-mainnet@*`) do replay on `?from_timestamp=` (the server expands them to concrete per-`network@table` frames).
-- Stream lifecycle frames with `"status":"error"` or `"status":"fatal"` carry upstream errors — surface `message` to the user and reconnect with `?from_timestamp=` if you want to resume.
+- Socket opens but no payloads — re-check your selector (`<network>@<table>`), confirm the table exists in `/streams` or `session.streams[].tables`.
+- Stream lifecycle frames with `"status":"error"` or `"status":"fatal"` carry upstream errors — surface `message` to the user and reconnect to resume the live stream.
 
 ## Common agent recipes
 
@@ -277,7 +250,7 @@ Compare each broadcast's `module_hash` with the one you saw in the welcome messa
 
 ## What this server does NOT do
 
-- **Bounded replay only.** The on-disk replay log holds a `REPLAY_SECONDS` window per spkg (default 3600s). For older history, use Substreams gRPC directly with the desired `start_block`.
+- **No replay / no historical backfill.** The feed is live-only — there is no on-disk replay log and `?from_timestamp=` / `?from_block=` are rejected at upgrade (HTTP 400). For any history, use Substreams directly with the desired `start_block` (or cursor/timestamp); Substreams does per-block/timestamp replay far better than a fan-out feed could.
 - **No payload transformation.** Field values are pass-through strings from the source DatabaseChanges. Numeric parsing, decimal handling, base58 / hex encoding are the consumer's responsibility.
 - **No persistence of historical messages.** Once a block is broadcast, it's gone unless a connected subscriber received it.
 

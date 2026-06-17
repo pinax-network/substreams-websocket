@@ -6,7 +6,7 @@ Stream decoded Substreams `DatabaseChanges` block outputs over a single WebSocke
 - **Resume on restart** — per-stream cursors persisted to disk.
 - **Cross-chain identity** — clients subscribe by `(network, table)`; same table name on different chains coexists cleanly.
 - **JWT auth** built in for Pinax/StreamingFast endpoints.
-- **Prometheus metrics** on `/metrics` covering connections, broadcasts, Substreams reader, replay log.
+- **Prometheus metrics** on `/metrics` covering connections, broadcasts, Substreams reader.
 - **Prebuilt tarballs** for Linux x86_64/aarch64, macOS x86_64/aarch64.
 
 Extended reference docs live under [`docs/`](docs/). On-wire message shape: [`public/SKILL.md`](public/SKILL.md).
@@ -94,8 +94,6 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.yaml
 | Server | `SUBSTREAMS_WEBSOCKET_SLOW_CLIENT_DROP_LIMIT` | `100` | Force-close a client after N consecutive `try_send` drops on a saturated buffer. `0` disables. |
 | Server | `SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS` | `10` | On SIGTERM/SIGINT, send `Close` to every client and wait up to this long for them to disconnect before exiting. |
 | Server | `SUBSTREAMS_WEBSOCKET_CURSORS_DIR` | `./cursors` | Cursor file directory. |
-| Server | `SUBSTREAMS_WEBSOCKET_REPLAY_SECONDS` | `3600` | Retention window per spkg in seconds. `?from_timestamp=` replay reads from this log. `0` disables. |
-| Server | `SUBSTREAMS_WEBSOCKET_REPLAY_DIR` | `./replay` | Directory for per-spkg JSONL replay logs. |
 | Server | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS` | `16` | Max keys in one client-supplied event filter. |
 | Server | `SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES` | `64` | Max total string values across one event filter. |
 
@@ -127,7 +125,7 @@ streams:
 |-------|----------|---------|-------|
 | `network` | yes | -- | Chain id (`solana-mainnet`, `ethereum-mainnet`, ...). |
 | `endpoint` | yes | -- | Substreams gRPC URL. |
-| `manifest` | yes | -- | Local path or HTTPS URL of `.spkg`. The spkg's `package_meta[0].name` + `version` are required (used for cursor + replay file naming). |
+| `manifest` | yes | -- | Local path or HTTPS URL of `.spkg`. The spkg's `package_meta[0].name` + `version` are required (used for cursor file naming). |
 | `module` | no | `db_out` | Must emit `proto:sf.substreams.sink.database.v1.DatabaseChanges`. |
 | `start_block` | no | `"-1"` | Negative = relative to head. Persisted cursor wins on resume. |
 | `stop_block` | no | `"0"` | `"0"` = indefinite. |
@@ -137,7 +135,7 @@ streams:
 
 Validation refuses duplicate `(network, manifest, module)` triples. Non-DatabaseChanges output or missing `package_meta` fails fast at startup.
 
-Cursor + replay files are named `<network>-<package_name>@<package_version>-<module_hash>.{cursor,jsonl}`.
+Cursor files are named `<network>-<package_name>@<package_version>-<module_hash>.cursor`.
 
 ---
 
@@ -227,7 +225,7 @@ Per-module overrides: `SUBSTREAMS_WEBSOCKET_LOG_LEVEL=info,substreams_websocket:
 
 ## Metrics
 
-The server exposes Prometheus metrics on `/metrics` (configurable via `SUBSTREAMS_WEBSOCKET_METRICS_PATH`; set empty to disable). All metrics are namespaced `substreams_websocket_*` and cover connections, subscription commands, broadcasts, Substreams reader, replay log, cursor saves, and shutdown drain.
+The server exposes Prometheus metrics on `/metrics` (configurable via `SUBSTREAMS_WEBSOCKET_METRICS_PATH`; set empty to disable). All metrics are namespaced `substreams_websocket_*` and cover connections, subscription commands, broadcasts, Substreams reader, cursor saves, and shutdown drain.
 
 ```
 GET /metrics
@@ -242,7 +240,7 @@ Full catalog + recommended PromQL queries: [`docs/metrics.md`](docs/metrics.md).
 
 ## Known limitations
 
-- **No replay buffer.** Disconnected clients miss broadcasts during the gap.
+- **Live-only feed, no replay.** Disconnected clients miss broadcasts during the gap; `?from_timestamp=` / `?from_block=` are rejected with HTTP 400. Use Substreams directly to backfill by block, cursor, or timestamp.
 - **One output type.** Only `sf.substreams.sink.database.v1.DatabaseChanges`.
 
 ---

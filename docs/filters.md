@@ -82,12 +82,6 @@ Returns the current filter map. Keys sorted alphabetically.
 
 Overflow returns `{"error":"filter exceeds max fields/values","id":...}` and leaves the previous filter in place.
 
-## Replay interaction
-
-The replay log stores **unfiltered** block JSON. On `?from_timestamp=<n>` resume, the server applies the client's current filter to each replayed block before sending. This means a client can change filters between disconnect and reconnect and the replay respects the new filter.
-
-Wildcard selectors replay too (see [`replay.md`](replay.md)): the server expands a `*` to concrete per-`network@table` frames, and any client filter is matched against each frame's real `network`/`table` before sending — wildcards still pass every event through unfiltered, exactly as on the live path.
-
 ## Common filter shapes
 
 Examples per table — the server doesn't enforce these, they're just operator-friendly suggestions matching the columns commonly present.
@@ -141,4 +135,4 @@ JSON re-serialization per filtered client is the real cost. v1 re-serializes per
 - **No cross-event filtering.** Filter operates per-event. You cannot ask "give me the block only if it contains at least one matching event" without also filtering events out — that is what skipping happens for already (zero matches = no broadcast).
 - **No numeric / range / regex matching.** String equality only. Operators pre-compute their allowlist.
 - **No subtraction.** "Everything except X" is not expressible. List the values you want explicitly.
-- **No filter on lifecycle messages.** `started`, `error`, `undo`, `gap` always pass through regardless of filter.
+- **No filter on lifecycle messages.** `started`, `error`, `undo`, `dropped` always pass through regardless of filter.

@@ -6,7 +6,7 @@ On `SIGTERM` or `SIGINT`, the server stops accepting new HTTP/WebSocket connecti
 
 Hard-kill of an in-process WebSocket connection looks like a TCP RST to the client — most libraries surface this as an opaque "connection reset" with no diagnostic info. A clean `Close` frame with code `1001` (`GOING_AWAY`) tells the client this was intentional, lets it skip its usual error-path retry/backoff, and reconnect immediately.
 
-Combined with [`replay.md`](replay.md), the reconnect-and-resume is near-seamless: client closes, reconnects in <1s with `?from_timestamp=<last_seen>`, replay log fills the 1–2s gap.
+The clean close lets the client reconnect in <1s and resume the live feed. The feed is live-only, so blocks produced during the 1–2s gap are missed; backfill via Substreams if the application can't tolerate the gap.
 
 ## Sequence
 
@@ -16,7 +16,7 @@ Combined with [`replay.md`](replay.md), the reconnect-and-resume is near-seamles
 4. Server iterates the client registry and sends `Message::Close(CloseFrame { code: 1001, reason: "server shutting down" })` to every client.
 5. Server polls the registry every 50ms. When all clients have closed their side of the socket, drain completes immediately.
 6. If `SUBSTREAMS_WEBSOCKET_SHUTDOWN_DRAIN_SECS` elapses with clients still attached, drain logs a `WARN` with the remaining count and yields. axum then tears down sockets hard.
-7. Per-stream Substreams reader tasks are aborted. Cursor + replay log writes already on disk are preserved.
+7. Per-stream Substreams reader tasks are aborted. Cursor writes already on disk are preserved.
 
 For Envoy-specific health-check configuration, see [`envoy.md`](envoy.md).
 
@@ -34,14 +34,15 @@ For Envoy-specific health-check configuration, see [`envoy.md`](envoy.md).
 - **Does not pause Substreams gRPC readers.** The stream tasks are aborted at the very end. Any block they were mid-process gets re-emitted by Substreams cursor resume on the next start.
 - **Does not coordinate with the next container.** That is the load balancer's job (blue/green, drain weights, etc.). The drain just minimizes the per-connection blast.
 
-## Combined with replay
+## Client reconnect pattern
 
 The recommended client pattern:
 
 ```
 1. On Close frame (code 1001) or any disconnect:
-2.   reconnect with ?from_timestamp=<last timestamp_seconds seen>
-3.   server replays the gap, then live stream resumes
+2.   reconnect to the same selector — the live stream resumes
+3.   if the gap matters, backfill missed blocks via Substreams
+     (resume from the last block / timestamp you saw)
 ```
 
-With the default 10s drain + a 1000-block replay window, a Railway redeploy is invisible to the client application layer beyond a 1–2s pause.
+With the default 10s drain, a Railway redeploy is a 1–2s pause for the client application layer. Because the feed is live-only, any blocks produced during that pause are not buffered for replay — use Substreams to fill the hole if your application needs exactly-once delivery.
