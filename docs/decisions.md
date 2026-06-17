@@ -74,6 +74,14 @@ Rejected: the per-spkg JSONL replay log (retained a recent time window per spkg,
 
 Why: the API/Substreams tiers already run a few blocks behind head, so the WebSocket's only job is the live edge. Historical backfill belongs in Substreams, which resumes from any block, cursor, or timestamp and does per-block/timestamp replay far better than a per-spkg on-disk log ever could. The replay log also cost a disk write on every block, which hurt fan-out throughput, and time-indexed replay is non-standard for market-data WebSockets anyway — Binance (whose URL conventions we mirror) has no replay either, so dropping it aligns us with that model. The persisted **cursor** (server-side resume-on-restart) is unrelated and stays.
 
+## Lifecycle frames scoped to the subscribed network
+
+`started`/`completed`/`error`/`decode_error`/`fatal`/`undo` frames are delivered only to clients whose selectors cover the frame's `network` (a `*@…` wildcard matches every network). The `dropped` frame stays connection-wide (it can't be attributed to one network — the outbound buffer is shared across a connection's channels).
+
+Rejected: broadcasting every lifecycle frame to every connected client regardless of subscription (the original behavior).
+
+Why: a client subscribed to `polymarket@*` would otherwise see `error`/`fatal` noise from every other configured network (e.g. an unrelated `hyperliquid` stream hitting the decode cap), which is confusing and forces client-side filtering. Frames are per-network, so scoping by the selector the client already supplied is the natural boundary. Provenance fields (`package_name`, `package_version`, `module_hash`) still let clients route per-package within a network.
+
 ## Single binary + inline YAML/TOML for PaaS
 
 `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` (or `_TOML`) env var wins over the file path.

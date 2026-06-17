@@ -1816,6 +1816,13 @@ impl StreamId {
         self.network.as_deref().map_or(true, |n| n == network)
             && self.stream.as_deref().map_or(true, |s| s == stream)
     }
+
+    /// Network-only match, ignoring the stream/table side. Used to scope
+    /// connection-wide lifecycle frames (which are per-network, not
+    /// per-table) to clients subscribed to that network.
+    fn matches_network(&self, network: &str) -> bool {
+        self.network.as_deref().map_or(true, |n| n == network)
+    }
 }
 
 /// Per-client subscription set. Empty = match nothing.
@@ -1835,6 +1842,11 @@ struct StreamFilter {
 impl StreamFilter {
     fn matches(&self, network: &str, stream: &str) -> bool {
         self.entries.iter().any(|e| e.matches(network, stream))
+    }
+
+    /// Whether any subscription selector covers this network (any table).
+    fn matches_network(&self, network: &str) -> bool {
+        self.entries.iter().any(|e| e.matches_network(network))
     }
 
     fn list(&self) -> Vec<String> {
@@ -2050,11 +2062,12 @@ impl ClientRegistry {
     }
 
     /// True if any connected client could be subscribed to this stream. Used to
-    /// skip the decode/serialize hot-path when nobody is listening (and replay
-    /// is off). Biased to over-report so we never skip a stream that has a live
-    /// subscriber: in discover mode (`tables` empty) the emitted tables aren't
-    /// known ahead of decode, so any network match counts; a wildcard
-    /// subscription (`*@*`, `network@*`) likewise matches.
+    /// skip the decode/fan-out hot-path when nobody is listening (the feed is
+    /// live-only, so an unsubscribed block has nowhere to go). Biased to
+    /// over-report so we never skip a stream that has a live subscriber: in
+    /// discover mode (`tables` empty) the emitted tables aren't known ahead of
+    /// decode, so any network match counts; a wildcard subscription (`*@*`,
+    /// `network@*`) likewise matches.
     async fn has_subscribers(&self, network: &str, tables: &[String]) -> bool {
         let clients = self.clients.read().await;
         for client in clients.values() {
@@ -2074,13 +2087,23 @@ impl ClientRegistry {
         false
     }
 
-    /// Lifecycle messages (`started`, `error`, `completed`, `decode_error`,
-    /// `fatal`, `undo`, `gap`) are delivered to **every** connected client
-    /// regardless of stream subscription. They carry spkg provenance
-    /// (`package_name`, `package_version`, `module_hash`) so clients can
-    /// route on their own. Per-connection envelope wrapping is respected.
+    /// Lifecycle messages (`started`, `error`, `decode_error`, `completed`,
+    /// `fatal`, `undo`) are delivered only to clients whose subscription
+    /// covers the frame's `network` (a `*@…` wildcard matches every network).
+    /// They carry spkg provenance (`package_name`, `package_version`,
+    /// `module_hash`) so clients can route per-package within a network.
+    /// Per-connection envelope wrapping is respected. (The `dropped` frame is
+    /// emitted per-client elsewhere, not here.)
     async fn broadcast_lifecycle(&self, value: serde_json::Value) -> usize {
         let raw_text = value.to_string();
+        let network = value
+            .get("network")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        // Selector for wrap-envelope mode. A frame with no network (purely
+        // defensive — all current frames carry one) wraps under `*` so the
+        // emitted selector stays syntactically valid.
+        let wrap_network = if network.is_empty() { "*" } else { network };
         let mut slow_to_close: Vec<ClientId> = Vec::new();
         let mut delivered: usize = 0;
         let limit = self.slow_client_drop_limit();
@@ -2088,12 +2111,14 @@ impl ClientRegistry {
             let clients = self.clients.read().await;
             for (client_id, client) in clients.iter() {
                 let filter = client.filter.read().await;
+                // Lifecycle frames are per-network; only deliver to clients
+                // subscribed to that network. A frame with no network (purely
+                // defensive) goes to everyone.
+                if !network.is_empty() && !filter.matches_network(network) {
+                    continue;
+                }
                 let text = if filter.wrap_envelope {
-                    let network = value
-                        .get("network")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("");
-                    format!(r#"{{"stream":"{network}@__lifecycle__","data":{raw_text}}}"#)
+                    format!(r#"{{"stream":"{wrap_network}@__lifecycle__","data":{raw_text}}}"#)
                 } else {
                     raw_text.clone()
                 };
@@ -3984,6 +4009,53 @@ mod tests {
         assert_eq!(v["data"]["count"], 5);
         assert_eq!(v["data"]["last_block"], 42);
         assert_eq!(v["data"]["last_timestamp"], 1_778_770_800i64);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_frames_scoped_to_subscribed_network() {
+        // A client subscribed only to `polymarket@*` must not receive
+        // lifecycle frames for an unrelated `hyperliquid` stream.
+        let registry = super::ClientRegistry::default();
+
+        let mut poly_filter = StreamFilter::default();
+        poly_filter.add(super::StreamId::parse("polymarket@*").unwrap());
+        let (poly, mut poly_rx) = handle_with_channel(8, 0);
+        *poly.filter.write().await = poly_filter;
+
+        let mut wild_filter = StreamFilter::default();
+        wild_filter.add(super::StreamId::parse("*@*").unwrap());
+        let (wild, mut wild_rx) = handle_with_channel(8, 0);
+        *wild.filter.write().await = wild_filter;
+
+        {
+            let mut clients = registry.clients.write().await;
+            clients.insert(1, poly);
+            clients.insert(2, wild);
+        }
+
+        let delivered = registry
+            .broadcast_lifecycle(serde_json::json!({
+                "type": "stream",
+                "status": "error",
+                "network": "hyperliquid",
+                "message": "size limit exceeded",
+            }))
+            .await;
+
+        // Only the wildcard subscriber gets it.
+        assert_eq!(delivered, 1, "only the network-matching client is served");
+        assert!(
+            poly_rx.try_recv().is_err(),
+            "polymarket-only client must not see hyperliquid lifecycle frame"
+        );
+        let msg = wild_rx.try_recv().expect("wildcard client receives frame");
+        let text = match msg {
+            axum::extract::ws::Message::Text(t) => t.to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["network"], "hyperliquid");
     }
 
     struct TestServer {
