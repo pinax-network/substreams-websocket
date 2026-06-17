@@ -10,7 +10,6 @@ Reference material that is **not** loaded at runtime or compile time. Audience: 
 | [`substreams.md`](substreams.md) | Substreams concepts, DatabaseChanges proto, module hash algorithm |
 | [`auth.md`](auth.md) | Pinax JWT exchange and alternative auth modes |
 | [`cursors-and-resume.md`](cursors-and-resume.md) | Cursor persistence semantics and what "exact resume" means here |
-| [`replay.md`](replay.md) | Per-spkg JSONL replay log for client reconnects (`?from_timestamp=<n>`) |
 | [`filters.md`](filters.md) | Per-subscription event filters (`?filter=`, `SET_FILTER`, `CLEAR_FILTER`, `LIST_FILTERS`) |
 | [`graceful-shutdown.md`](graceful-shutdown.md) | SIGTERM drain protocol — clean `Close` to every client before exit |
 | [`backpressure.md`](backpressure.md) | Per-client backpressure handling — `try_send`, drop counters, force-close on `Close(1013)` |

@@ -66,6 +66,14 @@ Rejected: per-token allowlists, JWT verification, IP allowlists in-process.
 
 Why: this server is a fan-out, not a security boundary. Auth belongs in front (Cloudflare Access, nginx auth_request, Tailscale). Bolting auth in here would either duplicate the upstream's model badly or constrain operators who already have a reverse proxy.
 
+## Live-only WebSocket; Substreams is the backfill path (0.6.0)
+
+The WebSocket is a live convenience feed. There is no on-disk replay log, and `?from_timestamp=` / `?from_block=` are rejected at the upgrade with HTTP 400 pointing the client at Substreams.
+
+Rejected: the per-spkg JSONL replay log (retained a recent time window per spkg, served reconnecting clients via `?from_timestamp=` / `?from_block=`, emitted a `gap` lifecycle frame on a window miss). It was added earlier and is now removed.
+
+Why: the API/Substreams tiers already run a few blocks behind head, so the WebSocket's only job is the live edge. Historical backfill belongs in Substreams, which resumes from any block, cursor, or timestamp and does per-block/timestamp replay far better than a per-spkg on-disk log ever could. The replay log also cost a disk write on every block, which hurt fan-out throughput, and time-indexed replay is non-standard for market-data WebSockets anyway — Binance (whose URL conventions we mirror) has no replay either, so dropping it aligns us with that model. The persisted **cursor** (server-side resume-on-restart) is unrelated and stays.
+
 ## Lifecycle frames scoped to the subscribed network
 
 `started`/`completed`/`error`/`decode_error`/`fatal`/`undo` frames are delivered only to clients whose selectors cover the frame's `network` (a `*@…` wildcard matches every network). The `dropped` frame stays connection-wide (it can't be attributed to one network — the outbound buffer is shared across a connection's channels).

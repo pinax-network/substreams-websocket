@@ -146,9 +146,8 @@ pub enum StreamEvent {
         number: u64,
         id: String,
         timestamp: String,
-        /// Unix epoch seconds of the block timestamp. Used as the
-        /// chain-agnostic resume key for `?from_timestamp=` and for the
-        /// per-stream replay log's time-windowed retention.
+        /// Unix epoch seconds of the block timestamp. Machine-friendly
+        /// companion to `timestamp`, surfaced for client-side head drift.
         timestamp_seconds: i64,
         output_type_url: String,
         payload: Vec<u8>,

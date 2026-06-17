@@ -33,20 +33,19 @@ The `lib.rs` re-exports a small public surface; everything wires together in `sr
 ### Module map
 
 - `src/main.rs` — Clap CLI + env mapping. Builds `Config` from `streams.yaml` (or inline `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` env var, which wins; TOML equivalents also supported) and per-stream defaults. Two subcommands: `serve`, `stream`.
-- `src/config.rs` — `Config`, `StreamConfig`, `SubstreamsConfig`, `WebSocketConfig`, `ReplayConfig`. Pure data + `Config::validate()`. Validation rejects duplicate `(network, manifest, module)` triples.
+- `src/config.rs` — `Config`, `StreamConfig`, `SubstreamsConfig`, `WebSocketConfig`. Pure data + `Config::validate()`. Validation rejects duplicate `(network, manifest, module)` triples.
 - `src/substreams.rs` — gRPC client. JWT exchange (`api_key → bearer`), HTTP/2 + TCP keepalive tuning, 64 MiB decode cap, package loading from local path or HTTPS, `StreamEvent` enum.
-- `src/module_hash.rs` — Canonical Substreams module-hash computation (matches `substreams info` output). Identity key for cursor + replay files.
+- `src/module_hash.rs` — Canonical Substreams module-hash computation (matches `substreams info` output). Identity key for cursor files.
 - `src/decoder.rs` — Decodes `DatabaseChanges` → `DatabaseChangesBlockMessage`. Each row carries an `@table` field; block-level meta (`block_num`, `block_hash`, `timestamp`, `minute`) is hoisted to the envelope and stripped from rows.
 - `src/event_filter.rs` — Server-side row filtering by client-supplied `key=value` constraints (capped by `MAX_FILTER_FIELDS` / `MAX_FILTER_VALUES`).
 - `src/cursor.rs` — Persistent cursor store. Files: `cursors/<network>-<package_name>@<package_version>-<module_hash>.cursor`. Atomic write via tmp + rename, no fsync.
-- `src/replay.rs` — JSONL per-spkg replay log for client reconnect (`?from_timestamp=`). Append-only, lazy trim by `timestamp_seconds` window.
-- `src/server.rs` — Axum routes, per-client mpsc fan-out, subscription bookkeeping, graceful shutdown. Routes mirror Binance: `/ws/<network>@<table>/...`, `/stream?streams=<a>/<b>`, plus `/SKILL.md`, `/llms.txt`, `/streams`, `/healthz`, landing page.
+- `src/server.rs` — Axum routes, per-client mpsc fan-out, subscription bookkeeping, graceful shutdown. The feed is live-only: `?from_timestamp=` / `?from_block=` are rejected with HTTP 400 at upgrade (clients backfill via Substreams). Routes mirror Binance: `/ws/<network>@<table>/...`, `/stream?streams=<a>/<b>`, plus `/SKILL.md`, `/llms.txt`, `/streams`, `/healthz`, landing page.
 - `build.rs` — Imports Substreams + DatabaseChanges proto definitions from buf.build (pinned commits in `BUF_MODULES`) and compiles them with `tonic-prost-build`.
 - `public/` — Served at runtime: `index.html` (landing), `SKILL.md` (on-wire message reference — the canonical client contract), `llms.txt`, `favicon.png`.
 
 ### Stream identity, not stream names
 
-There is no operator-supplied stream name. Identity is derived from the loaded `.spkg`'s `Package.package_meta[0]` (`name`, `version`) plus the canonical `module_hash`. A missing `package_meta` fails fast at startup. This anchors cursor and replay filenames to the spkg, so renaming a TOML entry has no effect and upgrading a spkg writes to a fresh file.
+There is no operator-supplied stream name. Identity is derived from the loaded `.spkg`'s `Package.package_meta[0]` (`name`, `version`) plus the canonical `module_hash`. A missing `package_meta` fails fast at startup. This anchors cursor filenames to the spkg, so renaming a TOML entry has no effect and upgrading a spkg writes to a fresh file.
 
 Clients subscribe by `<network>@<table>` where `<table>` is the DatabaseChanges table emitted by `db_out` — not by anything in `streams.yaml`.
 
@@ -54,7 +53,7 @@ Clients subscribe by `<network>@<table>` where `<table>` is the DatabaseChanges 
 
 1. `prepare_streams` loads each `.spkg` in parallel, computes `module_hash`, builds `StreamMeta` for the welcome message. A failed load is recorded but does not abort the server — the per-stream task surfaces the error to clients.
 2. `spawn_streams` launches one tokio task per stream that connects via `SubstreamsClient`, resumes from the persisted cursor, and pushes each `StreamEvent::Block` through `decode_database_changes`.
-3. The decoder yields a `DatabaseChangesBlockMessage`. The server groups rows by `@table`, applies per-client filters, appends the unrouted block to the replay log, then `try_send`s to each subscribed client's mpsc buffer.
+3. The decoder yields a `DatabaseChangesBlockMessage`. The server groups rows by `@table`, applies per-client filters, then `try_send`s to each subscribed client's mpsc buffer. The feed is live-only — there is no replay log. Blocks for a stream with no subscribers are skipped (decode/fan-out) for efficiency and counted in `substreams_websocket_blocks_skipped_total`.
 4. The cursor file is rewritten on every block and undo signal.
 5. Reorgs (`StreamEvent::Undo`) broadcast an `undo` envelope — clients roll back their own state; the server never re-emits the undone blocks.
 
@@ -86,7 +85,6 @@ On SIGTERM/SIGINT: `/healthz` flips to 503 so a reverse proxy can drain new conn
 - `docs/auth.md` — three auth modes (api-key→JWT, raw bearer, header passthrough).
 - `docs/backpressure.md` — slow-client drop semantics.
 - `docs/cursors-and-resume.md` — file naming, atomic writes, what "exact resume" actually means.
-- `docs/replay.md` — JSONL replay log format and `?from_timestamp=` reconnect protocol.
 - `docs/filters.md` — client-supplied event filters.
 - `docs/graceful-shutdown.md` — the drain sequence above, in more detail.
 - `docs/envoy.md`, `docs/railway.md` — reverse proxy + PaaS deployment recipes.

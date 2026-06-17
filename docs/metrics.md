@@ -30,7 +30,8 @@ All metrics are namespaced `substreams_websocket_*`. Naming follows Prometheus c
 | `substreams_websocket_broadcast_delivered_total` | counter | `network`, `table` | Successful `try_send` calls. |
 | `substreams_websocket_broadcast_dropped_total` | counter | `network`, `table` | Failed `try_send` calls (saturated outbound). |
 | `substreams_websocket_broadcast_filtered_skipped_total` | counter | `network`, `table` | Broadcasts skipped because a client's filter dropped every event. |
-| `substreams_websocket_lifecycle_broadcasts_total` | counter | `status` | Lifecycle messages dispatched: `started`, `error`, `completed`, `fatal`, `decode_error`, `undo`, `gap`. |
+| `substreams_websocket_lifecycle_broadcasts_total` | counter | `status` | Lifecycle messages dispatched: `started`, `error`, `completed`, `fatal`, `decode_error`, `undo`. |
+| `substreams_websocket_blocks_skipped_total` | counter | `network`, `package_name`, `package_version` | Blocks whose decode/fan-out was skipped because the stream had no subscribers (the feed is live-only, so an unsubscribed block has nowhere to go). |
 
 ## Substreams reader
 
@@ -42,15 +43,6 @@ All metrics are namespaced `substreams_websocket_*`. Naming follows Prometheus c
 | `substreams_websocket_substreams_undo_total` | counter | `network`, `package_name`, `package_version` | `BlockUndoSignal` events. |
 | `substreams_websocket_head_block_number` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Latest block number observed per stream-table. `stream` is the Binance-style `<network>@<table>` selector. Updated on every successful decode for each operator-declared table (falls back to tables seen in the block when none are declared). |
 | `substreams_websocket_head_block_time_drift` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Lag (`now - block_timestamp`) in seconds for the latest block, same labels as `head_block_number`. Sub-second precision (block timestamp is integer seconds, but `now` is `f64`). Can go **negative** if a block's timestamp is ahead of this server's clock — a signal of clock skew between producer and consumer; not clamped. Useful for alerting on stalled / backfilling streams (`drift > X`) or time-sync issues (`drift < -X`). |
-
-## Replay log
-
-| Metric | Type | Labels | Notes |
-|---|---|---|---|
-| `substreams_websocket_replay_appends_total` | counter | `network`, `package_name`, `package_version`, `outcome` | `outcome`: `success` / `error`. |
-| `substreams_websocket_replay_append_bytes_total` | counter | `network`, `package_name`, `package_version` | Bytes appended to the replay log post-serialization. |
-| `substreams_websocket_replay_reads_total` | counter | `network`, `table`, `outcome` | `outcome`: `replayed` / `empty` / `gap`. |
-| `substreams_websocket_replay_blocks_delivered_total` | counter | `network`, `table` | Block payloads delivered via replay. |
 
 ## Shutdown
 
@@ -68,7 +60,7 @@ Label sets are kept small on purpose:
 - `client_id` is **not** a label — would blow up on a busy server.
 - The head-block gauges carry `spkg` (manifest path) and `endpoint` so operators can group by upstream source. These stay bounded by the number of configured streams.
 
-Outcome-style labels (`success`, `error`, `gap`, `transient`, ...) stay finite per metric.
+Outcome-style labels (`success`, `error`, `transient`, ...) stay finite per metric.
 
 ## Scrape config
 
@@ -98,8 +90,8 @@ rate(substreams_websocket_broadcast_dropped_total[5m])
 # Substreams reconnect rate (alert on > 0.1/min)
 rate(substreams_websocket_substreams_reconnects_total[5m])
 
-# Replay gap signal (clients reconnecting outside the window)
-rate(substreams_websocket_replay_reads_total{outcome="gap"}[5m])
+# Blocks skipped for lack of subscribers (live-only feed)
+rate(substreams_websocket_blocks_skipped_total[5m])
 
 # p99 connection lifetime
 histogram_quantile(0.99, sum by (le) (rate(substreams_websocket_connection_duration_seconds_bucket[10m])))

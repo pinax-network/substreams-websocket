@@ -11,7 +11,6 @@ pub struct Config {
     pub streams: Vec<StreamConfig>,
     pub websocket: WebSocketConfig,
     pub cursors_dir: std::path::PathBuf,
-    pub replay: ReplayConfig,
     /// Max age (seconds) of a persisted cursor before it is ignored on
     /// startup. A cursor file whose last-modified time is older than this is
     /// treated as stale: the stream starts from the configured `start_block`
@@ -20,16 +19,6 @@ pub struct Config {
     /// server has been down a while. `0` disables the check (always resume
     /// from the cursor, however old).
     pub cursor_max_age_secs: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReplayConfig {
-    /// Time window (seconds) retained per spkg as JSONL on disk. The trim
-    /// keeps every block whose `timestamp_seconds` is within
-    /// `[newest_seen - max_seconds, newest_seen]`. Default 3600s (1 hour).
-    /// `0` disables the replay log entirely.
-    pub max_seconds: u64,
-    pub dir: std::path::PathBuf,
 }
 
 /// One Substreams source the server reads from. Identity is derived from the
@@ -45,8 +34,8 @@ pub struct StreamConfig {
     /// channels without waiting for a block to land.
     ///
     /// Doubles as a per-stream allowlist: when non-empty, only rows whose
-    /// `@table` is declared here are broadcast or written to the replay log —
-    /// any other table the spkg emits is dropped as noise. Optional — empty
+    /// `@table` is declared here are broadcast — any other table the spkg
+    /// emits is dropped as noise. Optional — empty
     /// means "tables are discovered at runtime from event `@table` fields" and
     /// every emitted table passes through unfiltered.
     pub tables: Vec<String>,
@@ -279,10 +268,6 @@ mod tests {
             streams,
             websocket: websocket(),
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
-            replay: ReplayConfig {
-                max_seconds: 0,
-                dir: std::path::PathBuf::from("/tmp/replay-test"),
-            },
             cursor_max_age_secs: 0,
         }
     }

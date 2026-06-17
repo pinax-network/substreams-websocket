@@ -12,7 +12,7 @@ Operational notes for running this server behind [Envoy](https://www.envoyproxy.
 
 - **WebSocket upgrade.** Envoy proxies `Connection: Upgrade` + `Upgrade: websocket` transparently when the HTTP filter has `upgrade_configs: [{ upgrade_type: websocket }]`. The server's `/ws/<...>` and `/stream` routes work unchanged.
 - **`Close` frame propagation.** Envoy forwards WS Close frames in both directions. The graceful-shutdown `Close(1001, "server shutting down")` reaches downstream clients verbatim.
-- **`?from_timestamp=<n>` resume.** Query string is preserved through the proxy.
+- **Query strings (e.g. `?filter=`).** Preserved through the proxy.
 - **`/metrics` Prometheus scrape.** Plain HTTP GET, served on the same listener. Route Envoy normally; no upgrade headers needed.
 
 ## What needs Envoy-side config
@@ -92,7 +92,7 @@ End-to-end sequence for a Railway-style rolling redeploy with Envoy in front:
 6. Old backend's `drain` step sends `Close(1001)` to existing clients. Clients receive a clean close (Envoy passes it through), reconnect to Envoy, get routed to new backend.
 7. Old backend exits after drain timeout or when registry empties.
 
-End-to-end client experience: one `Close(1001)` event, immediate reconnect, replay log (see [`replay.md`](replay.md)) fills the gap, application layer sees a 1–2s pause.
+End-to-end client experience: one `Close(1001)` event, immediate reconnect, application layer sees a 1–2s pause. The feed is live-only, so any blocks produced during that pause are missed — backfill the gap via Substreams if the application can't tolerate it.
 
 ## What does not work transparently
 

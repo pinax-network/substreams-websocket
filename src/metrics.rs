@@ -150,28 +150,11 @@ fn describe() {
          stream-table. Labelled by stream/network/table/spkg/endpoint."
     );
 
-    // ---- Replay log -------------------------------------------------------
+    // ---- Block hot-path ---------------------------------------------------
     describe_counter!(
-        "substreams_websocket_replay_appends_total",
-        "Block payloads appended to the on-disk replay log."
-    );
-    describe_counter!(
-        "substreams_websocket_replay_append_bytes_total",
-        Unit::Bytes,
-        "Bytes appended to the replay log (post-serialization)."
-    );
-    describe_counter!(
-        "substreams_websocket_replay_trims_total",
-        "Lazy trim rewrites of the replay log."
-    );
-    describe_counter!(
-        "substreams_websocket_replay_reads_total",
-        "Replay scans triggered by `?from_timestamp=` reconnects, labelled by \
-         outcome (replayed | empty | gap)."
-    );
-    describe_counter!(
-        "substreams_websocket_replay_blocks_delivered_total",
-        "Block payloads delivered to clients from the replay log."
+        "substreams_websocket_blocks_skipped_total",
+        "Blocks whose decode/serialize/fan-out was skipped because the stream \
+         had no subscribers (the feed is live-only)."
     );
 
     // ---- Cursor store -----------------------------------------------------

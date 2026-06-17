@@ -30,9 +30,9 @@ On restart:
 2. Send `Blocks` request with `start_cursor = C`.
 3. Upstream replays from the block **after** `C`, not from `C` itself.
 
-So on the WebSocket side, clients connecting *during the gap* see no events; clients connecting *after resume* see the new blocks land in order. There is no in-memory replay buffer — if a client was disconnected when block N was fanned out, block N is lost to that client.
+So on the WebSocket side, clients connecting *during the gap* see no events; clients connecting *after resume* see the new blocks land in order. The cursor is purely server-side resume-on-restart — it is never exposed to clients. The WebSocket feed is live-only: there is no buffer of past blocks for clients, so if a client was disconnected when block N was fanned out, block N is lost to that client.
 
-If you need historical replay, point a fresh consumer at the gRPC endpoint directly with `start_block_num`.
+If you need historical data, point a fresh consumer at Substreams directly with `start_block_num` (or a cursor/timestamp). Backfill belongs in Substreams, not the WebSocket feed.
 
 ## Reorg handling
 
