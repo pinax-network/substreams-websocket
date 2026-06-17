@@ -1058,7 +1058,7 @@
 
   <section id="set-filter">
     <h2>SET_FILTER</h2>
-    <p>Drop non-matching events from the wire for the given selector. <code>params[1]</code> is an <strong>SQE expression string</strong> (the same language as Firehose <code>substreams run -t</code>): <code>field:value</code> string equality (exact, case-sensitive), bare <code>value</code> matches any column, combined with <code>||</code> (OR), <code>&amp;&amp;</code> / whitespace (AND), <code>!</code> (NOT), and <code>( )</code> grouping. Missing field on an event is a miss. Wildcard selectors are accepted and applied to every matching channel. <code>SET_FILTER</code> <strong>replaces</strong> the filter for that selector (not accumulate — combine with <code>||</code> in one expression) — read the <code>{"result"|"error"}</code> reply, and use <code>LIST_FILTERS</code> to confirm one is active.</p>
+    <p>Drop non-matching events from the wire for the given selector. <code>params[1]</code> is an <strong>SQE expression string</strong> (the same language as Firehose <code>substreams run -t</code>): <code>field:value</code> string equality (case-insensitive), bare <code>value</code> matches any column, combined with <code>||</code> (OR), <code>&amp;&amp;</code> / whitespace (AND), <code>!</code> (NOT), and <code>( )</code> grouping. Missing field on an event is a miss. Wildcard selectors are accepted and applied to every matching channel. <code>SET_FILTER</code> <strong>replaces</strong> the filter for that selector (not accumulate — combine with <code>||</code> in one expression) — read the <code>{"result"|"error"}</code> reply, and use <code>LIST_FILTERS</code> to confirm one is active.</p>
 <pre>// request
 { "method": "SET_FILTER",
   "params": ["solana-mainnet@swaps", "protocol:raydium_cpmm && user:F2MUE…"],
@@ -1100,7 +1100,7 @@
 ws://host/ws/solana-mainnet@swaps?filter=protocol%3Araydium_cpmm</pre>
     <p>Semantics:</p>
     <ul>
-      <li><strong><code>field:value</code> — string equality only.</strong> Exact, case-sensitive. No regex, range, substring.</li>
+      <li><strong><code>field:value</code> — string equality only.</strong> ASCII-case-insensitive (checksummed or lowercase EVM both match). No regex, range, substring.</li>
       <li><strong>bare <code>value</code> (no <code>field:</code>).</strong> Matches when <em>any</em> string column of the event equals it (e.g. <code>0xWALLET</code>).</li>
       <li><strong>Operators.</strong> <code>||</code> (OR), <code>&amp;&amp;</code> or whitespace (AND), <code>!</code> (NOT), <code>( )</code> grouping; <code>&amp;&amp;</code> binds tighter than <code>||</code>. Quote values containing spaces or <code>( ) | &amp; ' "</code> using <code>'…'</code> or <code>"…"</code>.</li>
       <li><strong>OR across columns works.</strong> A wallet that may appear in any of several columns (e.g. <code>tx_from</code>, <code>maker</code>, or <code>taker</code>) is expressible: <code>tx_from:0xW || maker:0xW || taker:0xW</code>, or just the bare term <code>0xW</code>.</li>

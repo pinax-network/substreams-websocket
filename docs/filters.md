@@ -13,7 +13,7 @@ protocol:raydium_cpmm && user:F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8
 ### Grammar
 
 ```
-maker:0xW                          field equals value (exact, case-sensitive)
+maker:0xW                          field equals value (case-insensitive)
 maker:0xW || taker:0xW             OR — wallet as maker OR taker
 protocol:clob && maker:0xW         AND (whitespace also means AND: `protocol:clob maker:0xW`)
 (maker:0xW || taker:0xW) && !amm:0xdead   grouping + negation
@@ -21,7 +21,7 @@ protocol:clob && maker:0xW         AND (whitespace also means AND: `protocol:clo
 "two words"  or  label:'a b'       quote values containing spaces or ( ) | & ' "
 ```
 
-- **`field:value` — string equality only.** Exact and **case-sensitive** on that `events[*]` column — match the on-wire casing of the value (EVM addresses are lowercased on the wire). No regex, no range, no substring.
+- **`field:value` — string equality only.** **ASCII-case-insensitive** on that `events[*]` column, so a checksummed or lowercased EVM address both match (supply the exact value for case-significant data like Solana base58 keys). No regex, no range, no substring.
 - **bare `value` (no `field:`).** Matches when **any** string column of the event equals it (e.g. `0xWALLET`). Great for "this wallet in any role".
 - **Operators:** `||` (OR), `&&` or whitespace (AND), `!` (NOT), `( )` (grouping). `&&` binds tighter than `||`.
 - **Quoting.** Use `'…'` or `"…"` around values containing spaces or `( ) | & ' "`.

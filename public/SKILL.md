@@ -170,7 +170,7 @@ Reduce bandwidth by asking the server to drop non-matching events before deliver
 ### Expression syntax
 
 ```
-maker:0xW                          field equals value (exact, case-sensitive)
+maker:0xW                          field equals value (case-insensitive)
 maker:0xW || taker:0xW             OR — wallet as maker OR taker
 protocol:clob && maker:0xW         AND (whitespace also means AND: `protocol:clob maker:0xW`)
 (maker:0xW || taker:0xW) && !amm:0xdead   grouping + negation
@@ -178,7 +178,7 @@ protocol:clob && maker:0xW         AND (whitespace also means AND: `protocol:clo
 "two words"  or  label:'a b'       quote values containing spaces or ( ) | & ' "
 ```
 
-- `field:value` — exact, **case-sensitive** string equality on that event column (match the on-wire casing; EVM addresses are lowercased on the wire). An event missing `field` is a miss.
+- `field:value` — **ASCII-case-insensitive** string equality on that event column, so a checksummed or lowercased EVM address both match. An event missing `field` is a miss. (Note: case-insensitivity is convenient for hex addresses but relaxes matching for case-significant values like Solana base58 keys — supply the exact value there.)
 - bare `value` (no `field:`) — matches when **any** string column of the event equals it. Great for "this wallet in any role": `0xW1 || 0xW2`.
 - operators: `||` (or), `&&` or whitespace (and), `!` (not), `( )` (grouping). `&&` binds tighter than `||`.
 - only `events[*]` columns are filtered; top-level `block_num` / `network` / `module_hash` are not.
@@ -194,6 +194,8 @@ ws://host/ws/polymarket@ctfexchange_order_filled?filter=maker%3A0xW%20%7C%7C%20t
 // -> { "result": null, "id": 1 }   on accept
 // -> { "error":  "...", "id": 1 }   on reject (previous filter left unchanged)
 ```
+
+**Acks differ by entry point.** A `?filter=`/`?sqe=` expression is validated at the WebSocket upgrade: if it's invalid you get **HTTP 400** and the connection is refused (there is no JSON ack frame — a successful upgrade means it was accepted). A `SET_FILTER` message instead replies with `{"result":null,"id":…}` on accept or `{"error":"…","id":…}` on reject, and the socket stays open either way.
 
 `SET_FILTER` **replaces** the filter for that selector — it does not accumulate, so two `SET_FILTER` for the same selector keep only the last (combine with `||` in one expression instead). `CLEAR_FILTER` removes it. `LIST_FILTERS` returns the active selector→expression map; an empty `{}` means **no filter is active** — use it to confirm one took effect.
 

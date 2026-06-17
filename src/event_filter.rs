@@ -43,9 +43,12 @@ impl Expr {
             Expr::Term {
                 field: Some(field),
                 value,
-            } => event.get(field).and_then(Value::as_str) == Some(value.as_str()),
+            } => event
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(value)),
             Expr::Term { field: None, value } => {
-                bare_values.is_some_and(|vs| vs.iter().any(|v| *v == value))
+                bare_values.is_some_and(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case(value)))
             }
             Expr::Not(inner) => !inner.eval(event, bare_values),
             Expr::And(children) => children.iter().all(|c| c.eval(event, bare_values)),
@@ -87,8 +90,8 @@ impl Expr {
 /// 0xabc                                       bare term: any column == 0xabc
 /// ```
 ///
-/// `field:value` is exact, case-sensitive string equality; a bare `value` (no
-/// field) matches when any string column of the event equals it. Operators:
+/// `field:value` is **ASCII-case-insensitive** string equality; a bare `value`
+/// (no field) matches when any string column of the event equals it. Operators:
 /// `||` (or), `&&` or whitespace (and), `!` (not), `( )` (grouping). Values
 /// containing whitespace or `() | & ' "` must be quoted (`'…'` or `"…"`). An
 /// empty expression matches every event. Events missing a referenced `field`
@@ -495,10 +498,14 @@ mod tests {
     }
 
     #[test]
-    fn field_equality_is_case_sensitive() {
-        let f = parse("tx_from:0xabc");
+    fn field_equality_is_ascii_case_insensitive() {
+        // EVM addresses are lowercase on the wire; a checksummed query still
+        // matches so users don't have to normalize casing.
+        let f = parse("tx_from:0xABC");
         assert!(f.matches_event(&event(&[("tx_from", "0xabc")])));
-        assert!(!f.matches_event(&event(&[("tx_from", "0xABC")])));
+        assert!(f.matches_event(&event(&[("tx_from", "0xABC")])));
+        // Bare terms are case-insensitive too.
+        assert!(parse("0xDEAD").matches_event(&event(&[("maker", "0xdead")])));
     }
 
     #[test]
