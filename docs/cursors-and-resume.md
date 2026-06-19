@@ -36,7 +36,7 @@ If you need historical data, point a fresh consumer at Substreams directly with 
 
 ## Reorg handling
 
-`BlockUndoSignal` carries `last_valid_cursor`. We persist that cursor and broadcast an `undo` envelope (see [`public/SKILL.md`](../public/SKILL.md)) so subscribed clients can roll back their local state. We never replay the undone blocks ourselves — that is the client's job using the original block deliveries.
+`BlockUndoSignal` carries `last_valid_cursor`. We persist that cursor and broadcast an `undo` envelope (see [`skills/substreams-websocket/SKILL.md`](../skills/substreams-websocket/SKILL.md)) so subscribed clients can roll back their local state. We never replay the undone blocks ourselves — that is the client's job using the original block deliveries.
 
 ## Operational notes
 

@@ -228,7 +228,7 @@ async fn metrics_endpoint() -> impl IntoResponse {
 }
 
 const LANDING_HTML: &str = include_str!("../public/index.html");
-const SKILL_MD: &str = include_str!("../public/SKILL.md");
+const SKILL_MD: &str = include_str!("../skills/substreams-websocket/SKILL.md");
 const LLMS_TXT: &str = include_str!("../public/llms.txt");
 const FAVICON_PNG: &[u8] = include_bytes!("../public/favicon.png");
 
