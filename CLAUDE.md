@@ -41,7 +41,8 @@ The `lib.rs` re-exports a small public surface; everything wires together in `sr
 - `src/cursor.rs` — Persistent cursor store. Files: `cursors/<network>-<package_name>@<package_version>-<module_hash>.cursor`. Atomic write via tmp + rename, no fsync.
 - `src/server.rs` — Axum routes, per-client mpsc fan-out, subscription bookkeeping, graceful shutdown. The feed is live-only: `?from_timestamp=` / `?from_block=` are rejected with HTTP 400 at upgrade (clients backfill via Substreams). Routes mirror Binance: `/ws/<network>@<table>/...`, `/stream?streams=<a>/<b>`, plus `/SKILL.md`, `/llms.txt`, `/streams`, `/healthz`, landing page.
 - `build.rs` — Imports Substreams + DatabaseChanges proto definitions from buf.build (pinned commits in `BUF_MODULES`) and compiles them with `tonic-prost-build`.
-- `public/` — Served at runtime: `index.html` (landing), `SKILL.md` (on-wire message reference — the canonical client contract), `llms.txt`, `favicon.png`.
+- `public/` — Served at runtime: `index.html` (landing), `llms.txt`, `favicon.png`.
+- `skills/substreams-websocket/SKILL.md` — The on-wire message reference (the canonical client contract) **and** an installable Agent Skill (it carries YAML frontmatter). Compiled into the binary via `include_str!` and served at `GET /SKILL.md`. This is the single source of truth — there is no `public/SKILL.md`.
 
 ### Stream identity, not stream names
 
@@ -76,7 +77,7 @@ On SIGTERM/SIGINT: `/healthz` flips to 503 so a reverse proxy can drain new conn
 
 ## Things to know before changing client-facing JSON
 
-`public/SKILL.md` is the on-wire contract (session message, block envelope, undo envelope, command envelope, error shapes). It is served at `GET /SKILL.md` at runtime and is what clients read. Any change to broadcast or response JSON requires updating this file — and probably `docs/binance-websocket.md` if you change URL or command conventions.
+`skills/substreams-websocket/SKILL.md` is the on-wire contract (session message, block envelope, undo envelope, command envelope, error shapes). It is served at `GET /SKILL.md` at runtime and is what clients read. It also carries Agent Skills YAML frontmatter (`name`, `description`) so it is an installable skill — keep the frontmatter valid when editing. Any change to broadcast or response JSON requires updating this file — and probably `docs/binance-websocket.md` if you change URL or command conventions.
 
 ## Extended documentation
 

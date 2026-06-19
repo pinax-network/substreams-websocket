@@ -1,3 +1,11 @@
+---
+name: substreams-websocket
+description: Connect to and consume a substreams-websocket fan-out server — a Substreams-to-WebSocket bridge that broadcasts decoded `sf.substreams.sink.database.v1.DatabaseChanges` blocks as JSON. Use when subscribing to real-time blockchain table data (swaps, transfers, balances, etc.) over WebSocket via `<network>@<table>` selectors, applying server-side SQE event filters, or handling reconnects, chain reorgs, and slow-client backpressure for such a feed.
+license: MIT
+metadata:
+  source: https://github.com/pinax-network/substreams-websocket
+---
+
 # substreams-websocket — agent guide
 
 This is a Substreams-to-WebSocket fan-out server. It runs one or more `db_out`-style Substreams packages and broadcasts decoded `sf.substreams.sink.database.v1.DatabaseChanges` block payloads as JSON over WebSocket.
@@ -211,9 +219,13 @@ The query parameters `?from_timestamp=` and `?from_block=` are **not supported**
 
 Cursor handling stays internal to the server: on restart each stream resumes from its persisted cursor so the live feed continues without operator action. That cursor is not exposed to clients and is unrelated to client reconnects.
 
-## Heartbeats
+## Heartbeats and connection limits
 
 The server sends WebSocket ping frames every `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` (default 180s). Standard WebSocket clients pong automatically. The server closes connections that don't pong within `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` (default 600s).
+
+The operator may also set `SUBSTREAMS_WEBSOCKET_CONNECTION_TTL_SECS` (off by default): when configured, every connection is closed once it reaches that age regardless of activity, so build in automatic reconnect-with-backoff and never treat a clean close as the end of the stream.
+
+The server accepts at most `SUBSTREAMS_WEBSOCKET_MAX_CLIENTS` concurrent connections. Once full, the WebSocket upgrade is refused with **HTTP 503** — back off and retry rather than hammering the endpoint.
 
 ## Discovery endpoints
 
@@ -222,15 +234,19 @@ Before opening a WebSocket, you can probe the server over plain HTTP:
 - `GET /healthz` — `200 ok` if the server is live, `503` if it is draining.
 - `GET /streams` — JSON listing of every configured `(network, package_name, package_version, module_hash, tables)`. Use this to confirm your target `network@table` exists before you connect.
 - `GET /openapi` (also `/openapi.json`) — OpenAPI 3.1 document describing every HTTP GET route. Paths reflect the runtime config.
+- `GET /SKILL.md` — this document (served as `text/markdown`). Fetch it at runtime to learn the live on-wire contract; it doubles as an installable Agent Skill (it carries the frontmatter above).
+- `GET /llms.txt` — condensed plaintext summary for LLM context windows.
 - `GET /` — interactive browser client (Scalar-style reference + try-it panel).
 
 Or just connect to `wss://<host>/ws/*@*` and read the `session` message — it advertises every available stream and its tables.
 
 ## Client-side troubleshooting
 
+- `HTTP 503` on the WebSocket upgrade — either the server is at `max_clients` capacity or it is draining for shutdown (`/healthz` returns `503` too). Back off and retry.
 - `ModuleNotFoundError: No module named 'websockets'` — install the Python `websockets` package (add to `requirements.txt`, `pyproject.toml`, etc.).
 - `TypeError: ... unexpected keyword argument ...` on connect — your WebSocket library renamed a kwarg between versions (e.g. `extra_headers` vs `additional_headers` in Python `websockets`). Match the kwarg to the installed version.
 - Silent disconnects or close code `1009` (`message too big`) on busy chains (Solana especially) — raise your client's max frame/message size to at least `32 MiB` (Python: `max_size=32 * 1024 * 1024`).
+- Close code `1013` (`slow client backpressure`) — you fell behind and the server force-closed you; drain the socket faster or run a server-to-server consumer. See the `dropped` lifecycle frame above.
 - Socket opens but no payloads — re-check your selector (`<network>@<table>`), confirm the table exists in `/streams` or `session.streams[].tables`.
 - Stream lifecycle frames with `"status":"error"` or `"status":"fatal"` carry upstream errors — surface `message` to the user and reconnect to resume the live stream.
 
@@ -265,6 +281,14 @@ wss://<host>/ws/*@swaps
 2. Receive welcome → inspect `streams[]` to see what's available
 3. Send LIST_SUBSCRIPTIONS to confirm current set
 4. Send UNSUBSCRIBE / SUBSCRIBE to narrow
+```
+
+### "Watch one wallet across every role and chain"
+
+```
+1. Connect to wss://<host>/ws/*@* (or a narrower selector)
+2. SET_FILTER ["*@*", "0xWALLET"]   // bare term matches the wallet in any column
+3. LIST_FILTERS to confirm it took effect
 ```
 
 ### "Detect spkg upgrades"
