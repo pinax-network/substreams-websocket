@@ -9,7 +9,7 @@ Stream decoded Substreams `DatabaseChanges` block outputs over a single WebSocke
 - **Prometheus metrics** on `/metrics` covering connections, broadcasts, Substreams reader.
 - **Prebuilt tarballs** for Linux x86_64/aarch64, macOS x86_64/aarch64.
 
-Extended reference docs live under [`docs/`](docs/). On-wire message shape: [`skills/substreams-websocket/SKILL.md`](skills/substreams-websocket/SKILL.md).
+Extended reference docs live under [`docs/`](docs/). On-wire message shape: [`skills/SKILL.md`](skills/SKILL.md).
 
 ---
 
@@ -151,7 +151,7 @@ ws://host:8080/stream?streams=*@swaps                 # query mode, wrapped
 
 Live `SUBSCRIBE` / `UNSUBSCRIBE` / `LIST_SUBSCRIPTIONS` JSON commands also supported.
 
-Full message shape (session, stream, block payload, undo) + command envelope: [`skills/substreams-websocket/SKILL.md`](skills/substreams-websocket/SKILL.md). Why these conventions: [`docs/binance-websocket.md`](docs/binance-websocket.md).
+Full message shape (session, stream, block payload, undo) + command envelope: [`skills/SKILL.md`](skills/SKILL.md). Why these conventions: [`docs/binance-websocket.md`](docs/binance-websocket.md).
 
 ---
 

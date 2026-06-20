@@ -54,7 +54,7 @@ DatabaseChanges {
 - Per-row keys that duplicate top-level meta (`block_num`, `block_hash`, `timestamp`, `minute`) are stripped from each event
 - Events with no surviving columns after the strip (e.g. a `blocks` row whose only fields were the four above) are dropped entirely
 
-See [`skills/substreams-websocket/SKILL.md`](../skills/substreams-websocket/SKILL.md) for the resulting on-wire shape.
+See [`skills/SKILL.md`](../skills/SKILL.md) for the resulting on-wire shape.
 
 ## Module hash
 

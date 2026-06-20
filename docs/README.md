@@ -1,6 +1,6 @@
 # docs/
 
-Reference material that is **not** loaded at runtime or compile time. Audience: contributors and AI agents (e.g. Claude Code) making non-trivial changes to this repo. The runtime user docs are at [`README.md`](../README.md) and [`skills/substreams-websocket/SKILL.md`](../skills/substreams-websocket/SKILL.md).
+Reference material that is **not** loaded at runtime or compile time. Audience: contributors and AI agents (e.g. Claude Code) making non-trivial changes to this repo. The runtime user docs are at [`README.md`](../README.md) and [`skills/SKILL.md`](../skills/SKILL.md).
 
 ## Index
 
