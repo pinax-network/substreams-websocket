@@ -3,7 +3,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, LazyLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -237,8 +237,16 @@ async fn landing_html() -> impl IntoResponse {
     ([("content-type", "text/html; charset=utf-8")], LANDING_HTML)
 }
 
+/// `/SKILL.md` with its OKF `timestamp` placeholder resolved to the file's last
+/// commit date (captured by `build.rs`). Computed once; served verbatim after.
+static SKILL_MD_SERVED: LazyLock<String> =
+    LazyLock::new(|| SKILL_MD.replace("__BUILD_STAMPED__", env!("SKILL_MD_TIMESTAMP")));
+
 async fn skill_md() -> impl IntoResponse {
-    ([("content-type", "text/markdown; charset=utf-8")], SKILL_MD)
+    (
+        [("content-type", "text/markdown; charset=utf-8")],
+        SKILL_MD_SERVED.as_str(),
+    )
 }
 
 async fn llms_txt() -> impl IntoResponse {
@@ -3140,6 +3148,34 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with("ok"));
+    }
+
+    #[tokio::test]
+    async fn skill_md_route_resolves_okf_timestamp() {
+        let server = TestServer::start(config()).await;
+
+        let mut stream = tokio::net::TcpStream::connect(server.addr)
+            .await
+            .expect("skill tcp connection succeeds");
+        stream
+            .write_all(b"GET /SKILL.md HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("skill request writes");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("skill response reads");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        // OKF frontmatter is present and the timestamp placeholder is resolved.
+        assert!(response.contains("type: Reference"), "missing OKF type");
+        assert!(
+            !response.contains("__BUILD_STAMPED__"),
+            "timestamp placeholder was not resolved"
+        );
+        assert!(response.contains("timestamp:"), "missing OKF timestamp");
     }
 
     #[tokio::test]
