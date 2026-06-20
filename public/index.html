@@ -847,6 +847,7 @@
   <div class="group">
     <div class="group-title">HTTP</div>
     <a href="/streams" target="_blank"><span class="chip get">GET</span>/streams</a>
+    <a href="/version" target="_blank"><span class="chip get">GET</span>/version</a>
     <a href="/healthz" target="_blank"><span class="chip get">GET</span>/healthz</a>
     <a href="/SKILL.md" target="_blank"><span class="chip get">GET</span>/SKILL.md</a>
     <a href="/llms.txt" target="_blank"><span class="chip get">GET</span>/llms.txt</a>
@@ -951,7 +952,7 @@
     </table>
     <p>When wrapped, every payload is delivered as:</p>
 <pre>{ "stream": "&lt;network&gt;@&lt;table&gt;", "data": &lt;raw payload&gt; }</pre>
-    <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly. See the <strong>HTTP</strong> group in the sidebar for non-WebSocket endpoints (<code>/streams</code>, <code>/healthz</code>, <code>/SKILL.md</code>, <code>/llms.txt</code>).</p>
+    <p>Bare <code>/ws</code> with no streams returns <code>HTTP 400</code>. Use <code>/ws/*@*</code> to opt into every stream explicitly. See the <strong>HTTP</strong> group in the sidebar for non-WebSocket endpoints (<code>/streams</code>, <code>/version</code>, <code>/healthz</code>, <code>/SKILL.md</code>, <code>/llms.txt</code>).</p>
   </section>
 
   <section id="welcome">

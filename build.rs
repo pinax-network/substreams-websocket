@@ -60,6 +60,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .compile_fds(descriptors)?;
     }
 
+    emit_build_metadata();
+
     println!("cargo:rerun-if-changed=build.rs");
     Ok(())
+}
+
+/// Capture git short SHA and commit date for the `/version` endpoint. Falls back
+/// to `"unknown"` when git is unavailable (e.g. a source tarball build) so the
+/// build never fails on missing VCS metadata.
+fn emit_build_metadata() {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git").args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+        (!s.is_empty()).then_some(s)
+    };
+
+    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
+    let date =
+        git(&["log", "-1", "--format=%cd", "--date=short"]).unwrap_or_else(|| "unknown".to_owned());
+
+    println!("cargo:rustc-env=GIT_COMMIT={commit}");
+    println!("cargo:rustc-env=GIT_COMMIT_DATE={date}");
+    // Rebuild when the checked-out commit changes so the values stay accurate.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs");
 }
