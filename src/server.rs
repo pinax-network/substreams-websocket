@@ -204,6 +204,7 @@ fn build_app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/", get(landing_html))
         .route("/streams", get(streams_json))
+        .route("/version", get(version_json))
         .route("/openapi", get(openapi_json))
         .route("/openapi.json", get(openapi_json))
         .route("/SKILL.md", get(skill_md))
@@ -250,6 +251,24 @@ async fn streams_json(State(state): State<AppState>) -> impl IntoResponse {
     ([("content-type", "application/json; charset=utf-8")], body)
 }
 
+/// Build/version metadata as JSON: `version` (crate version), `commit` (git
+/// short SHA), `date` (commit date, `YYYY-MM-DD`), and `repo` (`owner/name`).
+/// `commit`/`date` are `"unknown"` for builds without git metadata.
+async fn version_json() -> impl IntoResponse {
+    let repo = env!("CARGO_PKG_REPOSITORY")
+        .trim_end_matches('/')
+        .trim_start_matches("https://github.com/")
+        .trim_start_matches("http://github.com/");
+    let body = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": env!("GIT_COMMIT"),
+        "date": env!("GIT_COMMIT_DATE"),
+        "repo": repo,
+    })
+    .to_string();
+    ([("content-type", "application/json; charset=utf-8")], body)
+}
+
 /// OpenAPI 3.1 document describing every HTTP GET route exposed by this
 /// server. Paths reflect the runtime config (`ws_path`, `stream_path`,
 /// `health_path`, `metrics_path`) so the document matches the live router.
@@ -289,6 +308,29 @@ async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
                         "application/json": { "schema": {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/Stream" }
+                        } }
+                    } }
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/version".to_owned(),
+        serde_json::json!({
+            "get": {
+                "summary": "Build/version metadata",
+                "description": "JSON object: `version` (crate version), `commit` (git short SHA), `date` (commit date), `repo` (`owner/name`).",
+                "responses": {
+                    "200": { "description": "Version metadata", "content": {
+                        "application/json": { "schema": {
+                            "type": "object",
+                            "required": ["version", "commit", "date", "repo"],
+                            "properties": {
+                                "version": { "type": "string" },
+                                "commit": { "type": "string" },
+                                "date": { "type": "string" },
+                                "repo": { "type": "string" }
+                            }
                         } }
                     } }
                 }
@@ -3098,6 +3140,43 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with("ok"));
+    }
+
+    #[tokio::test]
+    async fn version_route_returns_metadata_json() {
+        let server = TestServer::start(config()).await;
+
+        let mut stream = tokio::net::TcpStream::connect(server.addr)
+            .await
+            .expect("version tcp connection succeeds");
+        stream
+            .write_all(b"GET /version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("version request writes");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("version response reads");
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "expected 200, got: {response}"
+        );
+        assert!(
+            response.contains("application/json"),
+            "missing json content-type"
+        );
+        let body = response
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("response has a body");
+        let value: serde_json::Value = serde_json::from_str(body).expect("body is JSON");
+        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+        assert!(value["commit"].is_string());
+        assert!(value["date"].is_string());
+        assert_eq!(value["repo"], "pinax-network/substreams-websocket");
     }
 
     #[tokio::test]
