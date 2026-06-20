@@ -85,17 +85,20 @@ impl Expr {
 /// ```text
 /// protocol:raydium_cpmm                       single field equality
 /// maker:0xabc || taker:0xabc                  OR across columns
+/// maker:0xa,0xb,0xc                           comma list: field equals any of these
 /// protocol:raydium_cpmm && user:0xabc         AND (also implied by whitespace)
 /// (maker:0xabc || taker:0xabc) && !amm:0xdead  grouping + negation
 /// 0xabc                                       bare term: any column == 0xabc
 /// ```
 ///
 /// `field:value` is **ASCII-case-insensitive** string equality; a bare `value`
-/// (no field) matches when any string column of the event equals it. Operators:
-/// `||` (or), `&&` or whitespace (and), `!` (not), `( )` (grouping). Values
-/// containing whitespace or `() | & ' "` must be quoted (`'…'` or `"…"`). An
-/// empty expression matches every event. Events missing a referenced `field`
-/// are a miss (conservative).
+/// (no field) matches when any string column of the event equals it. An
+/// **unquoted** comma list (`field:a,b,c` or bare `a,b,c`) expands to an OR over
+/// the values — the ergonomic form for a large watchlist; each value counts as
+/// one term. Operators: `||` (or), `&&` or whitespace (and), `!` (not), `( )`
+/// (grouping). Values containing whitespace, a literal comma, or `() | & ' "`
+/// must be quoted (`'…'` or `"…"`). An empty expression matches every event.
+/// Events missing a referenced `field` are a miss (conservative).
 ///
 /// [StreamingFast SQE]: https://github.com/streamingfast/substreams-rs
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -337,11 +340,46 @@ impl<'a> Parser<'a> {
             field = Some(self.src[self.pos..ident_end].to_owned());
             self.pos = ident_end + 1; // consume field and ':'
         }
-        let value = self.parse_value()?;
+        let start = self.pos;
+        let (value, quoted) = self.parse_value()?;
+
+        // Unquoted comma lists are an OR-set: `maker:a,b,c` means
+        // `maker:a || maker:b || maker:c`, and bare `a,b,c` means any column
+        // equals any of them. This is the ergonomic form for large watchlists.
+        // Quote a value to keep a literal comma (`label:"a,b"`).
+        if !quoted && value.contains(',') {
+            let parts: Vec<&str> = value.split(',').filter(|s| !s.is_empty()).collect();
+            match parts.len() {
+                0 => {
+                    return Err(EventFilterError::Parse {
+                        pos: start,
+                        msg: "expected a term".to_owned(),
+                    });
+                }
+                1 => {
+                    return Ok(Expr::Term {
+                        field,
+                        value: parts[0].to_owned(),
+                    });
+                }
+                _ => {
+                    let children = parts
+                        .into_iter()
+                        .map(|p| Expr::Term {
+                            field: field.clone(),
+                            value: p.to_owned(),
+                        })
+                        .collect();
+                    return Ok(Expr::Or(children));
+                }
+            }
+        }
         Ok(Expr::Term { field, value })
     }
 
-    fn parse_value(&mut self) -> Result<String, EventFilterError> {
+    /// Returns the parsed value and whether it was quoted (quoted values are
+    /// kept literal — no comma-list expansion).
+    fn parse_value(&mut self) -> Result<(String, bool), EventFilterError> {
         match self.peek() {
             Some(q @ (b'"' | b'\'')) => {
                 self.pos += 1;
@@ -350,7 +388,7 @@ impl<'a> Parser<'a> {
                     if b == q {
                         let value = self.src[start..self.pos].to_owned();
                         self.pos += 1;
-                        return Ok(value);
+                        return Ok((value, true));
                     }
                     self.pos += 1;
                 }
@@ -370,7 +408,7 @@ impl<'a> Parser<'a> {
                         msg: "expected a term".to_owned(),
                     });
                 }
-                Ok(self.src[start..self.pos].to_owned())
+                Ok((self.src[start..self.pos].to_owned(), false))
             }
         }
     }
@@ -556,6 +594,77 @@ mod tests {
         assert!(f.matches_event(&event(&[("maker", "0xWALLET")])));
         assert!(f.matches_event(&event(&[("tx_from", "0xWALLET")])));
         assert!(!f.matches_event(&event(&[("maker", "0xother")])));
+    }
+
+    #[test]
+    fn comma_list_in_field_is_or_set() {
+        // `field:a,b,c` ⇒ field == a OR field == b OR field == c. This is the
+        // ergonomic form for a large watchlist; it previously matched the whole
+        // literal comma string and silently dropped everything.
+        let f = parse("maker:0xA,0xB,0xC");
+        assert!(f.matches_event(&event(&[("maker", "0xB")])));
+        assert!(f.matches_event(&event(&[("maker", "0xA")])));
+        assert!(!f.matches_event(&event(&[("maker", "0xZ")])));
+    }
+
+    #[test]
+    fn comma_list_across_fields() {
+        // The headline use case condensed: a watchlist across maker/taker/tx_from.
+        let f = parse("maker:0xW,0xX || taker:0xW,0xX || tx_from:0xW,0xX");
+        assert!(f.matches_event(&event(&[("taker", "0xX")])));
+        assert!(f.matches_event(&event(&[("tx_from", "0xW")])));
+        assert!(!f.matches_event(&event(&[("maker", "0xQ"), ("taker", "0xQ")])));
+    }
+
+    #[test]
+    fn bare_comma_list_matches_any_column() {
+        let f = parse("0xA,0xB,0xC");
+        assert!(f.matches_event(&event(&[("maker", "0xB")])));
+        assert!(f.matches_event(&event(&[("tx_from", "0xC")])));
+        assert!(!f.matches_event(&event(&[("maker", "0xZ")])));
+    }
+
+    #[test]
+    fn comma_list_counts_each_value_as_a_term() {
+        // Each comma value is one term toward the cap — so the cap is a real
+        // value count, not a punctuation count.
+        assert!(EventFilter::parse("maker:a,b,c", 16, 3).is_ok());
+        let err = EventFilter::parse("maker:a,b,c,d", 16, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            EventFilterError::TooManyTerms { actual: 4, max: 3 }
+        ));
+        // ...and one field, not one per value.
+        assert!(EventFilter::parse("maker:a,b,c,d,e", 1, 16).is_ok());
+    }
+
+    #[test]
+    fn comma_list_at_watchlist_scale_matches() {
+        // The exact bug-report shape: 119 wallets × 3 fields as comma lists.
+        let wallets: Vec<String> = (0..119).map(|i| format!("0x{:040x}", i + 1)).collect();
+        let joined = wallets.join(",");
+        let src = format!("maker:{joined} || taker:{joined} || tx_from:{joined}");
+        let f = EventFilter::parse(&src, 16, 512).expect("parses under the 512 cap");
+        // A wallet appearing as taker is matched.
+        assert!(f.matches_event(&event(&[("taker", &wallets[50])])));
+        // An off-list wallet is not.
+        assert!(!f.matches_event(&event(&[("taker", "0xnotonthelist")])));
+    }
+
+    #[test]
+    fn quoted_comma_stays_literal() {
+        // The escape hatch: quote to keep a literal comma in a value.
+        let f = parse(r#"label:"a,b""#);
+        assert!(f.matches_event(&event(&[("label", "a,b")])));
+        assert!(!f.matches_event(&event(&[("label", "a")])));
+    }
+
+    #[test]
+    fn lone_comma_value_is_an_error() {
+        assert!(matches!(
+            EventFilter::parse("maker:,", 16, 64),
+            Err(EventFilterError::Parse { .. })
+        ));
     }
 
     #[test]
