@@ -83,8 +83,14 @@ fn emit_build_metadata() {
     let date =
         git(&["log", "-1", "--format=%cd", "--date=short"]).unwrap_or_else(|| "unknown".to_owned());
 
+    // OKF `timestamp` for skills/SKILL.md — ISO 8601 datetime of its last
+    // meaningful change (its last commit). Injected into the served `/SKILL.md`.
+    let skill_ts = git(&["log", "-1", "--format=%cI", "--", "skills/SKILL.md"])
+        .unwrap_or_else(|| "unknown".to_owned());
+
     println!("cargo:rustc-env=GIT_COMMIT={commit}");
     println!("cargo:rustc-env=GIT_COMMIT_DATE={date}");
+    println!("cargo:rustc-env=SKILL_MD_TIMESTAMP={skill_ts}");
     // Rebuild when the checked-out commit changes so the values stay accurate.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");

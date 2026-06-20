@@ -1,6 +1,11 @@
 ---
 name: substreams-websocket
+type: Reference
+title: substreams-websocket — agent guide
 description: Connect to and consume a substreams-websocket fan-out server — a Substreams-to-WebSocket bridge that broadcasts decoded `sf.substreams.sink.database.v1.DatabaseChanges` blocks as JSON. Use when subscribing to real-time blockchain table data (swaps, transfers, balances, etc.) over WebSocket via `<network>@<table>` selectors, applying server-side SQE event filters, or handling reconnects, chain reorgs, and slow-client backpressure for such a feed.
+resource: https://github.com/pinax-network/substreams-websocket
+tags: [substreams, websocket, blockchain, streaming, database-changes]
+timestamp: __BUILD_STAMPED__
 license: MIT
 metadata:
   source: https://github.com/pinax-network/substreams-websocket
