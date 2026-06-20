@@ -177,17 +177,20 @@ Reduce bandwidth by asking the server to drop non-matching events before deliver
 
 ### Expression syntax
 
-```
-maker:0xW                          field equals value (case-insensitive)
-maker:0xW || taker:0xW             OR — wallet as maker OR taker
-protocol:clob && maker:0xW         AND (whitespace also means AND: `protocol:clob maker:0xW`)
-(maker:0xW || taker:0xW) && !amm:0xdead   grouping + negation
-0xWALLET                           bare term: matches when ANY column equals 0xWALLET
-"two words"  or  label:'a b'       quote values containing spaces or ( ) | & ' "
-```
+| Expression | Matches |
+|---|---|
+| `maker:0xW` | field equals value (case-insensitive) |
+| `maker:0xW \|\| taker:0xW` | OR — wallet as maker OR taker |
+| `maker:0xA,0xB,0xC` | comma list — field equals ANY of these (watchlist) |
+| `protocol:clob && maker:0xW` | AND (whitespace also means AND: `protocol:clob maker:0xW`) |
+| `(maker:0xW \|\| taker:0xW) && !amm:0xdead` | grouping + negation |
+| `0xWALLET` | bare term — ANY column equals `0xWALLET` |
+| `0xA,0xB,0xC` | bare comma list — ANY column equals ANY of these |
+| `"two words"` or `label:'a b'` | quote values containing spaces or `( ) \| & ' "` |
 
 - `field:value` — **ASCII-case-insensitive** string equality on that event column, so a checksummed or lowercased EVM address both match. An event missing `field` is a miss. (Note: case-insensitivity is convenient for hex addresses but relaxes matching for case-significant values like Solana base58 keys — supply the exact value there.)
 - bare `value` (no `field:`) — matches when **any** string column of the event equals it. Great for "this wallet in any role": `0xW1 || 0xW2`.
+- **comma list** — `field:a,b,c` is shorthand for `field:a || field:b || field:c` (and bare `a,b,c` for any column equals any of them). This is the ergonomic form for a large watchlist: `maker:0xA,0xB,0xC || taker:0xA,0xB,0xC || tx_from:0xA,0xB,0xC`. Each value still counts as one term toward `MAX_FILTER_VALUES`. To keep a literal comma in a value, quote it: `label:"a,b"`.
 - operators: `||` (or), `&&` or whitespace (and), `!` (not), `( )` (grouping). `&&` binds tighter than `||`.
 - only `events[*]` columns are filtered; top-level `block_num` / `network` / `module_hash` are not.
 

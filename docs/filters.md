@@ -12,17 +12,20 @@ protocol:raydium_cpmm && user:F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8
 
 ### Grammar
 
-```
-maker:0xW                          field equals value (case-insensitive)
-maker:0xW || taker:0xW             OR — wallet as maker OR taker
-protocol:clob && maker:0xW         AND (whitespace also means AND: `protocol:clob maker:0xW`)
-(maker:0xW || taker:0xW) && !amm:0xdead   grouping + negation
-0xWALLET                           bare term: matches when ANY column equals 0xWALLET
-"two words"  or  label:'a b'       quote values containing spaces or ( ) | & ' "
-```
+| Expression | Matches |
+|---|---|
+| `maker:0xW` | field equals value (case-insensitive) |
+| `maker:0xW \|\| taker:0xW` | OR — wallet as maker OR taker |
+| `maker:0xA,0xB,0xC` | comma list — field equals ANY of these (watchlist) |
+| `protocol:clob && maker:0xW` | AND (whitespace also means AND: `protocol:clob maker:0xW`) |
+| `(maker:0xW \|\| taker:0xW) && !amm:0xdead` | grouping + negation |
+| `0xWALLET` | bare term — ANY column equals `0xWALLET` |
+| `0xA,0xB,0xC` | bare comma list — ANY column equals ANY of these |
+| `"two words"` or `label:'a b'` | quote values containing spaces or `( ) \| & ' "` |
 
 - **`field:value` — string equality only.** **ASCII-case-insensitive** on that `events[*]` column, so a checksummed or lowercased EVM address both match (supply the exact value for case-significant data like Solana base58 keys). No regex, no range, no substring.
 - **bare `value` (no `field:`).** Matches when **any** string column of the event equals it (e.g. `0xWALLET`). Great for "this wallet in any role".
+- **Comma list — `field:a,b,c`.** Shorthand for `field:a || field:b || field:c`; bare `a,b,c` is the any-column form. This is the ergonomic shape for a large watchlist — `maker:0xA,0xB,… || taker:0xA,0xB,… || tx_from:0xA,0xB,…`. Each value counts as one term toward `MAX_FILTER_VALUES`, and all values share their field's count toward `MAX_FILTER_FIELDS`. To keep a **literal** comma in a value, quote it: `label:"a,b"`.
 - **Operators:** `||` (OR), `&&` or whitespace (AND), `!` (NOT), `( )` (grouping). `&&` binds tighter than `||`.
 - **Quoting.** Use `'…'` or `"…"` around values containing spaces or `( ) | & ' "`.
 - **OR across columns works.** `tx_from:0xW || maker:0xW || taker:0xW` (or just bare `0xW`) matches a wallet in any role.
