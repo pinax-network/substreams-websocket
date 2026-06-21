@@ -19,6 +19,15 @@ We use `sf.substreams.rpc.v2.Stream/Blocks`. The proto definitions are not vendo
 - We require **gzip request compression** — Pinax rejects uncompressed gRPC with `400 Bad Request` and body `no supported compression found.`
 - We bumped the tonic decoded-message cap to **64 MiB** (default 4 MiB) because Solana SPL transfers blocks routinely exceed 4 MiB after gzip decompression. The cap is configurable via `SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES` (global) or per-stream `max_decode_message_bytes`; raise it for chains whose per-block output exceeds 64 MiB (e.g. Hyperliquid hypercore, which otherwise fails every block with `Error decompressing: size limit, of 67108864 bytes, exceeded`).
 - HTTP/2 + TCP keepalive enabled to survive long-idle gRPC streams getting reaped by upstream proxies (`h2 protocol error: ... ConnectionReset`).
+- **HTTP/2 flow control is tuned for large streaming messages.** hyper's default initial window is 64 KiB, which caps a single gRPC stream at roughly `window / RTT` (a 64 KiB window over a 50 ms RTT is only ~1.3 MiB/s). DatabaseChanges blocks for busy chains run to several MiB after decompression, so the default window stalls delivery between `WINDOW_UPDATE` round-trips and the WebSocket head drifts behind the chain even though the local decode/fan-out path is cheap. We raise the per-stream initial window to 8 MiB (`STREAM_WINDOW_BYTES`) and enable adaptive flow control (`http2_adaptive_window`) so the connection window grows from a BDP estimate. This is the first thing to check when the WS feed lags the upstream Substreams endpoint by a fixed offset.
+
+## Head latency / lag
+
+The WebSocket feed is the *live edge* (see [`decisions.md`](decisions.md)). If the WS feed lags the raw Substreams endpoint by a fixed offset, the usual causes, in order:
+
+1. **HTTP/2 flow-control window** (above) — most common with large per-block payloads. Symptom: lag scales with block size and RTT.
+2. **`SUBSTREAMS_PRODUCTION_MODE`** — leave it `false` (development mode) for a live feed. Production mode optimizes parallel back-processing and cached output for *backfill*; this server does not backfill (it is live-only, no replay log), so production mode buys nothing here and can add head latency near the chain tip. Development mode streams each linear block with the lowest head latency, which is exactly what the live edge wants.
+3. **`SUBSTREAMS_FINAL_BLOCKS_ONLY`** — `true` makes the feed wait for finality, so it trails head by the chain's finality depth by design. Keep it `false` for the lowest-latency live feed.
 
 ## DatabaseChanges sink
 
