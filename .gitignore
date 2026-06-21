@@ -26,3 +26,6 @@ config.yaml
 streams.yaml
 cursors/
 .env
+
+# Latency-probe raw run data (scripts/polygon-latency.py, scripts/rpc-compare.py)
+runs/
