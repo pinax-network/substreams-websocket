@@ -496,12 +496,13 @@ async fn connect_channel(config: &SubstreamsConfig) -> Result<Channel, Substream
         // which caps single-stream throughput at roughly `window / RTT`
         // (e.g. a 64 KiB window over a 50 ms RTT is only ~1.3 MiB/s). Substreams
         // DatabaseChanges payloads for busy chains routinely run to several MiB
-        // per block after decompression, so the default window stalls delivery
-        // between WINDOW_UPDATE round-trips and the WebSocket feed drifts behind
-        // the chain head even though the local decode/fan-out path is cheap.
+        // per block after decompression, so on a high-RTT link to the endpoint
+        // the default window can stall delivery between WINDOW_UPDATE round-trips.
         // Enable adaptive flow control (hyper grows the connection window from a
         // BDP estimate) and raise the per-stream initial window so a single
-        // large block transfers without round-tripping for credit.
+        // large block transfers without round-tripping for credit. Defensive:
+        // when the server is co-located with the endpoint this is a no-op, but
+        // it removes a real ceiling for distant or very-large-block streams.
         .initial_stream_window_size(STREAM_WINDOW_BYTES)
         .http2_adaptive_window(true);
 
