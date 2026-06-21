@@ -466,6 +466,12 @@ fn parse_params(values: &[String]) -> Result<HashMap<String, String>, Substreams
     Ok(params)
 }
 
+/// Initial HTTP/2 per-stream flow-control window (8 MiB). Large enough that a
+/// multi-MiB Substreams block transfers in a single window without waiting on
+/// WINDOW_UPDATE credit, well clear of hyper's 64 KiB default. The
+/// connection-level window grows beyond this via adaptive flow control.
+const STREAM_WINDOW_BYTES: u32 = 8 * 1024 * 1024;
+
 async fn connect_channel(config: &SubstreamsConfig) -> Result<Channel, SubstreamsError> {
     let endpoint = config
         .endpoint
@@ -485,7 +491,20 @@ async fn connect_channel(config: &SubstreamsConfig) -> Result<Channel, Substream
         // TCP-level keepalive as a second line of defense.
         .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
         // Faster than the default to detect dead peers sooner.
-        .tcp_nodelay(true);
+        .tcp_nodelay(true)
+        // HTTP/2 flow control. hyper defaults the initial window to 64 KiB,
+        // which caps single-stream throughput at roughly `window / RTT`
+        // (e.g. a 64 KiB window over a 50 ms RTT is only ~1.3 MiB/s). Substreams
+        // DatabaseChanges payloads for busy chains routinely run to several MiB
+        // per block after decompression, so on a high-RTT link to the endpoint
+        // the default window can stall delivery between WINDOW_UPDATE round-trips.
+        // Enable adaptive flow control (hyper grows the connection window from a
+        // BDP estimate) and raise the per-stream initial window so a single
+        // large block transfers without round-tripping for credit. Defensive:
+        // when the server is co-located with the endpoint this is a no-op, but
+        // it removes a real ceiling for distant or very-large-block streams.
+        .initial_stream_window_size(STREAM_WINDOW_BYTES)
+        .http2_adaptive_window(true);
 
     if uses_tls && !config.insecure {
         endpoint = endpoint.tls_config(ClientTlsConfig::new().with_enabled_roots())?;
