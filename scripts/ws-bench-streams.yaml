@@ -1,0 +1,24 @@
+# Local config for the WebSocket fan-out latency benchmark (scripts/ws-latency.js).
+#
+# Uses the Pinax evm-transfers package on Polygon: its `db_out` is a stateless
+# per-block map, so it serves the live chain head immediately and emits a large
+# DatabaseChanges payload (~0.5-1.1 MB/block of erc20_transfers) every block —
+# a heavy, steady-state decode + fan-out load.
+#
+# NOTE: the Polymarket orderbook package's `db_out` is itself a map, but it
+# transitively depends on three stores (store_markets / store_traders /
+# store_global_stats, initial block 57,000,000) via its map_market_orderbooks /
+# map_trader_accounts / map_global_orderbook_stats inputs. At the live edge
+# Substreams must backprocess that store state first (a `db_out -s -1` start
+# fans out ~50 parallel jobs), so it does not reach head within a short
+# benchmark window. The stateless `map_all_order_fills` map streams at head
+# instantly, which is what the Test 1/2 head-latency probes use; but the
+# WebSocket server only accepts DatabaseChanges (db_out), hence the transfers
+# package here for the fan-out measurement.
+streams:
+  - network: polygon
+    endpoint: https://polygon.substreams.pinax.network:443
+    manifest: https://github.com/pinax-network/substreams-evm/releases/download/evm-transfers-v0.4.0/evm-transfers-v0.4.0.spkg
+    module: db_out
+    tables:
+      - erc20_transfers
