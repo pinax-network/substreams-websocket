@@ -229,7 +229,7 @@ struct WebSocketArgs {
     #[arg(
         long,
         env = "SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS",
-        default_value_t = 180
+        default_value_t = 30
     )]
     heartbeat_interval_secs: u64,
 
