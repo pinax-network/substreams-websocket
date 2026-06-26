@@ -6,6 +6,15 @@ RUN BUF_VERSION=1.69.0 && \
     curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-$(uname -s)-$(uname -m)" \
       -o /usr/local/bin/buf && chmod +x /usr/local/bin/buf
 COPY . .
+# .git is excluded from the build context (.dockerignore), so build.rs can't
+# read VCS metadata for /version. CI passes it in as build args instead; build.rs
+# prefers these env vars and falls back to live git for local builds.
+ARG GIT_COMMIT
+ARG GIT_COMMIT_DATE
+ARG SKILL_MD_TIMESTAMP
+ENV GIT_COMMIT=$GIT_COMMIT \
+    GIT_COMMIT_DATE=$GIT_COMMIT_DATE \
+    SKILL_MD_TIMESTAMP=$SKILL_MD_TIMESTAMP
 RUN cargo build --release --bin substreams-websocket
 
 FROM debian:bookworm-slim

@@ -66,9 +66,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Capture git short SHA and commit date for the `/version` endpoint. Falls back
-/// to `"unknown"` when git is unavailable (e.g. a source tarball build) so the
-/// build never fails on missing VCS metadata.
+/// Capture git short SHA and commit date for the `/version` endpoint.
+///
+/// Prefers the `GIT_COMMIT` / `GIT_COMMIT_DATE` build-time env vars when set,
+/// then falls back to live `git` for local builds, then `"unknown"` so the
+/// build never fails on missing VCS metadata. The env-first path exists because
+/// the Docker image build excludes `.git` (see `.dockerignore`) — CI injects
+/// the values as build args instead. Mirrors `pinax-network/pinax-api`.
 fn emit_build_metadata() {
     let git = |args: &[&str]| -> Option<String> {
         let out = Command::new("git").args(args).output().ok()?;
@@ -79,19 +83,38 @@ fn emit_build_metadata() {
         (!s.is_empty()).then_some(s)
     };
 
-    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
-    let date =
-        git(&["log", "-1", "--format=%cd", "--date=short"]).unwrap_or_else(|| "unknown".to_owned());
+    // Build-time env var (injected by CI/Docker) wins; otherwise run git.
+    let env_var = |name: &str| std::env::var(name).ok().filter(|s| !s.is_empty());
+    let env_or_git = |name: &str, args: &[&str]| -> String {
+        env_var(name)
+            .or_else(|| git(args))
+            .unwrap_or_else(|| "unknown".to_owned())
+    };
+
+    // Short-SHA the commit so an injected full 40-char SHA matches `--short`.
+    let mut commit = env_or_git("GIT_COMMIT", &["rev-parse", "--short", "HEAD"]);
+    if commit.len() > 7 && commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        commit.truncate(7);
+    }
+    let date = env_or_git(
+        "GIT_COMMIT_DATE",
+        &["log", "-1", "--format=%cd", "--date=short"],
+    );
 
     // OKF `timestamp` for skills/SKILL.md — ISO 8601 datetime of its last
     // meaningful change (its last commit). Injected into the served `/SKILL.md`.
-    let skill_ts = git(&["log", "-1", "--format=%cI", "--", "skills/SKILL.md"])
+    let skill_ts = env_var("SKILL_MD_TIMESTAMP")
+        .or_else(|| git(&["log", "-1", "--format=%cI", "--", "skills/SKILL.md"]))
         .unwrap_or_else(|| "unknown".to_owned());
 
     println!("cargo:rustc-env=GIT_COMMIT={commit}");
     println!("cargo:rustc-env=GIT_COMMIT_DATE={date}");
     println!("cargo:rustc-env=SKILL_MD_TIMESTAMP={skill_ts}");
-    // Rebuild when the checked-out commit changes so the values stay accurate.
+    // Rebuild when the checked-out commit or injected metadata changes so the
+    // values stay accurate.
+    println!("cargo:rerun-if-env-changed=GIT_COMMIT");
+    println!("cargo:rerun-if-env-changed=GIT_COMMIT_DATE");
+    println!("cargo:rerun-if-env-changed=SKILL_MD_TIMESTAMP");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
 }
