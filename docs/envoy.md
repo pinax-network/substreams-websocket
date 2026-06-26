@@ -38,7 +38,7 @@ Tight interval + `unhealthy_threshold: 1` means Envoy reacts within one health-c
 
 ### 2. Idle / stream timeouts must not fight the heartbeat
 
-The server pings clients every `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` (default 180s) and kills connections silent for `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` (default 600s). Envoy has its own idle timeouts and will close a WebSocket it considers idle, **regardless of whether the backend is happily streaming pings**.
+The server pings clients every `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` (default 30s) and kills connections silent for `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` (default 600s). Envoy has its own idle timeouts and will close a WebSocket it considers idle, **regardless of whether the backend is happily streaming pings**.
 
 ```yaml
 route:

@@ -87,7 +87,7 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.yaml
 | Server | `SUBSTREAMS_WEBSOCKET_STREAM_PATH` | `/stream` | Query-mode route. |
 | Server | `SUBSTREAMS_WEBSOCKET_HEALTH_PATH` | `/healthz` | Health route. |
 | Server | `SUBSTREAMS_WEBSOCKET_METRICS_PATH` | `/metrics` | Prometheus metrics route. Empty disables. |
-| Server | `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` | `180` | Ping interval. |
+| Server | `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` | `30` | Ping interval. |
 | Server | `SUBSTREAMS_WEBSOCKET_HEARTBEAT_TIMEOUT_SECS` | `600` | Disconnect after silence. |
 | Server | `SUBSTREAMS_WEBSOCKET_MAX_CLIENTS` | `1024` | Connection cap. |
 | Server | `SUBSTREAMS_WEBSOCKET_CLIENT_BUFFER_SIZE` | `1024` | Per-client outbound buffer. |
