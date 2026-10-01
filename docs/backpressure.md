@@ -12,6 +12,13 @@ Broadcast workflow per block:
 2. For each connected client whose subscription matches, broadcast does **non-blocking** `tx.try_send(message)`.
 3. If `try_send` returns `Err(Full)`, the message is dropped on the floor.
 
+Unfiltered subscribers share reference-counted serialized frame bytes; enqueueing another
+copy does not copy the JSON text. Filtered subscribers select borrowed rows and serialize
+only those rows, without cloning the entire block. Same-field OR lists (including comma
+watchlists) are indexed at parse time after the existing term/field limits are checked.
+ASCII case-insensitive equality, wildcard-filter intersection, and message ordering are
+unchanged. See [the transfer fan-out benchmark](transfer-fanout-performance.md).
+
 `try_send` is the first line of defense: a slow client never blocks the broadcast loop or anyone else. But unbounded drop logs from a single stuck consumer can drown the rest of the operational signal, and a permanently-stuck consumer just sits there forever consuming an fd + an mpsc + a writer task.
 
 ## Force-close threshold
