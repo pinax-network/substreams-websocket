@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
@@ -32,6 +32,13 @@ enum Expr {
         field: Option<String>,
         value: String,
     },
+    /// An OR of literals for the same field, compiled after cap validation.
+    /// Normalize ASCII case once at parse time instead of scanning a wallet
+    /// list for every row. Bare lists use the same index over string columns.
+    AnyOf {
+        field: Option<String>,
+        values: HashSet<String>,
+    },
     Not(Box<Expr>),
     And(Vec<Expr>),
     Or(Vec<Expr>),
@@ -50,9 +57,45 @@ impl Expr {
             Expr::Term { field: None, value } => {
                 bare_values.is_some_and(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case(value)))
             }
+            Expr::AnyOf { field, values } => match field {
+                Some(field) => event
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|actual| values.contains(&actual.to_ascii_lowercase())),
+                None => bare_values
+                    .is_some_and(|vs| vs.iter().any(|v| values.contains(&v.to_ascii_lowercase()))),
+            },
             Expr::Not(inner) => !inner.eval(event, bare_values),
             Expr::And(children) => children.iter().all(|c| c.eval(event, bare_values)),
             Expr::Or(children) => children.iter().any(|c| c.eval(event, bare_values)),
+        }
+    }
+
+    fn optimize(self) -> Self {
+        match self {
+            Expr::Or(children) => {
+                if let Some(Expr::Term { field, .. }) = children.first()
+                    && children.len() > 1
+                    && children.iter().all(
+                        |child| matches!(child, Expr::Term { field: other, .. } if other == field),
+                    )
+                {
+                    let field = field.clone();
+                    let values = children
+                        .into_iter()
+                        .map(|child| match child {
+                            Expr::Term { value, .. } => value.to_ascii_lowercase(),
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    Expr::AnyOf { field, values }
+                } else {
+                    Expr::Or(children.into_iter().map(Expr::optimize).collect())
+                }
+            }
+            Expr::And(children) => Expr::And(children.into_iter().map(Expr::optimize).collect()),
+            Expr::Not(inner) => Expr::Not(Box::new(inner.optimize())),
+            other => other,
         }
     }
 
@@ -67,6 +110,14 @@ impl Expr {
                         fields.insert(f.clone());
                     }
                     None => *has_bare = true,
+                }
+            }
+            Expr::AnyOf { field, values } => {
+                *terms += values.len();
+                if let Some(f) = field {
+                    fields.insert(f.clone());
+                } else {
+                    *has_bare = true;
                 }
             }
             Expr::Not(inner) => inner.walk(terms, fields, has_bare),
@@ -162,7 +213,7 @@ impl EventFilter {
         }
 
         Ok(Self {
-            root: Some(expr),
+            root: Some(expr.optimize()),
             source: trimmed.to_owned(),
             has_bare,
         })
@@ -649,6 +700,60 @@ mod tests {
         assert!(f.matches_event(&event(&[("taker", &wallets[50])])));
         // An off-list wallet is not.
         assert!(!f.matches_event(&event(&[("taker", "0xnotonthelist")])));
+    }
+
+    #[test]
+    fn indexed_filters_match_the_reference_interpreter() {
+        let expressions = [
+            "maker:A,b,A",
+            "maker:A || maker:b || maker:A",
+            "A,b,A",
+            "!(maker:A,b) && taker:C,d",
+            "(maker:A,b || taker:C,d) && !protocol:amm",
+            "maker:A || taker:b || protocol:clob",
+            "maker:Ä,É",
+            "maker:'A,b' || maker:'c d'",
+            "maker:A,a || maker:b",
+            "Maker:A,b",
+            "",
+        ];
+        let values = [
+            "A", "a", "B", "c", "d", "amm", "clob", "Ä", "ä", "A,b", "c d", "",
+        ];
+        for source in expressions {
+            let reference = if source.is_empty() {
+                None
+            } else {
+                Some(Parser::new(source).parse_or(0).unwrap())
+            };
+            let indexed = EventFilter::parse(source, 16, 512).unwrap();
+            assert_eq!(indexed.to_json(), Value::String(source.into()));
+            for maker in values {
+                for taker in values {
+                    let mut row = event(&[("maker", maker), ("taker", taker), ("protocol", taker)]);
+                    for missing in [false, true] {
+                        if missing {
+                            row.remove("maker");
+                            row.insert("taker".into(), Value::Null);
+                        }
+                        let bare_values: Vec<&str> =
+                            row.values().filter_map(Value::as_str).collect();
+                        assert_eq!(
+                            indexed.matches_event(&row),
+                            reference
+                                .as_ref()
+                                .is_none_or(|expr| expr.eval(&row, Some(&bare_values))),
+                            "expression {source:?}, row {row:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // Index deduplication must not let repeated terms bypass input caps.
+        assert!(matches!(
+            EventFilter::parse("maker:A,a,A", 16, 2),
+            Err(EventFilterError::TooManyTerms { actual: 3, max: 2 })
+        ));
     }
 
     #[test]

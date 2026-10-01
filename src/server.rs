@@ -20,6 +20,7 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::ser::{Serialize, SerializeMap, Serializer};
 use tokio::{
     sync::{RwLock, mpsc, oneshot},
     time::Instant,
@@ -29,8 +30,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     BlockContext, Config, CursorStore, EventFilter, EventFilterSet, SUPPORTED_OUTPUT_TYPE,
-    StreamConfig, StreamEvent, SubstreamsClient, apply_filter_in_place, compute_module_hash_hex,
-    decode_database_changes, substreams::load_package,
+    StreamConfig, StreamEvent, SubstreamsClient, compute_module_hash_hex, decode_database_changes,
+    substreams::load_package,
 };
 
 type ClientId = u64;
@@ -2198,9 +2199,9 @@ impl ClientRegistry {
     }
 
     /// Block-payload broadcast that respects per-client event filters. For
-    /// each matching client without a filter, the original serialized JSON
-    /// is reused. For each matching client with a filter, the block is
-    /// cloned, `events[]` is filtered in place, and re-serialized. If the
+    /// each matching client without a filter, the serialized frame's bytes
+    /// are shared. Filters select borrowed rows for serialization without
+    /// cloning the entire block for each client. If the
     /// filter drops every event, that client is skipped entirely (no
     /// zero-event broadcasts).
     async fn broadcast_block(
@@ -2210,9 +2211,11 @@ impl ClientRegistry {
         block: serde_json::Value,
     ) -> BroadcastStats {
         let selector = format!("{network}@{stream}");
-        let unfiltered_text = block.to_string();
+        let unfiltered_text = axum::extract::ws::Utf8Bytes::from(block.to_string());
         let bytes = unfiltered_text.len();
-        let unfiltered_wrapped = format!(r#"{{"stream":"{selector}","data":{unfiltered_text}}}"#);
+        let unfiltered_wrapped = axum::extract::ws::Utf8Bytes::from(format!(
+            r#"{{"stream":"{selector}","data":{unfiltered_text}}}"#
+        ));
         let limit = self.slow_client_drop_limit();
         let event_count = block
             .get("events")
@@ -2241,23 +2244,29 @@ impl ClientRegistry {
             }
             let matching_filters = filter.event_filters.matching(network, stream);
             let text = if !matching_filters.is_empty() {
-                let mut block_copy = block.clone();
-                let mut remaining = 0usize;
-                for f in &matching_filters {
-                    remaining = apply_filter_in_place(&mut block_copy, f);
-                    if remaining == 0 {
-                        break;
-                    }
-                }
-                if remaining == 0 {
+                let events: Vec<&serde_json::Value> = block["events"]
+                    .as_array()
+                    .expect("table payload has events")
+                    .iter()
+                    .filter(|event| {
+                        event.as_object().is_some_and(|row| {
+                            matching_filters.iter().all(|f| f.matches_event(row))
+                        })
+                    })
+                    .collect();
+                if events.is_empty() {
                     filter_skipped += 1;
                     continue;
                 }
-                let filtered_text = block_copy.to_string();
+                let filtered_text = serde_json::to_string(&FilteredBlock {
+                    block: block.as_object().expect("table payload is an object"),
+                    events,
+                })
+                .expect("JSON values serialize");
                 if filter.wrap_envelope {
-                    format!(r#"{{"stream":"{selector}","data":{filtered_text}}}"#)
+                    format!(r#"{{"stream":"{selector}","data":{filtered_text}}}"#).into()
                 } else {
-                    filtered_text
+                    filtered_text.into()
                 }
             } else if filter.wrap_envelope {
                 unfiltered_wrapped.clone()
@@ -2266,7 +2275,7 @@ impl ClientRegistry {
             };
             let wrap = filter.wrap_envelope;
             drop(filter);
-            let outcome = backpressured_send(*client_id, client, Message::Text(text.into()), limit);
+            let outcome = backpressured_send(*client_id, client, Message::Text(text), limit);
             if outcome.delivered {
                 delivered += 1;
                 // This frame got through — if the client had been dropping,
@@ -2364,6 +2373,27 @@ impl ClientRegistry {
                 metrics::counter!("substreams_websocket_force_closed_total").increment(1);
             }
         }
+    }
+}
+
+/// Borrow the block envelope and surviving rows, preserving the same field
+/// and event order as the unfiltered JSON. Only the `events` array differs.
+struct FilteredBlock<'a> {
+    block: &'a serde_json::Map<String, serde_json::Value>,
+    events: Vec<&'a serde_json::Value>,
+}
+
+impl Serialize for FilteredBlock<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.block.len()))?;
+        for (key, value) in self.block {
+            if key == "events" {
+                map.serialize_entry(key, &self.events)?;
+            } else {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
     }
 }
 
@@ -4021,6 +4051,169 @@ mod tests {
             pending_dropped: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(pending)),
         };
         (client, rx)
+    }
+
+    // Run manually in release mode; timings are evidence, not a CI threshold.
+    #[tokio::test]
+    #[ignore = "synthetic transfer fan-out benchmark"]
+    async fn transfer_fanout_benchmark() {
+        let decoded = crate::DatabaseChangesBlockMessage {
+            network: "solana".into(),
+            block_num: 350_000_000,
+            block_hash: "block-hash".into(),
+            timestamp: "2026-10-01 20:00:00".into(),
+            timestamp_seconds: 1_790_884_800,
+            module_hash: "module-hash".into(),
+            events: (0..750)
+                .map(|i| {
+                    let mut row = serde_json::Map::new();
+                    row.insert("@table".into(), "spl_transfer".into());
+                    row.insert("tx_id".into(), "t".repeat(88).into());
+                    row.insert("source".into(), format!("wallet-{i:044}").into());
+                    row.insert("destination".into(), format!("wallet-{:044}", i + 1).into());
+                    row.insert("mint".into(), "m".repeat(44).into());
+                    row.insert("amount".into(), "1000000000".into());
+                    row.insert("program_id".into(), "p".repeat(44).into());
+                    row.insert("signers".into(), serde_json::json!(["s".repeat(44)]));
+                    row
+                })
+                .collect(),
+        };
+        for scenario in ["unfiltered", "selective", "watchlist"] {
+            let registry = super::ClientRegistry::default();
+            let mut receivers = Vec::new();
+            for client_id in 0..27 {
+                let (client, rx) = handle_with_channel(2, 0);
+                let mut filter = StreamFilter::default();
+                filter.add(StreamId::parse("solana@spl_transfer").unwrap());
+                filter.wrap_envelope = client_id % 2 == 0;
+                let expression = match scenario {
+                    "selective" => format!("source:wallet-{client_id:044}"),
+                    "watchlist" => {
+                        let values = (0..119)
+                            .map(|i| format!("wallet-{:044}", 1000 + i + client_id))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("source:{values} || destination:{values} || mint:{values}")
+                    }
+                    _ => String::new(),
+                };
+                if !expression.is_empty() {
+                    filter.event_filters.set(
+                        "solana@spl_transfer".into(),
+                        crate::EventFilter::parse(&expression, 16, 512).unwrap(),
+                    );
+                }
+                *client.filter.write().await = filter;
+                registry.clients.write().await.insert(client_id, client);
+                receivers.push(rx);
+            }
+            let start = std::time::Instant::now();
+            let iterations = 100;
+            for _ in 0..iterations {
+                for (table, events) in super::group_events_by_table(&decoded) {
+                    let block = super::build_table_payload(&decoded, &table, &events);
+                    std::hint::black_box(registry.broadcast_block("solana", &table, block).await);
+                }
+                for rx in &mut receivers {
+                    while rx.try_recv().is_ok() {}
+                }
+            }
+            eprintln!(
+                "{scenario}: {:.3} ms/block (750 rows, 27 clients, {iterations} iterations)",
+                start.elapsed().as_secs_f64() * 1000.0 / iterations as f64
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fanout_preserves_filters_envelopes_and_shared_unfiltered_bytes() {
+        let registry = super::ClientRegistry::default();
+        let mut receivers = Vec::new();
+        for client_id in 0..6 {
+            let (client, rx) = handle_with_channel(4, 0);
+            let mut filter = StreamFilter::default();
+            filter.add(StreamId::parse("solana@*").unwrap());
+            filter.wrap_envelope = client_id == 2 || client_id == 4;
+            if client_id >= 3 {
+                filter.event_filters.set(
+                    "solana@*".into(),
+                    crate::EventFilter::parse("kind:A,b", 16, 512).unwrap(),
+                );
+                filter.event_filters.set(
+                    "*@spl_transfer".into(),
+                    crate::EventFilter::parse(
+                        if client_id == 5 {
+                            "source:missing"
+                        } else {
+                            "!source:drop"
+                        },
+                        16,
+                        512,
+                    )
+                    .unwrap(),
+                );
+            }
+            *client.filter.write().await = filter;
+            registry.clients.write().await.insert(client_id, client);
+            receivers.push(rx);
+        }
+        let block = serde_json::json!({
+            "network": "solana", "table": "spl_transfer", "block_num": 42,
+            "block_hash": "hash", "timestamp": "2026-10-01 20:00:00",
+            "timestamp_seconds": 1_790_884_800, "module_hash": "module",
+            "events": [
+                {"kind":"a", "source":"keep", "note":"quote: \" and slash: \\"},
+                {"kind":"b", "source":"drop"},
+                {"kind":"c", "source":"keep"},
+                {"kind":"B", "source":"keep", "nested":["x", "y"]}
+            ]
+        });
+        let expected_raw = block.to_string();
+        let mut expected_filtered = block.clone();
+        for expression in ["kind:A,b", "!source:drop"] {
+            crate::apply_filter_in_place(
+                &mut expected_filtered,
+                &crate::EventFilter::parse(expression, 16, 512).unwrap(),
+            );
+        }
+        let stats = registry
+            .broadcast_block("solana", "spl_transfer", block)
+            .await;
+        assert_eq!(stats.delivered, 5);
+        assert_eq!(stats.bytes, expected_raw.len());
+        let mut raw_pointer = None;
+        // Keep frames alive so pointer equality proves the bytes are shared.
+        let frames: Vec<_> = receivers[..5]
+            .iter_mut()
+            .map(|rx| rx.try_recv().unwrap())
+            .collect();
+        for (client_id, frame) in frames.iter().enumerate() {
+            let axum::extract::ws::Message::Text(text) = frame else {
+                panic!("expected text")
+            };
+            let data = if client_id >= 3 {
+                expected_filtered.to_string()
+            } else {
+                expected_raw.clone()
+            };
+            let expected = if client_id == 2 || client_id == 4 {
+                format!(r#"{{"stream":"solana@spl_transfer","data":{data}}}"#)
+            } else {
+                data
+            };
+            assert_eq!(text.as_str(), expected);
+            if client_id == 0 {
+                raw_pointer = Some(text.as_str().as_ptr());
+            }
+            if client_id == 1 {
+                assert_eq!(raw_pointer.unwrap(), text.as_str().as_ptr());
+            }
+        }
+        assert!(
+            receivers[5].try_recv().is_err(),
+            "a zero-match filter emits no block"
+        );
     }
 
     #[tokio::test]
