@@ -1,10 +1,11 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 use substreams_websocket::{
-    Config, StreamConfig, StreamEvent, SubstreamsClient, SubstreamsConfig, WebSocketConfig,
+    Config, NetworkAliases, StreamConfig, StreamEvent, SubstreamsClient, SubstreamsConfig,
+    WebSocketConfig, WildcardNetworkNames,
 };
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -420,6 +421,9 @@ impl ServeArgs {
         let file = format
             .parse(&contents)
             .with_context(|| format!("failed to parse streams from {source_label}"))?;
+        let network_aliases =
+            NetworkAliases::new(file.network_aliases, file.wildcard_network_names.into())
+                .with_context(|| format!("invalid network_aliases in {source_label}"))?;
 
         Ok(Config {
             streams: file
@@ -430,6 +434,7 @@ impl ServeArgs {
             websocket: self.websocket.into_config(),
             cursors_dir: self.cursors_dir,
             cursor_max_age_secs: self.cursor_max_age_secs,
+            network_aliases: Arc::new(network_aliases),
         })
     }
 }
@@ -461,6 +466,31 @@ impl SubstreamsArgs {
 #[derive(Debug, Deserialize)]
 struct FileConfig {
     streams: Vec<FileStreamConfig>,
+    /// `alias: network` pairs: other names clients may use for a configured
+    /// network (e.g. `mainnet: eth`).
+    #[serde(default)]
+    network_aliases: BTreeMap<String, String>,
+    /// What a client subscribed through a network wildcard sees for an
+    /// aliased network: `network` (default) or `alias`.
+    #[serde(default)]
+    wildcard_network_names: FileWildcardNetworkNames,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FileWildcardNetworkNames {
+    #[default]
+    Network,
+    Alias,
+}
+
+impl From<FileWildcardNetworkNames> for WildcardNetworkNames {
+    fn from(value: FileWildcardNetworkNames) -> Self {
+        match value {
+            FileWildcardNetworkNames::Network => Self::Network,
+            FileWildcardNetworkNames::Alias => Self::Alias,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,7 +658,7 @@ fn format_stream_event(event: StreamEvent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileConfig, StreamsFormat};
+    use super::{FileConfig, FileWildcardNetworkNames, StreamsFormat};
 
     const TOML: &str = r#"
 [[streams]]
@@ -661,6 +691,38 @@ streams:
         assert_eq!(cfg.streams.len(), 1);
         assert_eq!(cfg.streams[0].network, "solana-mainnet");
         assert_eq!(cfg.streams[0].tables, vec!["swaps".to_owned()]);
+    }
+
+    #[test]
+    fn parses_network_aliases() {
+        const WITH: &str = r#"
+network_aliases:
+  mainnet: eth
+  arbitrum-one: arbone
+wildcard_network_names: alias
+streams:
+  - network: eth
+    endpoint: https://eth.substreams.pinax.network:443
+    manifest: https://example.com/evm-dex.spkg
+"#;
+        let cfg: FileConfig = StreamsFormat::Yaml.parse(WITH).expect("yaml");
+        assert_eq!(
+            cfg.network_aliases.get("mainnet").map(String::as_str),
+            Some("eth")
+        );
+        assert_eq!(cfg.network_aliases.len(), 2);
+        assert!(matches!(
+            cfg.wildcard_network_names,
+            FileWildcardNetworkNames::Alias
+        ));
+
+        // Both are optional.
+        let cfg: FileConfig = StreamsFormat::Yaml.parse(YAML).expect("yaml");
+        assert!(cfg.network_aliases.is_empty());
+        assert!(matches!(
+            cfg.wildcard_network_names,
+            FileWildcardNetworkNames::Network
+        ));
     }
 
     #[test]

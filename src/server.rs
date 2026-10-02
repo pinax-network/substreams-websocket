@@ -29,9 +29,9 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    BlockContext, Config, CursorStore, EventFilter, EventFilterSet, SUPPORTED_OUTPUT_TYPE,
-    StreamConfig, StreamEvent, SubstreamsClient, compute_module_hash_hex, decode_database_changes,
-    substreams::load_package,
+    BlockContext, Config, CursorStore, EventFilter, EventFilterSet, NetworkAliases,
+    SUPPORTED_OUTPUT_TYPE, StreamConfig, StreamEvent, SubstreamsClient, WildcardNetworkNames,
+    compute_module_hash_hex, decode_database_changes, substreams::load_package,
 };
 
 type ClientId = u64;
@@ -65,6 +65,10 @@ struct AppState {
 #[derive(Debug, Clone, serde::Serialize)]
 struct StreamMeta {
     network: String,
+    /// The network's alias (see `NetworkAliases`): another name clients may
+    /// subscribe with, and see frames under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_alias: Option<String>,
     module: String,
     manifest: String,
     module_hash: String,
@@ -107,7 +111,13 @@ pub async fn serve_with_shutdown(
     let streams_meta = Arc::new(
         prepared
             .iter()
-            .map(|prep| prep.meta.clone())
+            .map(|prep| StreamMeta {
+                network_alias: config
+                    .network_aliases
+                    .alias(&prep.meta.network)
+                    .map(str::to_owned),
+                ..prep.meta.clone()
+            })
             .collect::<Vec<_>>(),
     );
 
@@ -185,6 +195,8 @@ fn log_startup_config(config: &Config) {
         slow_client_drop_limit = ws.slow_client_drop_limit,
         cursors_dir = %config.cursors_dir.display(),
         streams = config.streams.len(),
+        network_aliases = ?config.network_aliases.pairs(),
+        wildcard_network_names = ?config.network_aliases.wildcard_names,
         "effective configuration"
     );
 }
@@ -577,6 +589,7 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
             .unwrap_or_default();
         StreamMeta {
             network: network.clone(),
+            network_alias: None,
             module: module.clone(),
             manifest: manifest.clone(),
             module_hash,
@@ -1472,11 +1485,12 @@ async fn websocket_path(
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
     let wrap_envelope = entries.len() > 1;
-    let filter = StreamFilter {
+    let filter = StreamFilter::new(
         entries,
         wrap_envelope,
         event_filters,
-    };
+        state.config.network_aliases.clone(),
+    );
     ws.on_upgrade(move |socket| handle_socket(state, filter, socket))
         .into_response()
 }
@@ -1519,11 +1533,12 @@ async fn websocket_stream_query(
         Ok(v) => v,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let filter = StreamFilter {
+    let filter = StreamFilter::new(
         entries,
-        wrap_envelope: true,
+        true,
         event_filters,
-    };
+        state.config.network_aliases.clone(),
+    );
     ws.on_upgrade(move |socket| handle_socket(state, filter, socket))
         .into_response()
 }
@@ -1595,7 +1610,7 @@ async fn handle_socket(state: AppState, filter: StreamFilter, socket: WebSocket)
         return;
     };
 
-    let initial_subs: Vec<String> = filter.entries.iter().map(StreamId::to_wire).collect();
+    let initial_subs: Vec<String> = filter.list();
     info!(
         client_id = client.name,
         subscriptions = ?initial_subs,
@@ -1878,6 +1893,11 @@ impl StreamId {
 }
 
 /// Per-client subscription set. Empty = match nothing.
+///
+/// Entries and event-filter keys hold configured networks only: a selector
+/// that names a network by its alias is resolved on the way in (see
+/// [`StreamFilter::resolve`]), and the client's own name is put back on the
+/// way out (see [`StreamFilter::label`]).
 #[derive(Debug, Clone, Default)]
 struct StreamFilter {
     entries: Vec<StreamId>,
@@ -1889,9 +1909,119 @@ struct StreamFilter {
     /// `network@stream` selector (no wildcards). Wildcard subscriptions
     /// always pass every event through.
     event_filters: EventFilterSet,
+    /// The server's network aliases.
+    aliases: Arc<NetworkAliases>,
+    /// The name this client last subscribed with for each aliased network
+    /// (configured network -> alias or network). One name per network per
+    /// connection: the latest subscription's.
+    labels: HashMap<String, String>,
 }
 
 impl StreamFilter {
+    fn new(
+        entries: Vec<StreamId>,
+        wrap_envelope: bool,
+        event_filters: EventFilterSet,
+        aliases: Arc<NetworkAliases>,
+    ) -> Self {
+        let mut filter = Self {
+            entries: Vec::new(),
+            wrap_envelope,
+            event_filters: EventFilterSet::default(),
+            aliases,
+            labels: HashMap::new(),
+        };
+        // `add` dedupes: an alias and its network are one subscription.
+        for id in filter.resolve(entries) {
+            filter.add(id);
+        }
+        let selectors: Vec<String> = event_filters.list().keys().cloned().collect();
+        for selector in selectors {
+            if let Some(f) = event_filters.get(&selector) {
+                let key = filter.resolve_selector(&selector);
+                filter.event_filters.set(key, f.clone());
+            }
+        }
+        filter
+    }
+
+    /// Rewrites each selector that names a network by its alias to the
+    /// configured network, recording the name the client used.
+    fn resolve(&mut self, ids: Vec<StreamId>) -> Vec<StreamId> {
+        for id in &ids {
+            if let Some(name) = id.network.as_deref() {
+                let network = self.aliases.network(name);
+                if network != name || self.aliases.alias(network).is_some() {
+                    self.labels.insert(network.to_owned(), name.to_owned());
+                }
+            }
+        }
+        self.canonical(ids)
+    }
+
+    /// Rewrites each selector that names a network by its alias to the
+    /// configured network, leaving the client's names alone.
+    fn canonical(&self, ids: Vec<StreamId>) -> Vec<StreamId> {
+        ids.into_iter()
+            .map(|mut id| {
+                if let Some(name) = id.network.as_deref() {
+                    id.network = Some(self.aliases.network(name).to_owned());
+                }
+                id
+            })
+            .collect()
+    }
+
+    /// A `network@table` selector, as event filters are keyed, with an
+    /// aliased network rewritten to the configured one. A selector that is
+    /// malformed or names no alias comes back unchanged. Unlike
+    /// [`StreamFilter::resolve`], this leaves the client's names alone:
+    /// filters don't decide how the client sees a network.
+    fn resolve_selector(&self, selector: &str) -> String {
+        match StreamId::parse(selector) {
+            Ok(StreamId {
+                network: Some(name),
+                stream,
+            }) if self.aliases.network(&name) != name => StreamId {
+                network: Some(self.aliases.network(&name).to_owned()),
+                stream,
+            }
+            .to_wire(),
+            _ => selector.to_owned(),
+        }
+    }
+
+    /// The name this client sees for a configured network: the one it
+    /// subscribed with, else the alias when wildcard clients see aliases,
+    /// else the network.
+    fn label<'a>(&'a self, network: &'a str) -> &'a str {
+        if let Some(label) = self.labels.get(network) {
+            return label;
+        }
+        if self.aliases.wildcard_names == WildcardNetworkNames::Alias
+            && let Some(alias) = self.aliases.alias(network)
+        {
+            return alias;
+        }
+        network
+    }
+
+    /// A `network@table` selector with the network shown as this client
+    /// names it.
+    fn label_selector(&self, selector: &str) -> String {
+        match StreamId::parse(selector) {
+            Ok(StreamId {
+                network: Some(network),
+                stream,
+            }) if self.label(&network) != network => StreamId {
+                network: Some(self.label(&network).to_owned()),
+                stream,
+            }
+            .to_wire(),
+            _ => selector.to_owned(),
+        }
+    }
+
     fn matches(&self, network: &str, stream: &str) -> bool {
         self.entries.iter().any(|e| e.matches(network, stream))
     }
@@ -1901,8 +2031,22 @@ impl StreamFilter {
         self.entries.iter().any(|e| e.matches_network(network))
     }
 
+    /// The subscriptions, with networks named as this client names them.
     fn list(&self) -> Vec<String> {
-        self.entries.iter().map(StreamId::to_wire).collect()
+        self.entries
+            .iter()
+            .map(|id| self.label_selector(&id.to_wire()))
+            .collect()
+    }
+
+    /// The event filters, keyed by selector with networks named as this
+    /// client names them.
+    fn list_filters(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.event_filters
+            .list()
+            .into_iter()
+            .map(|(selector, filter)| (self.label_selector(&selector), filter))
+            .collect()
     }
 
     fn add(&mut self, id: StreamId) {
@@ -2159,6 +2303,9 @@ impl ClientRegistry {
         let mut slow_to_close: Vec<ClientId> = Vec::new();
         let mut delivered: usize = 0;
         let limit = self.slow_client_drop_limit();
+        // The frame for clients that name the network by another name (see
+        // `StreamFilter::label`), built once per name.
+        let mut relabeled: HashMap<String, String> = HashMap::new();
         {
             let clients = self.clients.read().await;
             for (client_id, client) in clients.iter() {
@@ -2169,7 +2316,23 @@ impl ClientRegistry {
                 if !network.is_empty() && !filter.matches_network(network) {
                     continue;
                 }
-                let text = if filter.wrap_envelope {
+                let label = if network.is_empty() {
+                    network
+                } else {
+                    filter.label(network)
+                };
+                let text = if label != network {
+                    let raw = relabeled.entry(label.to_owned()).or_insert_with(|| {
+                        let mut copy = value.clone();
+                        copy["network"] = label.into();
+                        copy.to_string()
+                    });
+                    if filter.wrap_envelope {
+                        format!(r#"{{"stream":"{label}@__lifecycle__","data":{raw}}}"#)
+                    } else {
+                        raw.clone()
+                    }
+                } else if filter.wrap_envelope {
                     format!(r#"{{"stream":"{wrap_network}@__lifecycle__","data":{raw_text}}}"#)
                 } else {
                     raw_text.clone()
@@ -2236,12 +2399,21 @@ impl ClientRegistry {
         let mut dropped_notices: u64 = 0;
         let mut filter_skipped: u64 = 0;
         let mut slow_to_close: Vec<ClientId> = Vec::new();
+        // The unfiltered frame (raw, wrapped) for clients that name the
+        // network by another name (see `StreamFilter::label`), built once per
+        // name.
+        let mut relabeled: HashMap<
+            String,
+            (axum::extract::ws::Utf8Bytes, axum::extract::ws::Utf8Bytes),
+        > = HashMap::new();
 
         for (client_id, client) in clients.iter() {
             let filter = client.filter.read().await;
             if !filter.matches(network, stream) {
                 continue;
             }
+            let label = filter.label(network);
+            let relabel = (label != network).then_some(label);
             let matching_filters = filter.event_filters.matching(network, stream);
             let text = if !matching_filters.is_empty() {
                 let events: Vec<&serde_json::Value> = block["events"]
@@ -2261,12 +2433,22 @@ impl ClientRegistry {
                 let filtered_text = serde_json::to_string(&FilteredBlock {
                     block: block.as_object().expect("table payload is an object"),
                     events,
+                    network: relabel,
                 })
                 .expect("JSON values serialize");
                 if filter.wrap_envelope {
-                    format!(r#"{{"stream":"{selector}","data":{filtered_text}}}"#).into()
+                    format!(r#"{{"stream":"{label}@{stream}","data":{filtered_text}}}"#).into()
                 } else {
                     filtered_text.into()
+                }
+            } else if let Some(label) = relabel {
+                let (raw, wrapped) = relabeled.entry(label.to_owned()).or_insert_with(|| {
+                    relabel_block(&block, &unfiltered_text, network, label, stream)
+                });
+                if filter.wrap_envelope {
+                    wrapped.clone()
+                } else {
+                    raw.clone()
                 }
             } else if filter.wrap_envelope {
                 unfiltered_wrapped.clone()
@@ -2274,13 +2456,21 @@ impl ClientRegistry {
                 unfiltered_text.clone()
             };
             let wrap = filter.wrap_envelope;
+            let notice_network = relabel.map(str::to_owned);
             drop(filter);
             let outcome = backpressured_send(*client_id, client, Message::Text(text), limit);
             if outcome.delivered {
                 delivered += 1;
                 // This frame got through — if the client had been dropping,
                 // tell it how much it missed and where delivery resumed.
-                if maybe_emit_dropped_notice(client, network, block_num, last_timestamp, wrap) {
+                let notice_network = notice_network.as_deref().unwrap_or(network);
+                if maybe_emit_dropped_notice(
+                    client,
+                    notice_network,
+                    block_num,
+                    last_timestamp,
+                    wrap,
+                ) {
                     dropped_notices += 1;
                 }
             } else {
@@ -2376,11 +2566,45 @@ impl ClientRegistry {
     }
 }
 
+/// The unfiltered block frame, raw and wrapped, for a client that names
+/// `network` as `label`.
+fn relabel_block(
+    block: &serde_json::Value,
+    text: &str,
+    network: &str,
+    label: &str,
+    stream: &str,
+) -> (axum::extract::ws::Utf8Bytes, axum::extract::ws::Utf8Bytes) {
+    let raw = relabel_leading_network(text, network, label).unwrap_or_else(|| {
+        let mut copy = block.clone();
+        copy["network"] = label.into();
+        copy.to_string()
+    });
+    let wrapped = format!(r#"{{"stream":"{label}@{stream}","data":{raw}}}"#);
+    (raw.into(), wrapped.into())
+}
+
+/// `text` with its leading `network` value replaced by `label`, when it opens
+/// with `{"network":<network>` — as every block payload does, `network` being
+/// its first key. Saves re-serializing the block for each name.
+fn relabel_leading_network(text: &str, network: &str, label: &str) -> Option<String> {
+    let prefix = format!(r#"{{"network":{}"#, serde_json::Value::from(network));
+    let rest = text.strip_prefix(prefix.as_str())?;
+    Some(format!(
+        r#"{{"network":{}{rest}"#,
+        serde_json::Value::from(label)
+    ))
+}
+
 /// Borrow the block envelope and surviving rows, preserving the same field
-/// and event order as the unfiltered JSON. Only the `events` array differs.
+/// and event order as the unfiltered JSON. Only the `events` array differs,
+/// and the `network` value when `network` is set.
 struct FilteredBlock<'a> {
     block: &'a serde_json::Map<String, serde_json::Value>,
     events: Vec<&'a serde_json::Value>,
+    /// The name to show for the block's network, when the client names it
+    /// differently (see `StreamFilter::label`).
+    network: Option<&'a str>,
 }
 
 impl Serialize for FilteredBlock<'_> {
@@ -2389,6 +2613,10 @@ impl Serialize for FilteredBlock<'_> {
         for (key, value) in self.block {
             if key == "events" {
                 map.serialize_entry(key, &self.events)?;
+            } else if key == "network"
+                && let Some(label) = self.network
+            {
+                map.serialize_entry(key, label)?;
             } else {
                 map.serialize_entry(key, value)?;
             }
@@ -2625,7 +2853,7 @@ async fn handle_subscription_command(
             let (added, total) = {
                 let mut guard = filter.write().await;
                 let before = guard.list().len();
-                for id in parsed {
+                for id in guard.resolve(parsed) {
                     guard.add(id);
                 }
                 let total = guard.list().len();
@@ -2665,7 +2893,7 @@ async fn handle_subscription_command(
             let (removed, total) = {
                 let mut guard = filter.write().await;
                 let before = guard.list().len();
-                for id in &parsed {
+                for id in &guard.canonical(parsed) {
                     guard.remove(id);
                 }
                 let total = guard.list().len();
@@ -2729,7 +2957,8 @@ async fn handle_subscription_command(
             };
             {
                 let mut guard = filter.write().await;
-                guard.event_filters.set(selector.to_owned(), parsed_filter);
+                let key = guard.resolve_selector(selector);
+                guard.event_filters.set(key, parsed_filter);
             }
             info!(client_id, selector, "SET_FILTER");
             serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
@@ -2751,14 +2980,15 @@ async fn handle_subscription_command(
             {
                 let mut guard = filter.write().await;
                 for selector in &raw {
-                    guard.event_filters.remove(selector);
+                    let key = guard.resolve_selector(selector);
+                    guard.event_filters.remove(&key);
                 }
             }
             info!(client_id, params = ?raw, "CLEAR_FILTER");
             serde_json::json!({ "result": serde_json::Value::Null, "id": id }).to_string()
         }
         "LIST_FILTERS" => {
-            let list = filter.read().await.event_filters.list();
+            let list = filter.read().await.list_filters();
             info!(client_id, count = list.len(), "LIST_FILTERS");
             serde_json::json!({ "result": list, "id": id }).to_string()
         }
@@ -2880,6 +3110,7 @@ mod filter_tests {
             entries: vec![id],
             wrap_envelope: false,
             event_filters: EventFilterSet::default(),
+            ..StreamFilter::default()
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("anything", "anywhere"));
@@ -2891,6 +3122,7 @@ mod filter_tests {
             entries: vec![id(Some("solana-mainnet"), Some("swaps"))],
             wrap_envelope: false,
             event_filters: EventFilterSet::default(),
+            ..StreamFilter::default()
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(!f.matches("solana-mainnet", "transfers"));
@@ -2903,6 +3135,7 @@ mod filter_tests {
             entries: vec![id(None, Some("swaps"))],
             wrap_envelope: false,
             event_filters: EventFilterSet::default(),
+            ..StreamFilter::default()
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("ethereum-mainnet", "swaps"));
@@ -2915,6 +3148,7 @@ mod filter_tests {
             entries: vec![id(Some("solana-mainnet"), None)],
             wrap_envelope: false,
             event_filters: EventFilterSet::default(),
+            ..StreamFilter::default()
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("solana-mainnet", "transfers"));
@@ -2930,6 +3164,7 @@ mod filter_tests {
             ],
             wrap_envelope: false,
             event_filters: EventFilterSet::default(),
+            ..StreamFilter::default()
         };
         assert!(f.matches("solana-mainnet", "swaps"));
         assert!(f.matches("ethereum-mainnet", "transfers"));
@@ -4053,6 +4288,331 @@ mod tests {
         (client, rx)
     }
 
+    fn mainnet_alias(wildcard_names: WildcardNetworkNames) -> Arc<NetworkAliases> {
+        Arc::new(
+            NetworkAliases::new([("mainnet".to_owned(), "eth".to_owned())], wildcard_names)
+                .expect("valid aliases"),
+        )
+    }
+
+    fn alias_filter(
+        selectors: &str,
+        wrap_envelope: bool,
+        event_filters: EventFilterSet,
+        wildcard_names: WildcardNetworkNames,
+    ) -> StreamFilter {
+        StreamFilter::new(
+            parse_stream_list(selectors).expect("valid selectors"),
+            wrap_envelope,
+            event_filters,
+            mainnet_alias(wildcard_names),
+        )
+    }
+
+    fn kind_filter(selector: &str, expression: &str) -> EventFilterSet {
+        let mut set = EventFilterSet::default();
+        set.set(
+            selector.to_owned(),
+            crate::EventFilter::parse(expression, 16, 512).expect("valid filter"),
+        );
+        set
+    }
+
+    #[test]
+    fn alias_selectors_resolve_to_the_configured_network() {
+        use WildcardNetworkNames::{Alias, Network};
+        let f = alias_filter(
+            "mainnet@swaps/base@swaps",
+            true,
+            EventFilterSet::default(),
+            Network,
+        );
+        assert!(f.matches("eth", "swaps"));
+        assert!(
+            !f.matches("mainnet", "swaps"),
+            "matching only sees configured networks"
+        );
+        assert!(f.matches("base", "swaps"));
+        assert_eq!(f.label("eth"), "mainnet");
+        assert_eq!(f.label("base"), "base");
+        assert_eq!(f.list(), vec!["mainnet@swaps", "base@swaps"]);
+
+        // A client that names the network keeps that name, whatever wildcard clients see.
+        let f = alias_filter("eth@swaps", false, EventFilterSet::default(), Alias);
+        assert_eq!(f.label("eth"), "eth");
+        assert_eq!(f.list(), vec!["eth@swaps"]);
+
+        // The alias and the network are one subscription.
+        let f = alias_filter(
+            "mainnet@swaps/eth@swaps",
+            true,
+            EventFilterSet::default(),
+            Network,
+        );
+        assert_eq!(f.entries.len(), 1);
+        assert_eq!(f.label("eth"), "eth", "the latest name wins");
+    }
+
+    #[test]
+    fn wildcard_clients_see_the_configured_names_or_the_aliases() {
+        use WildcardNetworkNames::{Alias, Network};
+        let none = EventFilterSet::default;
+        assert_eq!(
+            alias_filter("*@swaps", false, none(), Network).label("eth"),
+            "eth"
+        );
+        assert_eq!(
+            alias_filter("*@swaps", false, none(), Alias).label("eth"),
+            "mainnet"
+        );
+        assert_eq!(
+            alias_filter("*@swaps", false, none(), Alias).label("base"),
+            "base"
+        );
+        assert_eq!(
+            alias_filter("*@*", false, none(), Alias).list(),
+            vec!["*@*"]
+        );
+    }
+
+    #[test]
+    fn alias_filter_selectors_are_keyed_by_the_configured_network() {
+        use WildcardNetworkNames::Network;
+        // `?filter=` on an alias selector.
+        let f = alias_filter(
+            "mainnet@swaps",
+            false,
+            kind_filter("mainnet@swaps", "kind:a"),
+            Network,
+        );
+        assert_eq!(f.event_filters.matching("eth", "swaps").len(), 1);
+        assert!(f.list_filters().contains_key("mainnet@swaps"));
+
+        // SET_FILTER / CLEAR_FILTER selectors resolve without renaming the network.
+        let f = alias_filter("eth@swaps", false, EventFilterSet::default(), Network);
+        assert_eq!(f.resolve_selector("mainnet@swaps"), "eth@swaps");
+        assert_eq!(f.resolve_selector("mainnet@*"), "eth@*");
+        assert_eq!(f.resolve_selector("base@*"), "base@*");
+        assert_eq!(f.resolve_selector("*@swaps"), "*@swaps");
+        assert_eq!(f.resolve_selector("not a selector"), "not a selector");
+        assert_eq!(f.label("eth"), "eth");
+    }
+
+    #[test]
+    fn relabels_block_frames() {
+        let text =
+            serde_json::json!({"network": "eth", "table": "swaps", "events": []}).to_string();
+        assert_eq!(
+            relabel_leading_network(&text, "eth", "mainnet").as_deref(),
+            Some(r#"{"network":"mainnet","table":"swaps","events":[]}"#)
+        );
+        assert_eq!(relabel_leading_network(&text, "base", "mainnet"), None);
+
+        // A frame that doesn't open with its network is re-serialized.
+        let block = serde_json::json!({"table": "swaps", "network": "eth"});
+        let (raw, wrapped) = relabel_block(&block, &block.to_string(), "eth", "mainnet", "swaps");
+        assert_eq!(raw.as_str(), r#"{"table":"swaps","network":"mainnet"}"#);
+        assert_eq!(
+            wrapped.as_str(),
+            r#"{"stream":"mainnet@swaps","data":{"table":"swaps","network":"mainnet"}}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn block_frames_name_the_network_as_each_client_does() {
+        use WildcardNetworkNames::{Alias, Network};
+        let registry = ClientRegistry::default();
+        let filters = [
+            alias_filter("mainnet@swaps", false, EventFilterSet::default(), Network),
+            alias_filter("eth@swaps", false, EventFilterSet::default(), Network),
+            alias_filter("*@swaps", false, EventFilterSet::default(), Alias),
+            alias_filter(
+                "mainnet@swaps/base@swaps",
+                true,
+                EventFilterSet::default(),
+                Network,
+            ),
+            alias_filter(
+                "mainnet@swaps",
+                false,
+                kind_filter("mainnet@swaps", "kind:a"),
+                Network,
+            ),
+            alias_filter("*@swaps", true, EventFilterSet::default(), Network),
+        ];
+        let mut receivers = Vec::new();
+        for (client_id, filter) in filters.into_iter().enumerate() {
+            let (client, rx) = handle_with_channel(8, 0);
+            *client.filter.write().await = filter;
+            registry
+                .clients
+                .write()
+                .await
+                .insert(client_id as u64, client);
+            receivers.push(rx);
+        }
+        let block = serde_json::json!({
+            "network": "eth", "table": "swaps", "block_num": 1, "block_hash": "h",
+            "timestamp": "2026-10-02 00:00:00", "timestamp_seconds": 1_790_899_200,
+            "module_hash": "m", "events": [{"kind": "a"}, {"kind": "b"}]
+        });
+        let stats = registry
+            .broadcast_block("eth", "swaps", block.clone())
+            .await;
+        assert_eq!(stats.delivered, 6);
+
+        let as_mainnet =
+            block
+                .to_string()
+                .replacen(r#""network":"eth""#, r#""network":"mainnet""#, 1);
+        let filtered = r#"{"network":"mainnet","table":"swaps","block_num":1,"block_hash":"h","timestamp":"2026-10-02 00:00:00","timestamp_seconds":1790899200,"module_hash":"m","events":[{"kind":"a"}]}"#;
+        let expected = [
+            as_mainnet.clone(),
+            block.to_string(),
+            as_mainnet.clone(),
+            format!(r#"{{"stream":"mainnet@swaps","data":{as_mainnet}}}"#),
+            filtered.to_owned(),
+            format!(r#"{{"stream":"eth@swaps","data":{block}}}"#),
+        ];
+        for (client_id, rx) in receivers.iter_mut().enumerate() {
+            let axum::extract::ws::Message::Text(text) = rx.try_recv().expect("frame") else {
+                panic!("expected text")
+            };
+            assert_eq!(text.as_str(), expected[client_id], "client {client_id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_frames_name_the_network_as_each_client_does() {
+        use WildcardNetworkNames::{Alias, Network};
+        let registry = ClientRegistry::default();
+        let filters = [
+            alias_filter("mainnet@swaps", false, EventFilterSet::default(), Network),
+            alias_filter(
+                "eth@swaps/base@swaps",
+                true,
+                EventFilterSet::default(),
+                Network,
+            ),
+            alias_filter("*@*", true, EventFilterSet::default(), Alias),
+        ];
+        let mut receivers = Vec::new();
+        for (client_id, filter) in filters.into_iter().enumerate() {
+            let (client, rx) = handle_with_channel(8, 0);
+            *client.filter.write().await = filter;
+            registry
+                .clients
+                .write()
+                .await
+                .insert(client_id as u64, client);
+            receivers.push(rx);
+        }
+        let delivered = registry
+            .broadcast_lifecycle(serde_json::json!({
+                "type": "stream", "status": "error", "network": "eth", "message": "boom",
+            }))
+            .await;
+        assert_eq!(delivered, 3);
+
+        let mut frames = Vec::new();
+        for rx in &mut receivers {
+            let axum::extract::ws::Message::Text(text) = rx.try_recv().expect("frame") else {
+                panic!("expected text")
+            };
+            frames.push(serde_json::from_str::<serde_json::Value>(&text).expect("json"));
+        }
+        assert_eq!(frames[0]["network"], "mainnet");
+        assert_eq!(frames[0]["message"], "boom");
+        assert_eq!(frames[1]["stream"], "eth@__lifecycle__");
+        assert_eq!(frames[1]["data"]["network"], "eth");
+        assert_eq!(frames[2]["stream"], "mainnet@__lifecycle__");
+        assert_eq!(frames[2]["data"]["network"], "mainnet");
+    }
+
+    #[tokio::test]
+    async fn websocket_clients_subscribe_by_network_alias() {
+        let mut cfg = config();
+        cfg.streams[0].substreams.network = Some("eth".to_owned());
+        cfg.network_aliases = mainnet_alias(WildcardNetworkNames::Network);
+        let server = TestServer::start(cfg).await;
+
+        let (mut socket, _) = connect_async(format!("ws://{}/ws/mainnet@swaps", server.addr))
+            .await
+            .expect("websocket connects");
+        async fn next_json(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> serde_json::Value {
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                    .await
+                    .expect("message within 5s")
+                    .expect("socket open")
+                    .expect("valid message");
+                if let TungsteniteMessage::Text(text) = message {
+                    return serde_json::from_str(&text).expect("json");
+                }
+            }
+        }
+        use futures_util::SinkExt;
+
+        let welcome = next_json(&mut socket).await;
+        assert_eq!(
+            welcome["subscriptions"],
+            serde_json::json!(["mainnet@swaps"])
+        );
+        assert_eq!(welcome["streams"][0]["network"], "eth");
+        assert_eq!(welcome["streams"][0]["network_alias"], "mainnet");
+
+        socket
+            .send(TungsteniteMessage::Text(
+                r#"{"method":"SUBSCRIBE","params":["mainnet@transfers"],"id":1}"#.into(),
+            ))
+            .await
+            .expect("send SUBSCRIBE");
+        assert_eq!(next_json(&mut socket).await["id"], 1);
+        socket
+            .send(TungsteniteMessage::Text(
+                r#"{"method":"LIST_SUBSCRIPTIONS","id":2}"#.into(),
+            ))
+            .await
+            .expect("send LIST_SUBSCRIPTIONS");
+        assert_eq!(
+            next_json(&mut socket).await["result"],
+            serde_json::json!(["mainnet@swaps", "mainnet@transfers"])
+        );
+
+        let block = serde_json::json!({
+            "network": "eth", "table": "swaps", "block_num": 1, "block_hash": "h",
+            "timestamp": "2026-10-02 00:00:00", "timestamp_seconds": 1_790_899_200,
+            "module_hash": "m", "events": [{"kind": "a"}]
+        });
+        let stats = server.clients.broadcast_block("eth", "swaps", block).await;
+        assert_eq!(stats.delivered, 1);
+        let frame = next_json(&mut socket).await;
+        assert_eq!(frame["network"], "mainnet");
+        assert_eq!(frame["events"][0]["kind"], "a");
+
+        socket
+            .send(TungsteniteMessage::Text(
+                r#"{"method":"UNSUBSCRIBE","params":["mainnet@swaps"],"id":3}"#.into(),
+            ))
+            .await
+            .expect("send UNSUBSCRIBE");
+        assert_eq!(next_json(&mut socket).await["id"], 3);
+        socket
+            .send(TungsteniteMessage::Text(
+                r#"{"method":"LIST_SUBSCRIPTIONS","id":4}"#.into(),
+            ))
+            .await
+            .expect("send LIST_SUBSCRIPTIONS");
+        assert_eq!(
+            next_json(&mut socket).await["result"],
+            serde_json::json!(["mainnet@transfers"])
+        );
+    }
+
     // Run manually in release mode; timings are evidence, not a CI threshold.
     #[tokio::test]
     #[ignore = "synthetic transfer fan-out benchmark"]
@@ -4393,6 +4953,12 @@ mod tests {
                     .iter()
                     .map(|s| StreamMeta {
                         network: s.substreams.network.clone().unwrap_or_default(),
+                        network_alias: s
+                            .substreams
+                            .network
+                            .as_deref()
+                            .and_then(|n| config.network_aliases.alias(n))
+                            .map(str::to_owned),
                         module: s.substreams.module.clone(),
                         manifest: s.substreams.manifest.clone(),
                         module_hash: String::new(),
@@ -4507,6 +5073,7 @@ mod tests {
             },
             cursors_dir: std::path::PathBuf::from("/tmp/cursors-test"),
             cursor_max_age_secs: 0,
+            network_aliases: Arc::default(),
         }
     }
 

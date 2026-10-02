@@ -23,6 +23,8 @@ Stream selectors are `<network>@<table>` (Binance market-streams style). `*` is 
 
 The `<network>` side also accepts a comma-separated list to subscribe to the same table across multiple chains in one selector: `<n1>,<n2>,...@<table>` (e.g. `solana-mainnet,ethereum-mainnet@swaps`). The server expands it into one entry per network — `LIST_SUBSCRIPTIONS` echoes the expanded form. Mixing `*` with named networks (`*,solana-mainnet@swaps`) is rejected; use a bare `*` instead. Comma on the `<table>` side is not supported.
 
+A network can have an **alias** — another name the server accepts for it, listed as `network_alias` in `/streams` and the welcome `streams[]` (e.g. `"network": "eth", "network_alias": "mainnet"`). You may subscribe, filter and unsubscribe with either name. Everything the server sends you uses the name you subscribed with: the payload's `network`, the `{"stream":"<network>@<table>"}` envelope, lifecycle and `dropped` frames, `subscriptions`, `LIST_SUBSCRIPTIONS` and `LIST_FILTERS`. If you use both names for one network on one connection, the most recent subscription's name wins. Through a network wildcard (`*@…`) you see the configured `network`, unless the server keeps wildcard clients on the alias.
+
 Two URL modes:
 
 | URL | Behavior |
@@ -69,6 +71,7 @@ On connect, the server sends a single `session` message describing every configu
 ```
 
 - `streams` lists every Substreams source the server reads. Each entry is identified by `(network, package_name, package_version, module_hash)` — there is no operator-defined name. The optional `tables` array advertises which DatabaseChanges tables that spkg emits, so clients can build a discovery UI without waiting for blocks. When present it is also the complete allowlist of broadcast tables — the server drops rows for any table not listed, so a `network@table` outside this set will never deliver. When absent, every table the spkg emits is broadcast.
+- `network_alias`, when present, is another name the server accepts for that `network` (see [Server URL conventions](#server-url-conventions)).
 - `subscriptions` is what this connection will actually receive (filtered set). Selectors are `<network>@<table>` where `<table>` is a DatabaseChanges table emitted by the spkg's `db_out`.
 - `wrap_envelope` tells you whether subsequent payloads are wrapped in `{"stream","data"}` or sent raw.
 
