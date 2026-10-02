@@ -34,6 +34,22 @@
 #                 decompression (e.g. Hyperliquid hypercore), which otherwise
 #                 fail every block with "Error decompressing: size limit ...".
 
+# Optional, top level: other names clients may use for a configured network,
+# as `alias: network`. Kept while clients move from one naming to another,
+# e.g. from the Token API's `mainnet` to the Pinax id `eth`. A selector may
+# name either; each client sees frames under the name it subscribed with.
+# A network has at most one alias, and an alias can't be a configured network.
+#
+# network_aliases:
+#   mainnet: eth
+#   arbitrum-one: arbone
+#
+# What a client subscribed through a network wildcard (`*@swaps`) sees for an
+# aliased network: `network` (default, the configured id) or `alias` (the
+# names wildcard clients saw before the rename).
+#
+# wildcard_network_names: alias
+
 streams:
   - network: solana
     endpoint: https://solana.substreams.pinax.network:443

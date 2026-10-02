@@ -89,3 +89,11 @@ Why: a client subscribed to `polymarket@*` would otherwise see `error`/`fatal` n
 Rejected: requiring a writable filesystem for the streams config.
 
 Why: Railway / Fly / Heroku deploys don't have a place to drop a config file without baking it into the image. Inline YAML (or TOML) lets the platform's env-var UI be the config plane.
+
+## Network aliases for renames
+
+A network can carry one alias (`network_aliases: { mainnet: eth }`). Selectors may use either name; matching, metrics, logs and cursors use the configured network, and each client is shown the name it subscribed with. Wildcard subscribers see the configured network, or the alias with `wildcard_network_names: alias`.
+
+Rejected: renaming in place (breaks every client that hardcodes the old name, in its URLs and in the `network` it reads back); running the stream twice under both names (doubles the Substreams load); rewriting names in the gateway in front of the server (the gateway would have to parse client commands and rewrite payloads, and a client reaching the server directly would see different names).
+
+Why: Pinax moves its products to its internal network ids (`eth`, `arbone`) while clients use the Token API's (`mainnet`, `arbitrum-one`). Echoing the client's own name keeps existing clients byte-for-byte unchanged during the move, and the alias table is the one place to retire the old names once clients have switched.

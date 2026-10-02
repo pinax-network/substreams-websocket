@@ -137,6 +137,28 @@ Validation refuses duplicate `(network, manifest, module)` triples. Non-Database
 
 Cursor files are named `<network>-<package_name>@<package_version>-<module_hash>.cursor`.
 
+#### Network aliases
+
+To rename a network without breaking clients (e.g. from the Token API's `mainnet` to the Pinax id `eth`), configure the streams under the new id and keep the old one as an alias, at the top level of `streams.yaml`:
+
+```yaml
+network_aliases:        # alias: network
+  mainnet: eth
+  arbitrum-one: arbone
+wildcard_network_names: alias   # optional; default `network`
+streams:
+  - network: eth
+    ...
+```
+
+- Selectors may name either (`/ws/mainnet@swaps`, `/ws/eth@swaps`, `SUBSCRIBE`, `SET_FILTER`, `?filter=`). The server matches on the configured network.
+- Each client sees the name it subscribed with: in block and lifecycle frames, `{"stream":...}` envelopes, the welcome `subscriptions`, `LIST_SUBSCRIPTIONS` and `LIST_FILTERS`.
+- A client subscribed through a network wildcard (`*@swaps`) sees the configured id, or the alias with `wildcard_network_names: alias`, so wildcard clients keep the names they had until the old names are retired.
+- `/streams` and the welcome `streams[]` list the configured `network` and its `network_alias`.
+- Metrics, logs and cursor files use the configured network. Renaming a network therefore starts its streams from `start_block` (default: head) on the first restart, since cursor files are named by network.
+
+A network has at most one alias, an alias can't also be a configured network, and every alias must point at a configured network; startup fails otherwise.
+
 ---
 
 ## WebSocket API
