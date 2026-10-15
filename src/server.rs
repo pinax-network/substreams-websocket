@@ -1136,6 +1136,12 @@ async fn handle_substream_event(
                     "package_version" => identity.package_version.clone()
                 )
                 .increment(1);
+                // Head gauges are a property of the source, not of delivery:
+                // refresh them here too, or an unsubscribed stream keeps its
+                // last value forever and drift alerts fire stale (or miss a
+                // real stall). Without decoding there are no rows, so only
+                // operator-declared tables are updated.
+                update_head_block_gauges(identity, number, timestamp_seconds, &[]);
                 save_cursor(cursors, identity, &cursor).await;
                 profile.maybe_flush(identity);
                 return;
@@ -1191,7 +1197,12 @@ async fn handle_substream_event(
                 });
             }
 
-            update_head_block_gauges(identity, &decoded);
+            update_head_block_gauges(
+                identity,
+                decoded.block_num,
+                decoded.timestamp_seconds,
+                &decoded.events,
+            );
 
             if !decoded.events.is_empty() {
                 profile.rows += decoded.events.len() as u64;
@@ -1283,13 +1294,16 @@ async fn handle_substream_event(
 
 /// Update per-stream head-block gauges. One block applies to every table
 /// emitted by the same spkg, so we update gauges for each operator-declared
-/// table (or, when none are declared, the set of tables that appear in this
-/// block's events). Drift is `now - block_timestamp` (seconds, fractional);
-/// not clamped — negative values surface clock skew between this server and
-/// the block producer.
+/// table (or, when none are declared, the set of tables that appear in
+/// `events`). Called for every block, including the no-subscriber skip path,
+/// which passes no events. Drift is `now - block_timestamp` (seconds,
+/// fractional); not clamped — negative values surface clock skew between this
+/// server and the block producer.
 fn update_head_block_gauges(
     identity: &StreamIdentity,
-    decoded: &crate::DatabaseChangesBlockMessage,
+    block_num: u64,
+    timestamp_seconds: i64,
+    events: &[serde_json::Map<String, serde_json::Value>],
 ) {
     // `as_secs_f64` preserves sub-second precision on `now`. Block
     // timestamps themselves are integer seconds, so drift granularity is
@@ -1301,8 +1315,8 @@ fn update_head_block_gauges(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    let drift = now_secs - decoded.timestamp_seconds as f64;
-    let block_num = decoded.block_num as f64;
+    let drift = now_secs - timestamp_seconds as f64;
+    let block_num = block_num as f64;
 
     // Borrow declared tables when present; only allocate when we need the
     // fallback (no operator-declared tables — derive from event `@table`s).
@@ -1311,7 +1325,7 @@ fn update_head_block_gauges(
         &identity.tables
     } else {
         let mut acc: Vec<String> = Vec::new();
-        for ev in &decoded.events {
+        for ev in events {
             if let Some(t) = ev.get("@table").and_then(serde_json::Value::as_str)
                 && !acc.iter().any(|s| s == t)
             {
@@ -5130,7 +5144,12 @@ mod tests {
             events: vec![],
         };
 
-        super::update_head_block_gauges(&identity, &decoded);
+        super::update_head_block_gauges(
+            &identity,
+            decoded.block_num,
+            decoded.timestamp_seconds,
+            &decoded.events,
+        );
 
         let rendered = crate::metrics::render();
 
@@ -5201,7 +5220,12 @@ mod tests {
             events: vec![mk_event("swaps"), mk_event("pools"), mk_event("swaps")],
         };
 
-        super::update_head_block_gauges(&identity, &decoded);
+        super::update_head_block_gauges(
+            &identity,
+            decoded.block_num,
+            decoded.timestamp_seconds,
+            &decoded.events,
+        );
 
         let rendered = crate::metrics::render();
 
@@ -5270,7 +5294,12 @@ mod tests {
             events: vec![],
         };
 
-        super::update_head_block_gauges(&identity, &decoded);
+        super::update_head_block_gauges(
+            &identity,
+            decoded.block_num,
+            decoded.timestamp_seconds,
+            &decoded.events,
+        );
 
         let rendered = crate::metrics::render();
         let matchers = ["stream=\"gauge-test-net-skew@swaps\""];
@@ -5289,5 +5318,77 @@ mod tests {
             (-65.0..-55.0).contains(&drift),
             "expected drift near -60s for future-dated block, got {drift}; rendered:\n{rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn skipped_blocks_still_advance_head_gauges() {
+        // With no subscribers the block is skipped before decode. The head
+        // gauges must still follow the source: a stream that caught up after a
+        // stall used to keep reporting the stall's drift until a client
+        // subscribed (INC-34011).
+        crate::metrics::init();
+
+        let identity = super::StreamIdentity {
+            network: "gauge-test-net-skip".to_owned(),
+            package_name: "pkg".to_owned(),
+            package_version: "v1".to_owned(),
+            module_hash: "h".to_owned(),
+            manifest: "./gauge-test-skip.spkg".to_owned(),
+            endpoint: "https://gauge-test-skip:443".to_owned(),
+            tables: vec!["spl_transfer".to_owned(), "system_transfer".to_owned()],
+        };
+        let clients = super::ClientRegistry::default();
+        let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
+        let cursors = CursorStore::new(cursors_dir.path());
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is past UNIX epoch")
+            .as_secs() as i64;
+
+        // A block from the stall, then one at head. Neither is decoded.
+        let mut profile = BlockProfile::default();
+        for (number, age) in [(100, 1_000), (101, 5)] {
+            super::handle_substream_event(
+                &identity,
+                &clients,
+                &cursors,
+                StreamEvent::Block {
+                    number,
+                    id: format!("block-{number}"),
+                    timestamp: String::new(),
+                    timestamp_seconds: now_secs - age,
+                    output_type_url: String::new(),
+                    payload: Vec::new(),
+                    cursor: format!("cursor-{number}"),
+                },
+                &mut profile,
+            )
+            .await;
+        }
+        assert_eq!(profile.skipped, 2, "both blocks take the skip path");
+
+        let rendered = crate::metrics::render();
+        for table in ["spl_transfer", "system_transfer"] {
+            let stream = format!("stream=\"gauge-test-net-skip@{table}\"");
+            let matchers = [stream.as_str()];
+            let block_num = find_metric_value(
+                &rendered,
+                "substreams_websocket_head_block_number",
+                &matchers,
+            )
+            .unwrap_or_else(|| panic!("head_block_number missing for {table} in:\n{rendered}"));
+            assert_eq!(block_num, 101.0, "head_block_number for {table}");
+
+            let drift = find_metric_value(
+                &rendered,
+                "substreams_websocket_head_block_time_drift",
+                &matchers,
+            )
+            .unwrap_or_else(|| panic!("drift missing for {table} in:\n{rendered}"));
+            assert!(
+                (5.0..60.0).contains(&drift),
+                "drift {drift} for {table} should follow the latest block (~5s), not the stall"
+            );
+        }
     }
 }
