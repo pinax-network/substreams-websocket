@@ -11,6 +11,20 @@ Stream decoded Substreams `DatabaseChanges` block outputs over a single WebSocke
 
 Extended reference docs live under [`docs/`](docs/). On-wire message shape: [`skills/SKILL.md`](skills/SKILL.md).
 
+## Embed in an Axum application
+
+`EmbeddedServer::prepare(config).await` validates configuration, loads packages,
+and owns the Substreams reader tasks without opening a listener. Merge
+`server.router(EmbeddedRoutes::default())` into an Axum router to serve the same
+legacy protocol and discovery endpoints from your application's HTTP listener.
+`EmbeddedRoutes` can omit health, version and metrics routes when the host owns
+them; the host can append `substreams_websocket::metrics::render()` to its metrics
+response. Retain the server for the lifetime of the host and call
+`server.shutdown().await` inside its graceful-shutdown future to drain clients.
+Dropping it aborts its source tasks, including after listener startup errors.
+Embedding does not change subscriptions, row filtering, undo frames, backpressure,
+or the live-only feed. The host still supplies authentication at its gateway.
+
 ---
 
 ## Install
