@@ -38,6 +38,9 @@ type ClientId = u64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    #[error("invalid configuration: {0}")]
+    Config(#[from] crate::ConfigError),
+
     #[error("failed to bind {addr}: {source}")]
     Bind {
         addr: SocketAddr,
@@ -95,81 +98,136 @@ pub async fn serve_with_shutdown(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServerError> {
-    let config = Arc::new(config);
-
-    log_startup_config(&config);
-
-    // Install the Prometheus recorder before any code path increments a
-    // counter, so all metrics land in the same registry that `/metrics`
-    // renders. Safe to call repeatedly — first call wins.
-    crate::metrics::init();
-
-    // Pre-load every Substreams package in parallel so the welcome message can
-    // expose each stream's module_hash. Failed loads land as empty `StreamMeta`
-    // here and re-fail inside the per-stream task with a clear error to clients.
-    let prepared = prepare_streams(&config).await;
-    let streams_meta = Arc::new(
-        prepared
-            .iter()
-            .map(|prep| StreamMeta {
-                network_alias: config
-                    .network_aliases
-                    .alias(&prep.meta.network)
-                    .map(str::to_owned),
-                ..prep.meta.clone()
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let clients = ClientRegistry::default();
-    clients.set_slow_client_drop_limit(config.websocket.slow_client_drop_limit);
-
-    let state = AppState {
-        config: config.clone(),
-        clients,
-        streams_meta,
-        draining: Arc::new(AtomicBool::new(false)),
-    };
-
-    let listen = state.config.websocket.listen;
-    let ws_path = state.config.websocket.ws_path.clone();
-    let health_path = state.config.websocket.health_path.clone();
-    let drain_timeout = state.config.websocket.shutdown_drain_timeout;
-    let clients = state.clients.clone();
-    let draining = state.draining.clone();
-    let stream_tasks = spawn_streams(&state, prepared);
-    let app = build_app(state);
-
+    let server = EmbeddedServer::prepare(config).await?;
+    let listen = server.state.config.websocket.listen;
+    let ws_path = server.state.config.websocket.ws_path.clone();
+    let health_path = server.state.config.websocket.health_path.clone();
+    let app = server.router(EmbeddedRoutes::default());
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|source| ServerError::Bind {
             addr: listen,
             source,
         })?;
-
-    // Wrap the caller-provided shutdown so we drain WebSocket clients before
-    // axum's graceful_shutdown stops accepting connections. Order matters:
-    // (1) wait for caller signal, (2) send Close to each client, (3) wait up
-    // to drain_timeout for them to disconnect, (4) yield → axum tears down.
-    let shutdown_with_drain = async move {
+    serve_listener(listener, app, ws_path, health_path, async move {
         shutdown.await;
-        // Flip /healthz to 503 first so reverse proxies (Envoy, nginx, ALB)
-        // mark this replica unhealthy and stop routing new connections to it
-        // before we send Close frames.
-        draining.store(true, Ordering::SeqCst);
-        metrics::counter!("substreams_websocket_drain_initiated_total").increment(1);
-        metrics::gauge!("substreams_websocket_draining").set(1.0);
-        clients.drain("server shutting down", drain_timeout).await;
-        metrics::gauge!("substreams_websocket_draining").set(0.0);
-    };
+        server.shutdown().await;
+    })
+    .await
+}
 
-    let result = serve_listener(listener, app, ws_path, health_path, shutdown_with_drain).await;
+/// Optional routes that an embedding application may already own. Protocol and
+/// discovery routes remain identical to the standalone server. Disable these
+/// before merging routers when the host provides its own health, version or
+/// combined metrics endpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct EmbeddedRoutes {
+    pub health: bool,
+    pub version: bool,
+    pub metrics: bool,
+}
 
-    for task in stream_tasks {
-        task.abort();
+impl Default for EmbeddedRoutes {
+    fn default() -> Self {
+        Self {
+            health: true,
+            version: true,
+            metrics: true,
+        }
+    }
+}
+
+/// An in-process WebSocket service, including its Substreams readers. This does
+/// not open a listener: merge [`Self::router`] into the host's Axum application.
+/// Keep this value alive while serving, then call [`Self::shutdown`] to drain
+/// clients. Dropping it always aborts its upstream reader tasks.
+pub struct EmbeddedServer {
+    state: AppState,
+    stream_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl EmbeddedServer {
+    /// Validate configuration, prepare source packages and start their readers.
+    /// Like standalone startup, package failures are surfaced by stream
+    /// lifecycle messages without removing unaffected configured sources.
+    pub async fn prepare(config: Config) -> Result<Self, ServerError> {
+        config.validate()?;
+        let config = Arc::new(config);
+
+        log_startup_config(&config);
+
+        // Install the Prometheus recorder before any code path increments a
+        // counter, so all metrics land in the same registry that `/metrics`
+        // renders. Safe to call repeatedly — first call wins.
+        crate::metrics::init();
+
+        // Pre-load every Substreams package in parallel so the welcome message can
+        // expose each stream's module_hash. Failed loads land as empty `StreamMeta`
+        // here and re-fail inside the per-stream task with a clear error to clients.
+        let prepared = prepare_streams(&config).await;
+        let streams_meta = Arc::new(
+            prepared
+                .iter()
+                .map(|prep| StreamMeta {
+                    network_alias: config
+                        .network_aliases
+                        .alias(&prep.meta.network)
+                        .map(str::to_owned),
+                    ..prep.meta.clone()
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let clients = ClientRegistry::default();
+        clients.set_slow_client_drop_limit(config.websocket.slow_client_drop_limit);
+
+        let state = AppState {
+            config: config.clone(),
+            clients,
+            streams_meta,
+            draining: Arc::new(AtomicBool::new(false)),
+        };
+
+        let stream_tasks = spawn_streams(&state, prepared);
+        Ok(Self {
+            state,
+            stream_tasks,
+        })
     }
 
-    result
+    pub fn router(&self, routes: EmbeddedRoutes) -> Router {
+        build_app_with_routes(self.state.clone(), routes)
+    }
+
+    /// Mark the service draining, close the currently connected sockets within
+    /// the configured drain timeout, then return so readers can stop.
+    ///
+    /// Draining only switches the built-in `/healthz` route to `503`; it does
+    /// not refuse new upgrades. Hosts that own their health route should stop
+    /// admitting traffic themselves. Invoke from the host's graceful-shutdown
+    /// future before it resolves.
+    pub async fn shutdown(self) {
+        self.state.draining.store(true, Ordering::SeqCst);
+        metrics::counter!("substreams_websocket_drain_initiated_total").increment(1);
+        metrics::gauge!("substreams_websocket_draining").set(1.0);
+        self.state
+            .clients
+            .drain(
+                "server shutting down",
+                self.state.config.websocket.shutdown_drain_timeout,
+            )
+            .await;
+        metrics::gauge!("substreams_websocket_draining").set(0.0);
+    }
+}
+
+impl Drop for EmbeddedServer {
+    fn drop(&mut self) {
+        self.state.draining.store(true, Ordering::SeqCst);
+        for task in &self.stream_tasks {
+            task.abort();
+        }
+    }
 }
 
 /// Emit a one-shot startup log of every effective config knob (defaults
@@ -201,7 +259,7 @@ fn log_startup_config(config: &Config) {
     );
 }
 
-fn build_app(state: AppState) -> Router {
+fn build_app_with_routes(state: AppState, routes: EmbeddedRoutes) -> Router {
     // Routes match the Binance-style URL layout:
     //   GET /                               — Scalar-style API reference (in-browser try-it client)
     //   GET /SKILL.md                       — agent-oriented reference (markdown)
@@ -217,18 +275,22 @@ fn build_app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/", get(landing_html))
         .route("/streams", get(streams_json))
-        .route("/version", get(version_json))
         .route("/openapi", get(openapi_json))
         .route("/openapi.json", get(openapi_json))
         .route("/SKILL.md", get(skill_md))
         .route("/llms.txt", get(llms_txt))
         .route("/favicon.ico", get(favicon_png))
         .route("/favicon.png", get(favicon_png))
-        .route(&state.config.websocket.health_path, get(health))
         .route(&ws_root, get(websocket_no_streams))
         .route(&ws_wildcard, get(websocket_path))
         .route(&stream_path, get(websocket_stream_query));
-    if !metrics_path.is_empty() {
+    if routes.health {
+        router = router.route(&state.config.websocket.health_path, get(health));
+    }
+    if routes.version {
+        router = router.route("/version", get(version_json));
+    }
+    if routes.metrics && !metrics_path.is_empty() {
         router = router.route(&metrics_path, get(metrics_endpoint));
     }
     router.layer(TraceLayer::new_for_http()).with_state(state)
@@ -4942,15 +5004,152 @@ mod tests {
         assert_eq!(v["network"], "hyperliquid");
     }
 
+    #[tokio::test]
+    async fn embedded_router_shares_listener_and_preserves_commands_undo_and_rows() {
+        let host = Router::new()
+            .route("/healthz", get(|| async { "host health" }))
+            .route("/metrics", get(|| async { "host metrics" }))
+            .route("/version", get(|| async { "host version" }))
+            .route("/v1/datasets", get(|| async { "typed datasets" }));
+        let server = TestServer::start_with_routes(
+            config(),
+            EmbeddedRoutes {
+                health: false,
+                version: false,
+                metrics: false,
+            },
+            host,
+        )
+        .await;
+        for (path, expected) in [
+            ("/healthz", "host health"),
+            ("/metrics", "host metrics"),
+            ("/version", "host version"),
+            ("/v1/datasets", "typed datasets"),
+        ] {
+            let body = reqwest::get(format!("http://{}{path}", server.addr))
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert_eq!(body, expected);
+        }
+        let streams: serde_json::Value = reqwest::get(format!("http://{}/streams", server.addr))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(streams[0]["network"], "solana-mainnet");
+        for path in [
+            "/",
+            "/SKILL.md",
+            "/llms.txt",
+            "/openapi",
+            "/openapi.json",
+            "/favicon.png",
+        ] {
+            assert!(
+                reqwest::get(format!("http://{}{path}", server.addr))
+                    .await
+                    .unwrap()
+                    .status()
+                    .is_success()
+            );
+        }
+        let (mut socket, _) =
+            connect_async(format!("ws://{}/ws/solana-mainnet@swaps", server.addr))
+                .await
+                .unwrap();
+        let welcome = socket.next().await.unwrap().unwrap();
+        assert!(welcome.to_text().unwrap().contains("\"type\":\"session\""));
+        socket
+            .send(TungsteniteMessage::Text(
+                r#"{"method":"SET_FILTER","params":["solana-mainnet@swaps","user:alice"],"id":7}"#
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            socket.next().await.unwrap().unwrap().to_text().unwrap(),
+            r#"{"result":null,"id":7}"#
+        );
+        server
+            .clients
+            .broadcast_lifecycle(serde_json::json!({
+                "type":"stream", "status":"undo", "network":"solana-mainnet",
+                "package_name":"svm_swaps", "package_version":"v0.1.0",
+                "module_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "last_valid_block":998
+            }))
+            .await;
+        let undo: serde_json::Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(undo["status"], "undo");
+        assert_eq!(undo["last_valid_block"], 998);
+        deliver_block(
+            &server,
+            build_swap_payload(&[("dex", "alice"), ("dex", "bob")]),
+        )
+        .await;
+        let block: serde_json::Value =
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(
+            block,
+            serde_json::json!({
+                "network":"solana-mainnet", "table":"swaps", "block_num":999,
+                "block_hash":"block-999", "timestamp":"2026-05-13 17:30:00",
+                "timestamp_seconds":1778772600i64, "module_hash":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "events":[{"protocol":"dex", "user":"alice"}]
+            })
+        );
+        socket.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_embedded_service_aborts_owned_readers() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        let server = EmbeddedServer {
+            state: AppState {
+                config: Arc::new(config()),
+                clients: ClientRegistry::default(),
+                streams_meta: Arc::new(vec![]),
+                draining: Arc::new(AtomicBool::new(false)),
+            },
+            stream_tasks: vec![task],
+        };
+        drop(server);
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+    }
+
+    #[tokio::test]
+    async fn embedded_prepare_rejects_invalid_config_before_source_io() {
+        let mut cfg = config();
+        cfg.streams.clear();
+        assert!(matches!(
+            EmbeddedServer::prepare(cfg).await,
+            Err(ServerError::Config(_))
+        ));
+    }
+
     struct TestServer {
         addr: SocketAddr,
         clients: ClientRegistry,
-        config: Arc<Config>,
         shutdown: Option<oneshot::Sender<()>>,
     }
 
     impl TestServer {
         async fn start(config: Config) -> Self {
+            Self::start_with_routes(config, super::EmbeddedRoutes::default(), Router::new()).await
+        }
+
+        async fn start_with_routes(
+            config: Config,
+            routes: super::EmbeddedRoutes,
+            host_routes: Router,
+        ) -> Self {
             // Tests share the global metrics recorder via OnceLock — first
             // call installs it, subsequent calls are no-ops. The /metrics
             // route is wired through build_app even when this is called.
@@ -4991,19 +5190,17 @@ mod tests {
                 draining: draining.clone(),
             };
             let clients = state.clients.clone();
-            let config = state.config.clone();
-            let drain_timeout = config.websocket.shutdown_drain_timeout;
-            let drain_clients = clients.clone();
-            let app = build_app(state);
+            let embedded = super::EmbeddedServer {
+                state,
+                stream_tasks: vec![],
+            };
+            let app = embedded.router(routes).merge(host_routes);
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
             tokio::spawn(async move {
                 serve_listener(listener, app, ws_path, health_path, async move {
                     let _ = shutdown_rx.await;
-                    draining.store(true, Ordering::SeqCst);
-                    drain_clients
-                        .drain("server shutting down", drain_timeout)
-                        .await;
+                    embedded.shutdown().await;
                 })
                 .await
                 .expect("test server exits cleanly");
@@ -5014,7 +5211,6 @@ mod tests {
             Self {
                 addr,
                 clients,
-                config,
                 shutdown: Some(shutdown_tx),
             }
         }

@@ -7,7 +7,7 @@ use tonic::{
     metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataValue},
     transport::{Channel, ClientTlsConfig, Endpoint},
 };
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::SubstreamsConfig;
 
@@ -528,12 +528,13 @@ fn apply_auth_metadata(
     config: &SubstreamsConfig,
 ) -> Result<(), SubstreamsError> {
     if let Some(token) = &config.token {
-        let value = format!("Bearer {token}")
+        let mut value = format!("Bearer {token}")
             .parse::<MetadataValue<_>>()
             .map_err(|source| SubstreamsError::InvalidMetadataValue {
                 name: "authorization".to_owned(),
                 source,
             })?;
+        value.set_sensitive(true);
         metadata.insert("authorization", value);
         return Ok(());
     }
@@ -546,12 +547,13 @@ fn apply_auth_metadata(
                 name: config.api_key_header.clone(),
                 source,
             })?;
-        let value = AsciiMetadataValue::try_from(api_key.as_str()).map_err(|source| {
+        let mut value = AsciiMetadataValue::try_from(api_key.as_str()).map_err(|source| {
             SubstreamsError::InvalidMetadataValue {
                 name: config.api_key_header.clone(),
                 source,
             }
         })?;
+        value.set_sensitive(true);
         metadata.insert(header, value);
     }
 
@@ -617,7 +619,6 @@ async fn resolve_auth_token(config: &mut SubstreamsConfig) -> Result<(), Substre
         token_len = token.len(),
         "exchanged Substreams API key for JWT"
     );
-    debug!(token = %token, "Substreams JWT issued");
     config.token = Some(token);
     config.api_key = None;
     Ok(())
@@ -631,6 +632,24 @@ mod tests {
     use crate::substreams::pb::sf::substreams::v1::{
         Module, Modules, Package, module, module::KindMap,
     };
+
+    #[test]
+    fn credential_metadata_is_sensitive_and_bearer_takes_precedence() {
+        let mut config = config();
+        config.api_key = Some("fixture-api-secret".into());
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        apply_auth_metadata(&mut metadata, &config).unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert!(metadata.get("x-api-key").unwrap().is_sensitive());
+        assert!(!format!("{metadata:?}").contains("fixture-api-secret"));
+
+        config.token = Some("fixture-token-secret".into());
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        apply_auth_metadata(&mut metadata, &config).unwrap();
+        assert_eq!(metadata.len(), 1);
+        assert!(metadata.get("authorization").unwrap().is_sensitive());
+        assert!(!format!("{metadata:?}").contains("fixture-token-secret"));
+    }
 
     #[test]
     fn builds_request_from_config() {
