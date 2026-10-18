@@ -199,8 +199,13 @@ impl EmbeddedServer {
         build_app_with_routes(self.state.clone(), routes)
     }
 
-    /// Refuse new upgrades and drain existing sockets before stopping readers.
-    /// Invoke from the host's graceful-shutdown future before it resolves.
+    /// Mark the service draining, close the currently connected sockets within
+    /// the configured drain timeout, then return so readers can stop.
+    ///
+    /// Draining only switches the built-in `/healthz` route to `503`; it does
+    /// not refuse new upgrades. Hosts that own their health route should stop
+    /// admitting traffic themselves. Invoke from the host's graceful-shutdown
+    /// future before it resolves.
     pub async fn shutdown(self) {
         self.state.draining.store(true, Ordering::SeqCst);
         metrics::counter!("substreams_websocket_drain_initiated_total").increment(1);
