@@ -5,6 +5,7 @@ pub mod event_filter;
 pub mod metrics;
 pub mod module_hash;
 pub mod server;
+mod source_health;
 pub mod substreams;
 
 pub use cursor::CursorStore;
@@ -20,4 +21,5 @@ pub use decoder::{
 };
 pub use event_filter::{EventFilter, EventFilterError, EventFilterSet, apply_filter_in_place};
 pub use server::{EmbeddedRoutes, EmbeddedServer, ServerError, serve};
+pub use source_health::{SourceHealth, SourceHealthSnapshot};
 pub use substreams::{StreamEvent, SubstreamsClient, SubstreamsError};

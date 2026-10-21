@@ -144,6 +144,7 @@ impl Default for EmbeddedRoutes {
 pub struct EmbeddedServer {
     state: AppState,
     stream_tasks: Vec<tokio::task::JoinHandle<()>>,
+    source_health: crate::SourceHealth,
 }
 
 impl EmbeddedServer {
@@ -188,15 +189,24 @@ impl EmbeddedServer {
             draining: Arc::new(AtomicBool::new(false)),
         };
 
-        let stream_tasks = spawn_streams(&state, prepared);
+        let source_health = crate::SourceHealth::new(config.streams.len());
+        let stream_tasks = spawn_streams(&state, prepared, &source_health);
         Ok(Self {
             state,
             stream_tasks,
+            source_health,
         })
     }
 
     pub fn router(&self, routes: EmbeddedRoutes) -> Router {
         build_app_with_routes(self.state.clone(), routes)
+    }
+
+    /// Clone the per-instance upstream activity handle before moving the server
+    /// into a shutdown task. This does not change the built-in health route;
+    /// the host selects its own freshness budget and readiness policy.
+    pub fn source_health(&self) -> crate::SourceHealth {
+        self.source_health.clone()
     }
 
     /// Mark the service draining, close the currently connected sockets within
@@ -207,6 +217,7 @@ impl EmbeddedServer {
     /// admitting traffic themselves. Invoke from the host's graceful-shutdown
     /// future before it resolves.
     pub async fn shutdown(self) {
+        self.source_health.drain();
         self.state.draining.store(true, Ordering::SeqCst);
         metrics::counter!("substreams_websocket_drain_initiated_total").increment(1);
         metrics::gauge!("substreams_websocket_draining").set(1.0);
@@ -223,6 +234,7 @@ impl EmbeddedServer {
 
 impl Drop for EmbeddedServer {
     fn drop(&mut self) {
+        self.source_health.drain();
         self.state.draining.store(true, Ordering::SeqCst);
         for task in &self.stream_tasks {
             task.abort();
@@ -757,17 +769,20 @@ async fn prepare_stream(stream: StreamConfig) -> PreparedStream {
 fn spawn_streams(
     state: &AppState,
     prepared: Vec<PreparedStream>,
+    source_health: &crate::SourceHealth,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let cursors = CursorStore::new(state.config.cursors_dir.clone());
     let cursor_max_age = (state.config.cursor_max_age_secs > 0)
         .then(|| Duration::from_secs(state.config.cursor_max_age_secs));
     prepared
         .into_iter()
-        .map(|prep| {
+        .enumerate()
+        .map(|(index, prep)| {
             let clients = state.clients.clone();
             let cursors = cursors.clone();
+            let source_health = source_health.clone();
             tokio::spawn(async move {
-                run_substream(prep, clients, cursors, cursor_max_age).await;
+                run_substream(prep, clients, cursors, cursor_max_age, source_health, index).await;
             })
         })
         .collect()
@@ -861,6 +876,8 @@ async fn run_substream(
     clients: ClientRegistry,
     cursors: CursorStore,
     cursor_max_age: Option<Duration>,
+    source_health: crate::SourceHealth,
+    source_index: usize,
 ) {
     let PreparedStream {
         mut config,
@@ -975,7 +992,14 @@ async fn run_substream(
             .broadcast_lifecycle(stream_status(&identity, "started", String::new()))
             .await;
 
-        let outcome = read_loop(&identity, &clients, &cursors, &mut substream).await;
+        let outcome = read_loop(
+            &identity,
+            &clients,
+            &cursors,
+            &mut substream,
+            source_health.start_read(source_index),
+        )
+        .await;
         match outcome {
             ReadOutcome::Completed => {
                 info!(stream = %identity.display(), "Substreams read completed");
@@ -1140,12 +1164,14 @@ async fn read_loop(
     clients: &ClientRegistry,
     cursors: &CursorStore,
     substream: &mut crate::substreams::SubstreamsStream,
+    mut activity: crate::source_health::ReadActivity,
 ) -> ReadOutcome {
     let mut produced_any = false;
     let mut profile = BlockProfile::default();
     loop {
         match substream.next_event().await {
             Ok(Some(event)) => {
+                activity.observe(&event);
                 if matches!(event, StreamEvent::Block { .. }) {
                     produced_any = true;
                 }
@@ -5151,8 +5177,17 @@ mod tests {
                 draining: Arc::new(AtomicBool::new(false)),
             },
             stream_tasks: vec![task],
+            source_health: crate::SourceHealth::new(1),
         };
+        let health = server.source_health();
+        let mut read = health.start_read(0);
+        read.observe(&StreamEvent::Progress {
+            running_jobs: 0,
+            processed_blocks: 0,
+        });
         drop(server);
+        assert_eq!(health.snapshot(Duration::from_secs(60)).active_sources, 0);
+        assert!(health.snapshot(Duration::from_secs(60)).draining);
         tokio::task::yield_now().await;
         assert!(abort.is_finished());
     }
@@ -5224,6 +5259,7 @@ mod tests {
             };
             let clients = state.clients.clone();
             let embedded = super::EmbeddedServer {
+                source_health: crate::SourceHealth::new(state.config.streams.len()),
                 state,
                 stream_tasks: vec![],
             };
