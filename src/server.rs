@@ -304,12 +304,34 @@ async fn metrics_endpoint() -> impl IntoResponse {
 }
 
 const LANDING_HTML: &str = include_str!("../public/index.html");
+const TRY_IT_AUTH_JS: &str = include_str!("../public/tryit-auth.js");
 const SKILL_MD: &str = include_str!("../skills/SKILL.md");
 const LLMS_TXT: &str = include_str!("../public/llms.txt");
 const FAVICON_PNG: &[u8] = include_bytes!("../public/favicon.png");
 
-async fn landing_html() -> impl IntoResponse {
-    ([("content-type", "text/html; charset=utf-8")], LANDING_HTML)
+fn render_landing_html(ui_auth_url: Option<&str>) -> String {
+    // Attribute escaping is required even for operator-configured URLs. Never
+    // put the endpoint in JavaScript source or derive it from a request header.
+    let escaped = ui_auth_url
+        .unwrap_or_default()
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    LANDING_HTML
+        .replace("__UI_AUTH_SCRIPT__", TRY_IT_AUTH_JS)
+        .replace("__UI_AUTH_URL__", &escaped)
+}
+
+async fn landing_html(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [
+            ("content-type", "text/html; charset=utf-8"),
+            ("cache-control", "no-store"),
+        ],
+        render_landing_html(state.config.websocket.ui_auth_url.as_deref()),
+    )
 }
 
 /// `/SKILL.md` with its OKF `timestamp` placeholder resolved to the file's last
@@ -3454,6 +3476,17 @@ mod filter_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn landing_auth_configuration_is_attribute_escaped() {
+        let html =
+            super::render_landing_html(Some("https://auth.example/\"'><script>alert(1)</script>&"));
+        assert!(html.contains("content=\"https://auth.example/&quot;&#39;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;\""));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("__UI_AUTH_"));
+        assert!(html.contains("function createTryItAuth("));
+        let disabled = super::render_landing_html(None);
+        assert!(disabled.contains("name=\"substreams-ws-ui-auth-url\" content=\"\""));
+    }
     use std::{net::SocketAddr, time::Duration};
 
     use futures_util::StreamExt;
@@ -5266,6 +5299,7 @@ mod tests {
                 },
             }],
             websocket: WebSocketConfig {
+                ui_auth_url: None,
                 listen: "127.0.0.1:0".parse().expect("listen address"),
                 ws_path: "/ws".to_owned(),
                 stream_path: "/stream".to_owned(),

@@ -45,6 +45,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check browser authentication
+        run: node --test scripts/tryit-auth.test.cjs
+
       - name: Run tests
         run: cargo test --workspace --locked
 

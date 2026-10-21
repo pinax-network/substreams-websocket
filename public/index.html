@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="substreams-ws-ui-auth-url" content="__UI_AUTH_URL__">
 <title>Streams — Pinax</title>
 <link rel="icon" type="image/png" sizes="192x192" href="/favicon.png">
 <link rel="apple-touch-icon" sizes="192x192" href="/favicon.png">
@@ -580,6 +581,8 @@
   .tryit .pill.err { background: rgba(255,59,48,0.15);  color: var(--bad); }
   .tryit .pill.dim { background: var(--border); color: var(--muted); }
   .tryit .jwt-row { align-items: center; }
+  .tryit #auth-mode { min-width: 100px; }
+  .tryit .auth-note { color: var(--muted); font-size: 12px; margin: 0 0 8px; overflow-wrap: anywhere; }
   .tryit .jwt-row label {
     font-size: 11px;
     text-transform: uppercase;
@@ -595,6 +598,13 @@
     flex-shrink: 0;
   }
   .tryit .jwt-row .jwt-hint.saved { color: var(--good); }
+  @media (max-width: 600px) {
+    .tryit .jwt-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; }
+    .tryit #auth-mode { grid-column: 2; grid-row: 1; }
+    .tryit #jwt-hint { grid-column: 3; grid-row: 1; }
+    .tryit #jwt-input { grid-column: 1 / 3; grid-row: 2; width: 100%; }
+    .tryit #jwt-clear { grid-column: 3; grid-row: 2; }
+  }
   .tryit .tpl-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
   .tryit .tpl-row button { padding: 4px 10px; font-size: 12px; }
   .tryit-filter { margin-left: auto; display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -1166,11 +1176,17 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
         <button class="tryit-close" id="tryit-close" type="button" aria-label="Close">×</button>
       </h2>
       <div class="row jwt-row">
-        <label for="jwt-input">JWT</label>
+        <label for="auth-mode">Auth</label>
+        <select id="auth-mode" aria-label="Authentication method">
+          <option value="jwt">JWT</option>
+          <option value="api_key" id="api-key-option" hidden>API key</option>
+          <option value="none">None</option>
+        </select>
         <input id="jwt-input"
-               type="text"
+               type="password"
+               aria-label="Credential"
                name="ws-jwt-no-autofill"
-               placeholder="Bearer token (optional)"
+               placeholder="Paste JWT"
                autocomplete="off"
                autocorrect="off"
                autocapitalize="off"
@@ -1179,8 +1195,9 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
                data-1p-ignore
                data-form-type="other" />
         <span class="jwt-hint" id="jwt-hint">empty</span>
-        <button type="button" id="jwt-clear" title="Clear stored JWT">Clear</button>
+        <button type="button" id="jwt-clear" title="Clear credential">Clear</button>
       </div>
+      <p class="auth-note" id="auth-note">Credentials stay in this tab and are cleared when this panel closes.</p>
       <div class="row">
         <select id="stream-select" title="Pick a configured stream">
           <option value="">— pick a stream —</option>
@@ -1264,6 +1281,7 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
   </div>
 </div>
 
+<script id="tryit-auth">__UI_AUTH_SCRIPT__</script>
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
@@ -1278,87 +1296,65 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
   var ws = null;
   var counter = 0;
 
-  // --- JWT helpers ----------------------------------------------------------
-  // Optional Bearer token applied to HTTP fetches (Authorization header) and
-  // WebSocket connections (?token=<jwt> query param — browsers can't set
-  // headers on the WS upgrade, so the auth proxy in front needs to read the
-  // query and rewrite it to a header before forwarding upstream).
-  // Persisted to localStorage so the user only enters it once per browser.
-  var JWT_KEY = 'substreams-ws-ui-jwt';
-  function getJwt() {
-    try { return (localStorage.getItem(JWT_KEY) || '').trim(); } catch (_) { return ''; }
+  // Credentials are kept in this tab only. Remove the old persisted JWT
+  // without reading it or migrating it into the new input.
+  try { localStorage.removeItem('substreams-ws-ui-jwt'); } catch (_) {}
+  var issuer = document.querySelector('meta[name="substreams-ws-ui-auth-url"]').content;
+  var auth = createTryItAuth(issuer, location.href);
+  var authMode = $('auth-mode');
+  var credentialInput = $('jwt-input');
+  var credentialHint = $('jwt-hint');
+  var connectionAttempt = 0;
+  var exchanging = false;
+  if (issuer) {
+    $('api-key-option').hidden = false;
+    authMode.value = 'api_key';
   }
-  function setJwt(v) {
-    try {
-      if (v) localStorage.setItem(JWT_KEY, v);
-      else   localStorage.removeItem(JWT_KEY);
-    } catch (_) {}
+  function renderAuth() {
+    var apiKey = authMode.value === 'api_key';
+    credentialInput.disabled = authMode.value === 'none';
+    credentialInput.placeholder = apiKey ? 'Paste API key' : 'Paste JWT';
+    credentialHint.textContent = credentialInput.value ? 'in this tab only' : 'empty';
+    $('auth-note').textContent = apiKey
+      ? 'Exchanges your key at ' + issuer + '. Credentials stay in this tab and clear when this panel closes.'
+      : 'Credentials stay in this tab and clear when this panel closes. JWTs must belong to this environment.';
   }
-  function authFetch(url, opts) {
-    opts = opts || {};
-    var jwt = getJwt();
-    if (!jwt) return fetch(url, opts);
-    var headers = new Headers(opts.headers || {});
-    headers.set('Authorization', 'Bearer ' + jwt);
-    return fetch(url, Object.assign({}, opts, { headers: headers }));
+  function stripUrlCredentials() {
+    try { urlEl.value = auth.cleanTarget(urlEl.value.trim()).href; } catch (_) {}
   }
-  // Returns `url` with `?token=<jwt>` appended (or replaces an existing token).
-  // Existing query params and hash are preserved. No-op when JWT is empty.
-  function withJwtParam(url) {
-    var jwt = getJwt();
-    if (!jwt) return url;
-    var hashIdx = url.indexOf('#');
-    var hash = hashIdx === -1 ? '' : url.slice(hashIdx);
-    var base = hashIdx === -1 ? url : url.slice(0, hashIdx);
-    var qIdx = base.indexOf('?');
-    var path = qIdx === -1 ? base : base.slice(0, qIdx);
-    var qs = qIdx === -1 ? '' : base.slice(qIdx + 1);
-    var pairs = qs.split('&').filter(function (p) { return p && p.split('=')[0] !== 'token'; });
-    pairs.push('token=' + encodeURIComponent(jwt));
-    return path + '?' + pairs.join('&') + hash;
+  function resetCredential() {
+    teardown('credentials changed');
+    auth.clear();
+    stripUrlCredentials();
+    setStatus('idle', 'dim');
+    renderAuth();
   }
-
-  // Wire up the Try It modal's JWT input.
-  (function bindJwtInput() {
-    var jwtInput  = $('jwt-input');
-    var jwtHint   = $('jwt-hint');
-    var jwtClear  = $('jwt-clear');
-    if (!jwtInput || !jwtHint) return;
-
-    function render() {
-      var v = jwtInput.value.trim();
-      if (v) {
-        jwtHint.className = 'jwt-hint saved';
-        jwtHint.textContent = 'saved · ' + v.length + ' chars';
-      } else {
-        jwtHint.className = 'jwt-hint';
-        jwtHint.textContent = 'empty';
-      }
+  credentialInput.addEventListener('input', resetCredential);
+  authMode.addEventListener('change', function () {
+    credentialInput.value = '';
+    resetCredential();
+  });
+  $('jwt-clear').addEventListener('click', function () {
+    credentialInput.value = '';
+    resetCredential();
+    credentialInput.focus();
+  });
+  function cancelForTargetChange(disconnectExisting) {
+    if (exchanging || (disconnectExisting && ws)) {
+      teardown('endpoint changed');
+      setStatus('idle', 'dim');
     }
-
-    function syncFromStorage() {
-      jwtInput.value = getJwt();
-      render();
-    }
-    syncFromStorage();
-    // Chrome / 1Password / LastPass sometimes write into the field *after*
-    // our script runs. Re-assert our value on the next animation frame and
-    // once more after a short delay so an autofill can't sneak in.
-    requestAnimationFrame(syncFromStorage);
-    setTimeout(syncFromStorage, 250);
-
-    jwtInput.addEventListener('input', function () {
-      setJwt(jwtInput.value.trim());
-      render();
-    });
-
-    if (jwtClear) jwtClear.addEventListener('click', function () {
-      jwtInput.value = '';
-      setJwt('');
-      render();
-      jwtInput.focus();
-    });
-  })();
+  }
+  function setTargetUrl(value, preserveLiveSocket) {
+    if (value !== urlEl.value) cancelForTargetChange(!preserveLiveSocket);
+    urlEl.value = value;
+    stripUrlCredentials();
+  }
+  // Cancel on each keystroke, not blur: a pending exchange must never connect
+  // a captured URL after the user has selected or typed a different target.
+  urlEl.addEventListener('input', function () { cancelForTargetChange(true); });
+  urlEl.addEventListener('change', stripUrlCredentials);
+  renderAuth();
 
   var scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   urlEl.value = scheme + '://' + location.host + '/ws/*@*';
@@ -1739,26 +1735,49 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
     return n * 1000;
   }
 
-  function connect() {
+  async function connect() {
+    teardown('new connection');
+    stripUrlCredentials();
     var url = urlEl.value.trim();
     if (!url) return;
-    // Browsers can't set Authorization on the WS upgrade; pass the JWT as
-    // ?token=<jwt> instead. The displayed URL field is left untouched so the
-    // token doesn't leak into screenshots when the user copies it.
-    var connectUrl = withJwtParam(url);
-    var hasJwt = connectUrl !== url;
+    var attempt = ++connectionAttempt;
+    exchanging = true;
+    setStatus(authMode.value === 'api_key' ? 'authenticating' : 'connecting', 'dim');
+    connectBtn.disabled = true;
+    disconnectBtn.disabled = false;
+    sendBtn.disabled = true;
+    var prepared;
     try {
-      ws = new WebSocket(connectUrl);
-    } catch (e) {
-      append('sys', '!', 'WebSocket constructor failed: ' + e.message);
+      prepared = await auth.prepare(url, authMode.value, credentialInput.value);
+      if (attempt !== connectionAttempt) return;
+    } catch (error) {
+      if (attempt !== connectionAttempt || error.name === 'AbortError') return;
+      exchanging = false;
+      setStatus('authentication failed', 'err');
+      connectBtn.disabled = false;
+      disconnectBtn.disabled = true;
+      append('sys', '!', error.message);
+      return;
+    }
+    exchanging = false;
+    var hasJwt = prepared.authenticated;
+    // Only the constructor receives the token-bearing URL. UI/logs receive a
+    // credential-free origin and path, never query parameters or errors from it.
+    url = prepared.display;
+    try {
+      ws = new WebSocket(prepared.url);
+    } catch (_) {
+      setStatus('connection failed', 'err');
+      connectBtn.disabled = false;
+      disconnectBtn.disabled = true;
+      append('sys', '!', 'WebSocket connection could not be started. Check the endpoint.');
       return;
     }
     setStatus('connecting', 'dim');
-    connectBtn.disabled = true;
-    disconnectBtn.disabled = false;
-    sendBtn.disabled = false;
     var autoMs = readAutoDisconnectMs();
     ws.onopen = function () {
+      if (attempt !== connectionAttempt) return;
+      sendBtn.disabled = false;
       if (autoTimer) clearTimeout(autoTimer);
       if (countdownTimer) clearInterval(countdownTimer);
       if (autoMs === 0) {
@@ -1797,13 +1816,13 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
       append('in', '<', typeof ev.data === 'string' ? ev.data : '<binary ' + ev.data.byteLength + 'B>');
     };
     ws.onerror = function () {
-      append('sys', '!', 'socket error (see browser console)');
+      append('sys', '!', 'WebSocket connection failed. Check the credential environment, gateway access and connectivity.');
     };
     ws.onclose = function (ev) {
       if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
       if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
       setStatus('closed', 'err');
-      append('sys', '*', 'closed: code=' + ev.code + ' reason=' + (ev.reason || '(none)'));
+      append('sys', '*', 'closed: code=' + ev.code);
       ws = null;
       connectBtn.disabled = false;
       disconnectBtn.disabled = true;
@@ -1821,19 +1840,25 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
   // the close handshake, and on a busy stream the server can keep flushing
   // its outbound buffer long before it processes our close frame.
   function teardown(closeReason) {
-    if (!ws) return false;
+    connectionAttempt++;
+    auth.cancel();
+    var active = exchanging || !!ws;
+    exchanging = false;
     var sock = ws;
     ws = null;
-    sock.onmessage = null;
-    sock.onerror = null;
-    sock.onclose = null;
-    try { sock.close(1000, closeReason); } catch (_) {}
+    if (sock) {
+      sock.onopen = null;
+      sock.onmessage = null;
+      sock.onerror = null;
+      sock.onclose = null;
+      try { sock.close(1000, closeReason); } catch (_) {}
+    }
     if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
     if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
     connectBtn.disabled = false;
     disconnectBtn.disabled = true;
     sendBtn.disabled = true;
-    return true;
+    return active;
   }
 
   disconnectBtn.onclick = function () {
@@ -1868,11 +1893,20 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
     // queue hundreds of paint-blocking nodes; if we hide the modal without
     // draining them, the user perceives the close as frozen.
     teardown('modal closed');
+    auth.clear();
+    credentialInput.value = '';
+    stripUrlCredentials();
+    renderAuth();
     statusEl.className = 'pill dim';
     statusEl.textContent = 'closed';
     logEl.innerHTML = '';
     modalEl.classList.remove('open');
   }
+  window.addEventListener('pagehide', function () {
+    teardown('page hidden');
+    auth.clear();
+    credentialInput.value = '';
+  });
   openBtn.addEventListener('click', openModal);
   closeBtn.addEventListener('click', closeModal);
   modalEl.addEventListener('click', function (e) {
@@ -1959,10 +1993,10 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
         // otherwise fall back to `*@*`.
         var initial = channels[0] || '*@*';
         sel.value = initial;
-        urlEl.value = scheme + '://' + location.host + '/ws/' + initial;
+        setTargetUrl(scheme + '://' + location.host + '/ws/' + initial);
         sel.addEventListener('change', function () {
           if (!sel.value) return;
-          urlEl.value = scheme + '://' + location.host + '/ws/' + sel.value;
+          setTargetUrl(scheme + '://' + location.host + '/ws/' + sel.value);
         });
       })
       .catch(function () {
@@ -2018,7 +2052,7 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
         return p && p.split('=')[0] !== 'filter';
       });
       pairs.push('filter=' + encodeURIComponent(expr));
-      urlEl.value = path + '?' + pairs.join('&') + hash;
+      setTargetUrl(path + '?' + pairs.join('&') + hash, true);
 
       cmdEl.focus();
   }

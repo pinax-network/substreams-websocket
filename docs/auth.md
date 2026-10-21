@@ -31,3 +31,39 @@ JWTs from Pinax are short-lived (~hours). The server exchanges once at startup. 
 ## WebSocket-side auth
 
 This doc covers the server-to-upstream link. The server-to-client (WebSocket) side has no auth today — every client gets every configured stream. Put a reverse proxy in front if you need client auth.
+
+## Browser Try It authentication
+
+Try It supports a JWT, no credential, or an API key when the operator configures
+`SUBSTREAMS_WEBSOCKET_UI_AUTH_URL` / `--ui-auth-url`. Embedded hosts set
+`WebSocketConfig.ui_auth_url`. The value is a trusted absolute HTTPS endpoint,
+without userinfo, query parameters or a fragment. There is no default issuer:
+configure the issuer matching the gateway's credential environment. This setting
+does not change upstream authentication or add authentication to this server.
+API-key mode is selected when an issuer is configured; otherwise JWT is selected.
+For an unauthenticated server, explicitly choose **None**.
+
+In API-key mode the browser POSTs `{"api_key":"..."}` to that endpoint and expects
+`{"token":"<JWT>","expires_at":<Unix seconds>}`. The issuer must allow the page's
+origin through CORS, including `POST` and `Content-Type`. Browser cookies and
+redirects are disabled. The exchange times out after ten seconds and rejects
+responses larger than 32 KiB, malformed tokens, and tokens expiring within thirty
+seconds. Reconnecting reuses the in-memory token until that freshness boundary,
+then exchanges again. Reconnection is manual.
+
+The browser supplies the JWT to the existing gateway through `?token=`, because
+the WebSocket API cannot set `X-Api-Key` or `Authorization` on an upgrade. The
+gateway must validate it, enforce access and quotas, and remove the credential
+parameter before forwarding or logging. Raw API keys never enter the WebSocket
+URL. Authenticated connections must use this page's own host over HTTPS/WSS;
+editing the connection URL cannot send a credential to another host.
+
+Keys and tokens stay in memory, are masked, and are cleared when the panel closes
+or the page leaves. Previously stored UI JWTs are removed from local storage.
+Changing the credential or authentication mode cancels an outstanding exchange
+and disconnects. Pasted credential query parameters are removed from the URL.
+Error messages never include issuer response bodies or token-bearing URLs.
+
+Run the browser authentication regression checks with
+`node --test scripts/tryit-auth.test.cjs` (Node 22 or newer). They use synthetic
+credentials and mocked exchange responses; they make no live authenticated calls.

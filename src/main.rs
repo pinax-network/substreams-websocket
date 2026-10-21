@@ -195,6 +195,9 @@ struct SubstreamsArgs {
 
 #[derive(Debug, Args)]
 struct WebSocketArgs {
+    /// Trusted HTTPS API-key exchange endpoint for the browser Try It panel.
+    #[arg(long, env = "SUBSTREAMS_WEBSOCKET_UI_AUTH_URL")]
+    ui_auth_url: Option<String>,
     #[arg(
         long,
         env = "SUBSTREAMS_WEBSOCKET_LISTEN",
@@ -297,6 +300,7 @@ impl WebSocketArgs {
     fn into_config(self) -> WebSocketConfig {
         WebSocketConfig {
             listen: self.listen,
+            ui_auth_url: self.ui_auth_url,
             ws_path: self.ws_path,
             stream_path: self.stream_path,
             metrics_path: self.metrics_path,
