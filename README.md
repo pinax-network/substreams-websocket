@@ -25,6 +25,19 @@ Dropping it aborts its source tasks, including after listener startup errors.
 Embedding does not change subscriptions, row filtering, undo frames, backpressure,
 or the live-only feed. The host still supplies authentication at its gateway.
 
+Clone `server.source_health()` before moving the server into a shutdown task.
+Its `snapshot(max_inactivity: Duration)` returns `configured_sources`,
+`active_sources`, and `draining` for that server instance. An active source has
+received recognized Substreams protocol activity in its current read attempt
+within the chosen inactivity budget. Session, progress, empty blocks, undo and
+snapshot responses count without requiring subscribers or decoded rows.
+Connecting alone and unknown responses do not count. EOF, read errors,
+cancellation and fatal responses clear the attempt; draining or dropping the
+server immediately clears all activity. The handle contains no source identities
+or credentials. Hosts choose their own readiness threshold; this reports read
+activity, not chain freshness, row correctness, or coverage of every channel.
+The standalone `/healthz` route retains its existing drain-only behavior.
+
 ---
 
 ## Install
