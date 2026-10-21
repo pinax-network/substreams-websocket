@@ -168,6 +168,10 @@ pub struct SubstreamsConfig {
 #[derive(Debug, Clone)]
 pub struct WebSocketConfig {
     pub listen: SocketAddr,
+    /// Optional trusted HTTPS API-key exchange endpoint for the browser UI.
+    /// Receives `{ "api_key": "..." }` and returns `token` and `expires_at`.
+    /// This does not configure upstream authentication or authenticate clients.
+    pub ui_auth_url: Option<String>,
     pub ws_path: String,
     /// Query-mode WebSocket route. Default `/stream`. Accepts
     /// `?streams=<network@table>/<...>` and always wraps payloads in
@@ -194,6 +198,8 @@ pub struct WebSocketConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("ui_auth_url must be an absolute HTTPS URL without credentials, query or fragment")]
+    InvalidUiAuthUrl,
     #[error("{field} must start with '/'")]
     PathMustStartWithSlash { field: &'static str },
 
@@ -326,6 +332,9 @@ impl Config {
         validate_path("ws_path", &self.websocket.ws_path)?;
         validate_path("stream_path", &self.websocket.stream_path)?;
         validate_path("health_path", &self.websocket.health_path)?;
+        if let Some(value) = &self.websocket.ui_auth_url {
+            validate_ui_auth_url(value)?;
+        }
 
         if self.websocket.heartbeat_timeout <= self.websocket.heartbeat_interval {
             return Err(ConfigError::InvalidHeartbeatWindow);
@@ -341,6 +350,22 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn validate_ui_auth_url(value: &str) -> Result<(), ConfigError> {
+    let url = reqwest::Url::parse(value).map_err(|_| ConfigError::InvalidUiAuthUrl)?;
+    if value.trim() != value
+        || value.chars().any(char::is_control)
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidUiAuthUrl);
+    }
+    Ok(())
 }
 
 fn validate_path(field: &'static str, value: &str) -> Result<(), ConfigError> {
@@ -382,6 +407,7 @@ mod tests {
 
     fn websocket() -> WebSocketConfig {
         WebSocketConfig {
+            ui_auth_url: None,
             listen: "127.0.0.1:0".parse().expect("listen"),
             ws_path: "/ws".to_owned(),
             stream_path: "/stream".to_owned(),
@@ -416,6 +442,34 @@ mod tests {
                 .map(|(a, n)| ((*a).to_owned(), (*n).to_owned())),
             WildcardNetworkNames::Network,
         )
+    }
+
+    #[test]
+    fn ui_exchange_requires_a_trusted_https_url() {
+        let mut config = cfg(vec![stream(
+            "example.spkg",
+            "test",
+            "https://source.example",
+        )]);
+        config.websocket.ui_auth_url = Some("https://auth.example/v1/auth/issue".into());
+        config.validate().expect("HTTPS exchange endpoint");
+        for value in [
+            "",
+            "/auth/issue",
+            "http://auth.example/issue",
+            "javascript:alert(1)",
+            "https://user:secret@auth.example/issue",
+            "https://auth.example/issue?key=secret",
+            "https://auth.example/issue#fragment",
+            " https://auth.example/issue",
+            "https://auth.example/iss\nue",
+        ] {
+            config.websocket.ui_auth_url = Some(value.into());
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidUiAuthUrl)
+            ));
+        }
     }
 
     #[test]

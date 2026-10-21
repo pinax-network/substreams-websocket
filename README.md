@@ -99,6 +99,7 @@ Secrets + single-value runtime settings in `.env`. Streams list in `streams.yaml
 | Server | `SUBSTREAMS_WEBSOCKET_LISTEN` | `127.0.0.1:8080` | HTTP/WS listen address. |
 | Server | `SUBSTREAMS_WEBSOCKET_WS_PATH` | `/ws` | WebSocket route. |
 | Server | `SUBSTREAMS_WEBSOCKET_STREAM_PATH` | `/stream` | Query-mode route. |
+| Browser UI | `SUBSTREAMS_WEBSOCKET_UI_AUTH_URL` | unset | Trusted HTTPS API-key exchange endpoint for Try It. See [browser authentication](docs/auth.md#browser-try-it-authentication). |
 | Server | `SUBSTREAMS_WEBSOCKET_HEALTH_PATH` | `/healthz` | Health route. |
 | Server | `SUBSTREAMS_WEBSOCKET_METRICS_PATH` | `/metrics` | Prometheus metrics route. Empty disables. |
 | Server | `SUBSTREAMS_WEBSOCKET_HEARTBEAT_INTERVAL_SECS` | `30` | Ping interval. |
