@@ -145,3 +145,65 @@ function createTryItAuth(issuer, pageUrl) {
   }
   return { prepare: prepare, clear: clear, cancel: cancel, cleanTarget: cleanTarget };
 }
+
+// API-key preferences only. Exchanged tokens and manually entered JWTs stay in
+// createTryItAuth / the UI's transient credential field, never in this store.
+function createTryItKeyStore(issuer, pageUrl, storage) {
+  'use strict';
+  var storageKey = null;
+  var remembered = '';
+  var initialized = false;
+  var state = 'disabled';
+  try {
+    var page = new URL(pageUrl);
+    var exchange = new URL(issuer);
+    if (page.protocol === 'https:' && exchange.protocol === 'https:' &&
+        !exchange.username && !exchange.password && !exchange.search && !exchange.hash) {
+      // localStorage is already origin-scoped. Including the origin also keeps
+      // this boundary explicit for hosts that provide their own storage adapter.
+      storageKey = 'substreams-ws-ui-api-key:v1:' + encodeURIComponent(page.origin) + ':' + encodeURIComponent(exchange.href);
+      state = 'empty';
+    }
+  } catch (_) {}
+
+  function normalize(value) {
+    if (typeof value !== 'string') return '';
+    value = value.trim();
+    return value.length <= 16384 && !/[\x00-\x20\x7f]/.test(value) ? value : '';
+  }
+  function load() {
+    if (initialized || !storageKey) return remembered;
+    initialized = true;
+    try {
+      var stored = storage.getItem(storageKey);
+      remembered = normalize(stored);
+      // Treat malformed persisted data as absent, rather than restoring it into
+      // a credential input or retaining it for the next page visit.
+      if (stored !== null && (!remembered || remembered !== stored)) {
+        remembered = '';
+        storage.removeItem(storageKey);
+      }
+      state = remembered ? 'saved' : 'empty';
+    } catch (_) {
+      state = 'unavailable';
+    }
+    return remembered;
+  }
+  function save(value) {
+    if (!storageKey) return '';
+    initialized = true;
+    remembered = normalize(value);
+    try {
+      if (remembered) storage.setItem(storageKey, remembered);
+      else storage.removeItem(storageKey);
+      state = remembered ? 'saved' : 'empty';
+    } catch (_) {
+      // Keep the edited value for this tab, even if storage is blocked/full.
+      // A failed update may leave an older value on disk; the UI must say so.
+      state = 'unavailable';
+    }
+    return remembered;
+  }
+  function status() { load(); return state; }
+  return { load: load, save: save, status: status };
+}

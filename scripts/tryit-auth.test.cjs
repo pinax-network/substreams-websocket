@@ -166,10 +166,131 @@ test('edited URL credentials are stripped case-insensitively before every mode',
   assert.ok(!result.display.includes('secret'));
 });
 
-test('landing scripts parse and never persist or render a credential', () => {
+test('landing scripts parse, keep credentials masked, and remove legacy saved JWTs', () => {
   const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8').replace('__UI_AUTH_SCRIPT__', source);
   for (const [, script] of html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(script);
-  assert.ok(!/localStorage\.(getItem|setItem)|sessionStorage/.test(html));
+  assert.ok(!/sessionStorage/.test(html));
+  assert.ok(!/setItem\(\s*['"]substreams-ws-ui-jwt['"]/.test(html));
   assert.match(html, /localStorage\.removeItem\('substreams-ws-ui-jwt'\)/);
   assert.match(html, /id="jwt-input"\s+type="password"/);
+});
+
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    values,
+    getItem: (key) => values.has(key) ? values.get(key) : null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  };
+}
+function keyStore(storage, configuredIssuer = issuer, pageUrl = page) {
+  const context = vm.createContext({ URL, encodeURIComponent });
+  vm.runInContext(source, context);
+  return context.createTryItKeyStore(configuredIssuer, pageUrl, storage);
+}
+
+test('API key survives a fresh page instance and is trimmed before saving', () => {
+  const storage = memoryStorage();
+  const original = keyStore(storage);
+  assert.equal(original.load(), '');
+  assert.equal(original.status(), 'empty');
+  assert.equal(original.save('  ' + apiKey + '\n'), apiKey);
+  assert.equal(original.status(), 'saved');
+  assert.equal(storage.values.size, 1);
+  assert.deepEqual([...storage.values.values()], [apiKey]);
+  const reopened = keyStore(storage, 'https://AUTH.example:443/v1/auth/issue', page + 'other-page');
+  assert.equal(reopened.load(), apiKey);
+  assert.equal(reopened.status(), 'saved');
+});
+
+test('saved API keys are isolated by page origin and configured issuer', () => {
+  const storage = memoryStorage();
+  keyStore(storage).save(apiKey);
+  for (const [otherIssuer, otherPage] of [
+    ['https://other-auth.example/v1/auth/issue', page],
+    [issuer + '/other', page],
+    [issuer, 'https://other-streams.example/'],
+    [issuer, 'https://streams.example:8443/'],
+  ]) {
+    const other = keyStore(storage, otherIssuer, otherPage);
+    assert.equal(other.load(), '');
+    other.save('other-synthetic-key');
+  }
+  assert.equal(keyStore(storage).load(), apiKey);
+});
+
+test('Clear forgets the key in memory and for subsequent page instances', () => {
+  const storage = memoryStorage();
+  const store = keyStore(storage);
+  store.save(apiKey);
+  assert.equal(store.save(''), '');
+  assert.equal(store.status(), 'empty');
+  assert.equal(store.load(), '');
+  assert.equal(storage.values.size, 0);
+  assert.equal(keyStore(storage).load(), '');
+});
+
+test('missing or unsafe issuer and insecure pages never access credential storage', () => {
+  const storage = new Proxy({}, { get() { assert.fail('disabled scope accessed storage'); } });
+  for (const [configuredIssuer, pageUrl] of [
+    ['', page], ['/exchange', page], ['http://auth.example/issue', page],
+    ['https://user:secret@auth.example/issue', page], [issuer + '?token=x', page],
+    [issuer + '#fragment', page], [issuer, 'http://streams.example/'],
+    [issuer, 'not a URL'],
+  ]) {
+    const store = keyStore(storage, configuredIssuer, pageUrl);
+    assert.equal(store.load(), '');
+    assert.equal(store.save(apiKey), '');
+    assert.equal(store.status(), 'disabled');
+  }
+});
+
+test('blocked storage keeps the current key for this tab without claiming it is saved', () => {
+  for (const storage of [null, {
+    getItem() { throw new Error('blocked ' + apiKey); },
+    setItem() { throw new Error('full ' + apiKey); },
+    removeItem() { throw new Error('blocked ' + apiKey); },
+  }]) {
+    const store = keyStore(storage);
+    assert.equal(store.load(), '');
+    assert.equal(store.status(), 'unavailable');
+    assert.equal(store.save(apiKey), apiKey);
+    assert.equal(store.load(), apiKey);
+    assert.equal(store.status(), 'unavailable');
+    assert.equal(store.save(''), '');
+    assert.equal(store.load(), '');
+    assert.equal(store.status(), 'unavailable');
+  }
+});
+
+test('failed updates do not restore a stale saved key into the current tab', () => {
+  const storage = memoryStorage();
+  keyStore(storage).save('previous-synthetic-key');
+  const store = keyStore(storage);
+  assert.equal(store.load(), 'previous-synthetic-key');
+  storage.setItem = () => { throw new Error('full'); };
+  storage.removeItem = () => { throw new Error('blocked'); };
+  store.save(apiKey);
+  assert.equal(store.load(), apiKey);
+  assert.equal(store.status(), 'unavailable');
+  store.save('');
+  assert.equal(store.load(), '');
+  assert.equal(store.status(), 'unavailable');
+  // The warning must not promise that failed removal changed persistent storage.
+  assert.equal(keyStore(storage).load(), 'previous-synthetic-key');
+});
+
+test('malformed or oversized persisted keys are discarded without exposure', () => {
+  for (const invalid of ['', ' key-with-padding ', 'key with spaces', 'key\u0000value', 'x'.repeat(16385), 42]) {
+    const storage = memoryStorage();
+    keyStore(storage).save(apiKey);
+    const [name] = storage.values.keys();
+    storage.values.set(name, invalid);
+    const store = keyStore(storage);
+    assert.equal(store.load(), '');
+    assert.equal(store.status(), 'empty');
+    assert.equal(storage.values.size, 0);
+  }
 });

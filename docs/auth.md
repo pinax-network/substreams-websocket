@@ -58,11 +58,20 @@ parameter before forwarding or logging. Raw API keys never enter the WebSocket
 URL. Authenticated connections must use this page's own host over HTTPS/WSS;
 editing the connection URL cannot send a credential to another host.
 
-Keys and tokens stay in memory, are masked, and are cleared when the panel closes
-or the page leaves. Previously stored UI JWTs are removed from local storage.
-Changing the credential or authentication mode cancels an outstanding exchange
-and disconnects. Pasted credential query parameters are removed from the URL.
-Error messages never include issuer response bodies or token-bearing URLs.
+API keys are masked and automatically saved in this browser's local storage for
+the current site and configured issuer. They survive closing the panel, reloading
+the page and closing the browser. **Clear** in API-key mode removes the saved key;
+clearing this site's browser data also removes it. Separate sites and issuers do
+not share saved keys. Browser restrictions such as private browsing can prevent
+persistence; the UI reports unavailable storage and keeps the key only in the
+current tab. If a storage update fails, a previously saved key may be unchanged.
+
+Manually entered JWTs and exchanged tokens stay in memory and are cleared when
+the panel closes or the page leaves. Previously stored UI JWTs are removed from
+local storage. Changing the credential or authentication mode cancels an
+outstanding exchange and disconnects. Pasted credential query parameters are
+removed from the URL. Error messages never include issuer response bodies or
+token-bearing URLs.
 
 Run the browser authentication regression checks with
 `node --test scripts/tryit-auth.test.cjs` (Node 22 or newer). They use synthetic

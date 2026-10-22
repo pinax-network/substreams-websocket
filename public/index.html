@@ -1296,10 +1296,13 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
   var ws = null;
   var counter = 0;
 
-  // Credentials are kept in this tab only. Remove the old persisted JWT
-  // without reading it or migrating it into the new input.
+  // Only API keys are remembered. Remove the old persisted JWT without
+  // reading it or migrating it into the new input.
   try { localStorage.removeItem('substreams-ws-ui-jwt'); } catch (_) {}
   var issuer = document.querySelector('meta[name="substreams-ws-ui-auth-url"]').content;
+  var keyStorage = null;
+  try { keyStorage = localStorage; } catch (_) {}
+  var keyStore = createTryItKeyStore(issuer, location.href, keyStorage);
   var auth = createTryItAuth(issuer, location.href);
   var authMode = $('auth-mode');
   var credentialInput = $('jwt-input');
@@ -1309,15 +1312,26 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
   if (issuer) {
     $('api-key-option').hidden = false;
     authMode.value = 'api_key';
+    credentialInput.value = keyStore.load();
   }
   function renderAuth() {
     var apiKey = authMode.value === 'api_key';
     credentialInput.disabled = authMode.value === 'none';
     credentialInput.placeholder = apiKey ? 'Paste API key' : 'Paste JWT';
-    credentialHint.textContent = credentialInput.value ? 'in this tab only' : 'empty';
-    $('auth-note').textContent = apiKey
-      ? 'Exchanges your key at ' + issuer + '. Credentials stay in this tab and clear when this panel closes.'
-      : 'Credentials stay in this tab and clear when this panel closes. JWTs must belong to this environment.';
+    var saved = apiKey && keyStore.status() === 'saved';
+    credentialHint.textContent = credentialInput.value.trim()
+      ? (saved ? 'saved in this browser' : 'in this tab only') : 'empty';
+    if (apiKey) {
+      var note = 'Your API key is saved in this browser for this site. Clear removes the saved key.';
+      if (keyStore.status() === 'unavailable') {
+        note = 'Browser storage is unavailable. Your key stays in this tab; a previously saved key may be unchanged.';
+      } else if (keyStore.status() === 'disabled') {
+        note = 'Your API key stays in this tab. Saving requires a secure site and a configured issuer.';
+      }
+      $('auth-note').textContent = note;
+    } else {
+      $('auth-note').textContent = 'JWTs stay in this tab and clear when this panel closes. JWTs must belong to this environment.';
+    }
   }
   function stripUrlCredentials() {
     try { urlEl.value = auth.cleanTarget(urlEl.value.trim()).href; } catch (_) {}
@@ -1329,13 +1343,17 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
     setStatus('idle', 'dim');
     renderAuth();
   }
-  credentialInput.addEventListener('input', resetCredential);
+  credentialInput.addEventListener('input', function () {
+    if (authMode.value === 'api_key') keyStore.save(credentialInput.value);
+    resetCredential();
+  });
   authMode.addEventListener('change', function () {
-    credentialInput.value = '';
+    credentialInput.value = authMode.value === 'api_key' ? keyStore.load() : '';
     resetCredential();
   });
   $('jwt-clear').addEventListener('click', function () {
     credentialInput.value = '';
+    if (authMode.value === 'api_key') keyStore.save('');
     resetCredential();
     credentialInput.focus();
   });
@@ -1894,7 +1912,7 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
     // draining them, the user perceives the close as frozen.
     teardown('modal closed');
     auth.clear();
-    credentialInput.value = '';
+    if (authMode.value !== 'api_key') credentialInput.value = '';
     stripUrlCredentials();
     renderAuth();
     statusEl.className = 'pill dim';
@@ -1905,7 +1923,8 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
   window.addEventListener('pagehide', function () {
     teardown('page hidden');
     auth.clear();
-    credentialInput.value = '';
+    if (authMode.value !== 'api_key') credentialInput.value = '';
+    renderAuth();
   });
   openBtn.addEventListener('click', openModal);
   closeBtn.addEventListener('click', closeModal);
@@ -2097,7 +2116,9 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
           var network = s.network || '*';
           if (!networks[network]) networks[network] = { packages: [] };
           networks[network].packages.push({
-            name: s.package_name || '?',
+            // Hide the sink implementation in the label only. Discovery and
+            // subscription identities retain the original package metadata.
+            name: s.package_name === 'evm_clickhouse_dex' ? 'evm_dex' : (s.package_name || '?'),
             version: s.package_version || '',
             tables: (Array.isArray(s.tables) ? s.tables.slice() : []),
             discovery: !Array.isArray(s.tables) || s.tables.length === 0,
