@@ -63,11 +63,26 @@ wrapping and bounded client queues directly. Empty and fully filtered blocks
 produce no data message. There is no extra source queue, package download,
 credential lookup, upstream connection or cursor persistence for a native source.
 
+Hosts with several outputs for one decoded block can first call synchronous
+`prepare_block(context, rows)` on every publisher. It returns an owned
+`PreparedNativeBlock` after checking the same identity, row and size bounds,
+without changing activity, head metrics or client queues. After all outputs are
+prepared and host state is committed, call `publish_prepared(prepared).await` in
+canonical order. Prepared blocks belong to the exact publisher and session that
+created them; they cannot be reused after a session restart or moved to another
+publisher, even one with identical configuration. Discard prepared blocks on a
+rollback. A preparation error leaves the session unchanged so the host can end
+all affected outputs together. This preflight does not reserve queue capacity or
+make fanout transactional across sources; slow-client behavior stays unchanged.
+
 The host owns decoding, canonical order, duplicate suppression and continuity.
 Call `undo(last_valid_block).await` for a verified rollback; it preserves sockets.
 Call `error()`, `decode_error()` or `completed()` for an ended session, or
-`inactive()` from a cancellation guard. An invalid block also ends the session;
-`started()` is required before publishing again. Dropping the publisher clears
+`inactive()` from a cancellation guard. Invalid input passed to `publish_block`
+also ends the session; `started()` is required before publishing again.
+Cancelling a pending `publish_block` or `publish_prepared` ends its session but
+cannot retract frames already sent. Dropping an unpolled publication future has
+no effects. Dropping the publisher clears
 its readiness. Lifecycle methods carry no arbitrary upstream error text.
 
 Native sources participate in `source_health()` with the same inactivity budget.

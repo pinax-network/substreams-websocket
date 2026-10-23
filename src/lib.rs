@@ -22,7 +22,7 @@ pub use decoder::{
 pub use event_filter::{EventFilter, EventFilterError, EventFilterSet, apply_filter_in_place};
 pub use server::{
     EmbeddedRoutes, EmbeddedServer, NativePublishError, NativePublisher, NativeSourceConfig,
-    ServerError, serve,
+    PreparedNativeBlock, ServerError, serve,
 };
 pub use source_health::{SourceHealth, SourceHealthSnapshot};
 pub use substreams::{StreamEvent, SubstreamsClient, SubstreamsError};

@@ -114,6 +114,17 @@ pub enum NativePublishError {
     InvalidBlock,
 }
 
+/// An owned block whose identity, rows and bounds have been validated. Publish
+/// it only through the publisher and live session that prepared it. The host
+/// must retain canonical order and discard prepared blocks after a rollback.
+/// Preparation does not reserve queue capacity or make publication transactional
+/// across sources: cancellation, draining and slow-client drops still apply.
+#[must_use = "publish the prepared block or discard it before committing host state"]
+pub struct PreparedNativeBlock {
+    block: crate::DatabaseChangesBlockMessage,
+    session: Arc<()>,
+}
+
 /// Single-owner ingress. Calls fan out directly through the existing bounded
 /// client queues; no source queue, package, cursor or network connection exists.
 /// Calls must follow canonical order. Dropping or ending the session clears its
@@ -124,6 +135,7 @@ pub struct NativePublisher {
     health: crate::SourceHealth,
     index: usize,
     read: Option<crate::source_health::ReadActivity>,
+    session: Option<Arc<()>>,
 }
 
 impl NativePublisher {
@@ -139,6 +151,7 @@ impl NativePublisher {
             health,
             index,
             read: None,
+            session: None,
         }
     }
 
@@ -157,6 +170,7 @@ impl NativePublisher {
             return Err(NativePublishError::Inactive);
         }
         self.read = Some(self.health.start_read(self.index));
+        self.session = Some(Arc::new(()));
         self.clients
             .broadcast_lifecycle(stream_status(
                 &self.source.identity(),
@@ -180,6 +194,7 @@ impl NativePublisher {
     /// End the current session without emitting a frame. Safe in a Drop guard.
     pub fn inactive(&mut self) {
         self.read = None;
+        self.session = None;
     }
 
     /// Publish complete decoded rows, including their `@table` key. The context's
@@ -192,6 +207,28 @@ impl NativePublisher {
         context: BlockContext,
         events: Vec<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<(), NativePublishError> {
+        let prepared = match self.prepare_block(context, events) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if error == NativePublishError::InvalidBlock {
+                    self.inactive();
+                }
+                return Err(error);
+            }
+        };
+        self.publish_prepared(prepared).await
+    }
+
+    /// Validate and take ownership of a complete block without changing source
+    /// activity, head metrics or client queues. This is synchronous so a host
+    /// can prepare every output before committing shared state or publishing
+    /// any of them. A validation error leaves the current session unchanged;
+    /// the host decides whether to end it with [`Self::decode_error`].
+    pub fn prepare_block(
+        &self,
+        context: BlockContext,
+        events: Vec<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<PreparedNativeBlock, NativePublishError> {
         self.active()?;
         let block = crate::DatabaseChangesBlockMessage {
             network: context.network,
@@ -231,25 +268,52 @@ impl NativePublisher {
             })
             && within_size(&block, self.source.max_block_bytes);
         if !valid {
-            self.inactive();
             return Err(NativePublishError::InvalidBlock);
         }
-        self.activity()?;
+        Ok(PreparedNativeBlock {
+            block,
+            session: self.session.as_ref().unwrap().clone(),
+        })
+    }
+
+    /// Publish a previously validated block in the same live session. A block
+    /// from another publisher or an earlier session is rejected without side
+    /// effects. All row validation was completed by [`Self::prepare_block`].
+    /// Cancelling this future after publication starts ends the session, but
+    /// cannot retract frames already sent to clients. Dropping an unpolled
+    /// future does not affect the session.
+    pub async fn publish_prepared(
+        &mut self,
+        prepared: PreparedNativeBlock,
+    ) -> Result<(), NativePublishError> {
+        self.active()?;
+        if !Arc::ptr_eq(self.session.as_ref().unwrap(), &prepared.session) {
+            return Err(NativePublishError::InvalidBlock);
+        }
+        let mut publication = PublicationGuard {
+            publisher: self,
+            completed: false,
+        };
+        let block = prepared.block;
+        publication.publisher.activity()?;
         update_head_block_gauges(
-            &self.source.identity(),
+            &publication.publisher.source.identity(),
             block.block_num,
             block.timestamp_seconds,
             &block.events,
         );
         for (table, events) in group_events_by_table(&block) {
-            self.clients
+            publication
+                .publisher
+                .clients
                 .broadcast_block(
-                    &self.source.network,
+                    &publication.publisher.source.network,
                     &table,
                     build_table_payload(&block, &table, &events),
                 )
                 .await;
         }
+        publication.completed = true;
         Ok(())
     }
 
@@ -294,6 +358,19 @@ impl NativePublisher {
     }
     pub async fn completed(&mut self) -> Result<(), NativePublishError> {
         self.end("completed").await
+    }
+}
+
+struct PublicationGuard<'a> {
+    publisher: &'a mut NativePublisher,
+    completed: bool,
+}
+
+impl Drop for PublicationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.publisher.inactive();
+        }
     }
 }
 
@@ -558,6 +635,218 @@ mod tests {
                 Err(NativePublishError::Inactive)
             );
         }
+    }
+
+    fn invalid_input(variant: usize) -> (BlockContext, Vec<serde_json::Map<String, Value>>) {
+        let mut ctx = context(101);
+        let mut events = rows();
+        match variant {
+            0 => ctx.network = "other".into(),
+            1 => ctx.module_hash = "other".into(),
+            2 => events[1]["@table"] = "other".into(),
+            3 => events[1]["amount"] = 1.into(),
+            4 => events[1]["amount"] = "x".repeat(4096).into(),
+            5 => events = (0..5).flat_map(|_| rows()).collect(),
+            6 => ctx.block_hash.clear(),
+            7 => ctx.timestamp.push('\n'),
+            8 => {
+                events[1].insert("invalid key".into(), "value".into());
+            }
+            9 => events[1]["amount"] = json!(["1", 2]),
+            _ => unreachable!(),
+        }
+        (ctx, events)
+    }
+
+    fn head_metrics(module_hash: &str) -> Vec<String> {
+        let mut metrics: Vec<_> = crate::metrics::render()
+            .lines()
+            .filter(|line| {
+                line.starts_with("substreams_websocket_head_block_")
+                    && line.contains(&format!("spkg=\"native:{module_hash}\""))
+            })
+            .map(str::to_owned)
+            .collect();
+        metrics.sort();
+        metrics
+    }
+
+    fn transfer_filter() -> StreamFilter {
+        let mut filter = StreamFilter::default();
+        filter.add(StreamId::parse("eth@transfers").unwrap());
+        filter
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepare_checks_every_bound_without_activity_head_or_fanout_effects() {
+        let mut src = source();
+        // Metrics are process-wide; isolate this test from other publications.
+        src.module_hash = "preflight-no-effects".into();
+        let mut server = EmbeddedServer::prepare_with_native(config(), vec![src.clone()])
+            .await
+            .unwrap();
+        let health = server.source_health();
+        let mut publisher = server.native_publisher(0).unwrap();
+        let mut ctx = context(100);
+        ctx.module_hash = src.module_hash.clone();
+        assert!(matches!(
+            publisher.prepare_block(ctx.clone(), rows()),
+            Err(NativePublishError::Inactive)
+        ));
+        publisher.started().await.unwrap();
+        let (mut client, _) = publisher
+            .clients
+            .register(&config(), transfer_filter())
+            .await
+            .unwrap();
+        let prepared = publisher.prepare_block(ctx, rows()).unwrap();
+        assert_eq!(health.snapshot(Duration::from_secs(120)).active_sources, 0);
+        assert!(head_metrics(&src.module_hash).is_empty());
+        assert!(matches!(
+            client.rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        publisher.publish_prepared(prepared).await.unwrap();
+        let sent: Value =
+            serde_json::from_str(client.rx.try_recv().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(sent["block_num"], 100);
+        assert_eq!(sent["events"].as_array().unwrap().len(), 2);
+        let metrics_before = head_metrics(&src.module_hash);
+        assert!(!metrics_before.is_empty());
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        for variant in 0..10 {
+            let (mut ctx, events) = invalid_input(variant);
+            if variant != 1 {
+                ctx.module_hash = src.module_hash.clone();
+            }
+            assert!(matches!(
+                publisher.prepare_block(ctx, events),
+                Err(NativePublishError::InvalidBlock)
+            ));
+            assert_eq!(health.snapshot(Duration::from_secs(120)).active_sources, 1);
+        }
+        // Dropping a valid prepared block has no effects either.
+        let mut ctx = context(102);
+        ctx.module_hash = src.module_hash.clone();
+        drop(publisher.prepare_block(ctx, vec![]).unwrap());
+        assert_eq!(head_metrics(&src.module_hash), metrics_before);
+        assert!(matches!(
+            client.rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert_eq!(health.snapshot(Duration::from_secs(120)).active_sources, 0);
+        // Preparation neither refreshed activity nor ended the session.
+        publisher.activity().unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_blocks_are_bound_to_one_publisher_and_session() {
+        let mut first_server = EmbeddedServer::prepare_with_native(config(), vec![source()])
+            .await
+            .unwrap();
+        let mut second_server = EmbeddedServer::prepare_with_native(config(), vec![source()])
+            .await
+            .unwrap();
+        let mut first = first_server.native_publisher(0).unwrap();
+        let mut second = second_server.native_publisher(0).unwrap();
+        first.started().await.unwrap();
+        second.started().await.unwrap();
+        let (mut client, _) = second
+            .clients
+            .register(&config(), transfer_filter())
+            .await
+            .unwrap();
+        let prepared = first.prepare_block(context(100), rows()).unwrap();
+        assert_eq!(
+            second.publish_prepared(prepared).await,
+            Err(NativePublishError::InvalidBlock)
+        );
+        assert_eq!(
+            second_server
+                .source_health()
+                .snapshot(Duration::from_secs(120))
+                .active_sources,
+            0
+        );
+        assert!(matches!(
+            client.rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        second.activity().unwrap();
+
+        let stale = first.prepare_block(context(101), rows()).unwrap();
+        first.inactive();
+        assert_eq!(
+            first.publish_prepared(stale).await,
+            Err(NativePublishError::Inactive)
+        );
+        first.started().await.unwrap();
+        let stale = first.prepare_block(context(102), rows()).unwrap();
+        first.started().await.unwrap();
+        assert_eq!(
+            first.publish_prepared(stale).await,
+            Err(NativePublishError::InvalidBlock)
+        );
+        assert_eq!(
+            first_server
+                .source_health()
+                .snapshot(Duration::from_secs(120))
+                .active_sources,
+            0
+        );
+        let fresh = first.prepare_block(context(103), vec![]).unwrap();
+        first.publish_prepared(fresh).await.unwrap();
+        assert_eq!(
+            first_server
+                .source_health()
+                .snapshot(Duration::from_secs(120))
+                .active_sources,
+            1
+        );
+        let draining = first.prepare_block(context(104), rows()).unwrap();
+        drop(first_server);
+        assert_eq!(
+            first.publish_prepared(draining).await,
+            Err(NativePublishError::Inactive)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_publication_ends_session_but_unpolled_drop_does_not() {
+        let mut server = EmbeddedServer::prepare_with_native(config(), vec![source()])
+            .await
+            .unwrap();
+        let health = server.source_health();
+        let mut publisher = server.native_publisher(0).unwrap();
+        publisher.started().await.unwrap();
+        publisher.activity().unwrap();
+        let unpolled = publisher.prepare_block(context(100), rows()).unwrap();
+        drop(publisher.publish_prepared(unpolled));
+        assert_eq!(health.snapshot(Duration::from_secs(120)).active_sources, 1);
+
+        let prepared = publisher.prepare_block(context(101), rows()).unwrap();
+        let clients = publisher.clients.clone();
+        let (mut client, _) = clients
+            .register(&config(), transfer_filter())
+            .await
+            .unwrap();
+        // Hold the registry lock to pause the real fanout before any frame.
+        let lock = clients.clients.write().await;
+        let mut publication = Box::pin(publisher.publish_prepared(prepared));
+        assert!(futures_util::poll!(publication.as_mut()).is_pending());
+        drop(publication);
+        drop(lock);
+        assert_eq!(health.snapshot(Duration::from_secs(120)).active_sources, 0);
+        assert_eq!(publisher.activity(), Err(NativePublishError::Inactive));
+        assert!(matches!(
+            client.rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        publisher.started().await.unwrap();
+        publisher.publish_block(context(102), rows()).await.unwrap();
+        assert_eq!(health.snapshot(Duration::from_secs(120)).active_sources, 1);
     }
 
     #[test]
