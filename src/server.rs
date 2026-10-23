@@ -34,12 +34,18 @@ use crate::{
     compute_module_hash_hex, decode_database_changes, substreams::load_package,
 };
 
+mod native;
+pub use native::{NativePublishError, NativePublisher, NativeSourceConfig};
+
 type ClientId = u64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("invalid configuration: {0}")]
     Config(#[from] crate::ConfigError),
+
+    #[error("invalid native source configuration")]
+    NativeConfig,
 
     #[error("failed to bind {addr}: {source}")]
     Bind {
@@ -145,6 +151,7 @@ pub struct EmbeddedServer {
     state: AppState,
     stream_tasks: Vec<tokio::task::JoinHandle<()>>,
     source_health: crate::SourceHealth,
+    native_publishers: Vec<Option<NativePublisher>>,
 }
 
 impl EmbeddedServer {
@@ -152,7 +159,17 @@ impl EmbeddedServer {
     /// Like standalone startup, package failures are surfaced by stream
     /// lifecycle messages without removing unaffected configured sources.
     pub async fn prepare(config: Config) -> Result<Self, ServerError> {
-        config.validate()?;
+        Self::prepare_with_native(config, Vec::new()).await
+    }
+
+    /// Embed host-owned native sources alongside optional Substreams readers.
+    /// Native sources never load packages, resolve credentials or open connections.
+    /// Each native publisher can be taken once with [`Self::native_publisher`].
+    pub async fn prepare_with_native(
+        config: Config,
+        native: Vec<NativeSourceConfig>,
+    ) -> Result<Self, ServerError> {
+        config.validate_with_native(&native)?;
         let config = Arc::new(config);
 
         log_startup_config(&config);
@@ -176,6 +193,11 @@ impl EmbeddedServer {
                         .map(str::to_owned),
                     ..prep.meta.clone()
                 })
+                .chain(
+                    native
+                        .iter()
+                        .map(|source| source.metadata(&config.network_aliases)),
+                )
                 .collect::<Vec<_>>(),
         );
 
@@ -189,13 +211,32 @@ impl EmbeddedServer {
             draining: Arc::new(AtomicBool::new(false)),
         };
 
-        let source_health = crate::SourceHealth::new(config.streams.len());
+        let source_health = crate::SourceHealth::new(config.streams.len() + native.len());
         let stream_tasks = spawn_streams(&state, prepared, &source_health);
+        let native_publishers = native
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                Some(NativePublisher::new(
+                    source,
+                    state.clients.clone(),
+                    source_health.clone(),
+                    config.streams.len() + index,
+                ))
+            })
+            .collect();
         Ok(Self {
             state,
             stream_tasks,
             source_health,
+            native_publishers,
         })
+    }
+
+    /// Take a native publisher by its position in the native source configuration.
+    /// A publisher has a single owner so its block and lifecycle calls stay ordered.
+    pub fn native_publisher(&mut self, index: usize) -> Option<NativePublisher> {
+        self.native_publishers.get_mut(index)?.take()
     }
 
     pub fn router(&self, routes: EmbeddedRoutes) -> Router {
@@ -5177,6 +5218,7 @@ mod tests {
                 draining: Arc::new(AtomicBool::new(false)),
             },
             stream_tasks: vec![task],
+            native_publishers: vec![],
             source_health: crate::SourceHealth::new(1),
         };
         let health = server.source_health();
@@ -5262,6 +5304,7 @@ mod tests {
                 source_health: crate::SourceHealth::new(state.config.streams.len()),
                 state,
                 stream_tasks: vec![],
+                native_publishers: vec![],
             };
             let app = embedded.router(routes).merge(host_routes);
             let (shutdown_tx, shutdown_rx) = oneshot::channel();

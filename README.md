@@ -38,6 +38,44 @@ or credentials. Hosts choose their own readiness threshold; this reports read
 activity, not chain freshness, row correctness, or coverage of every channel.
 The standalone `/healthz` route retains its existing drain-only behavior.
 
+### Host-owned native sources
+
+`EmbeddedServer::prepare_with_native(config, sources).await` accepts explicit
+`NativeSourceConfig` discovery identities alongside the optional Substreams
+entries in `config.streams`. `config.validate_with_native(&sources)` performs the
+same validation without I/O. Native-only configurations may leave `streams`
+empty. Each `(network, table)` has exactly one owner; overlapping native sources
+or Substreams fallbacks are rejected, including a fallback with an unrestricted
+table list on the same network.
+
+Take each source's single-owner `NativePublisher` with
+`server.native_publisher(index)`. Call `started().await` at the start of a live
+session, then `publish_block(context, rows).await` for complete decoded blocks.
+Rows carry `@table` plus string values or arrays of strings. The context binds the
+source's network and stable module hash; timestamps retain the existing UTC
+`YYYY-MM-DD HH:MM:SS` wire format. Discovery uses the explicit package identity
+and a `native:<module_hash>` manifest label. The host chooses that identity and
+is responsible for announcing schema changes.
+
+Publication validates the full row count and encoded block size before sending
+anything. It uses the existing per-table fanout, selectors, aliases, filters,
+wrapping and bounded client queues directly. Empty and fully filtered blocks
+produce no data message. There is no extra source queue, package download,
+credential lookup, upstream connection or cursor persistence for a native source.
+
+The host owns decoding, canonical order, duplicate suppression and continuity.
+Call `undo(last_valid_block).await` for a verified rollback; it preserves sockets.
+Call `error()`, `decode_error()` or `completed()` for an ended session, or
+`inactive()` from a cancellation guard. An invalid block also ends the session;
+`started()` is required before publishing again. Dropping the publisher clears
+its readiness. Lifecycle methods carry no arbitrary upstream error text.
+
+Native sources participate in `source_health()` with the same inactivity budget.
+A valid block (including an empty block) or explicit `activity()` records a
+validated source response; `started()` alone does not make a source ready.
+Ending the session or draining the server clears activity immediately. These
+signals describe source availability, not chain freshness or decoder correctness.
+
 ---
 
 ## Install

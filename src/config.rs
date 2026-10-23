@@ -254,7 +254,14 @@ pub enum ConfigError {
 
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.streams.is_empty() {
+        self.validate_with_native_networks(&[])
+    }
+
+    pub(crate) fn validate_with_native_networks(
+        &self,
+        native_networks: &[&str],
+    ) -> Result<(), ConfigError> {
+        if self.streams.is_empty() && native_networks.is_empty() {
             return Err(ConfigError::NoStreams);
         }
 
@@ -314,6 +321,7 @@ impl Config {
             .streams
             .iter()
             .filter_map(|s| s.substreams.network.as_deref().map(str::trim))
+            .chain(native_networks.iter().copied())
             .collect();
         for (alias, network) in self.network_aliases.pairs() {
             if networks.contains(alias) {
