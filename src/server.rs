@@ -35,7 +35,7 @@ use crate::{
 };
 
 mod native;
-pub use native::{NativePublishError, NativePublisher, NativeSourceConfig};
+pub use native::{NativePublishError, NativePublisher, NativeSourceConfig, PreparedNativeBlock};
 
 type ClientId = u64;
 
