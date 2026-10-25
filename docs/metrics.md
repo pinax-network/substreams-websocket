@@ -41,8 +41,11 @@ All metrics are namespaced `substreams_websocket_*`. Naming follows Prometheus c
 | `substreams_websocket_substreams_errors_total` | counter | `network`, `package_name`, `package_version`, `kind` | `kind`: `transient` (stream ended after progress), `fatal` (errored), `decode` (DatabaseChanges parse failed). |
 | `substreams_websocket_substreams_reconnects_total` | counter | `network`, `package_name`, `package_version` | Retry-loop reconnect attempts. |
 | `substreams_websocket_substreams_undo_total` | counter | `network`, `package_name`, `package_version` | `BlockUndoSignal` events. |
+| `substreams_websocket_substreams_head_block_number` | gauge | `network`, `package_name`, `package_version` | Latest block number received from upstream per Substreams source. Set on every received block, before the subscriber check and before decode, so it advances with or without subscribers, with or without declared tables, and when the block then fails to decode. Not touched on undo or while reconnecting. Native sources do not set it. |
+| `substreams_websocket_substreams_head_block_timestamp_seconds` | gauge | `network`, `package_name`, `package_version` | Block timestamp (Unix seconds) of that same block. `time() - value` is the source's head age. |
 | `substreams_websocket_head_block_number` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Latest block number observed per stream-table. `stream` is the Binance-style `<network>@<table>` selector. Updated on every block for each operator-declared table, including blocks skipped because the stream has no subscribers. When no tables are declared it falls back to tables seen in the decoded block, so skipped blocks leave those gauges unchanged. |
-| `substreams_websocket_head_block_time_drift` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Lag (`now - block_timestamp`) in seconds for the latest block, same labels as `head_block_number`. Sub-second precision (block timestamp is integer seconds, but `now` is `f64`). Can go **negative** if a block's timestamp is ahead of this server's clock — a signal of clock skew between producer and consumer; not clamped. Useful for alerting on stalled / backfilling streams (`drift > X`) or time-sync issues (`drift < -X`). |
+| `substreams_websocket_head_block_time_drift` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Lag (`now - block_timestamp`) in seconds for the latest block, same labels as `head_block_number`. Sub-second precision (block timestamp is integer seconds, but `now` is `f64`). Can go **negative** if a block's timestamp is ahead of this server's clock — a signal of clock skew between producer and consumer; not clamped. Useful for time-sync issues (`drift < -X`). **Computed when the gauge is updated, so it freezes at its last value when updates stop**: a stalled stream keeps reporting the small drift of its last block. Do not alert on it for staleness; use `head_block_timestamp_seconds` instead. |
+| `substreams_websocket_head_block_timestamp_seconds` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Block timestamp (Unix seconds) of the latest block, same labels as `head_block_number` and set in the same update, on the same paths: decoded blocks, blocks skipped for lack of subscribers (declared tables), and native `publish_prepared` (every declared table, even without rows). `time() - value` is the channel's head age; it keeps growing when updates stop, so it is the staleness signal. Set, not max: catching up from an old cursor shows the real lag. Undo leaves it unchanged; a block that fails to decode does not advance it (the source gauges above do). |
 
 ## Shutdown
 
@@ -59,6 +62,7 @@ Label sets are kept small on purpose:
 - `module_hash` is **not** a label — high-churn (changes on every spkg upgrade), low operational value once `package_version` is present.
 - `client_id` is **not** a label — would blow up on a busy server.
 - The head-block gauges carry `spkg` (manifest path) and `endpoint` so operators can group by upstream source. These stay bounded by the number of configured streams.
+- The per-source head gauges are keyed by `network`, `package_name`, `package_version`, like `substreams_blocks_total`. Two streams using one spkg on the same network with different modules share those series (last writer wins); no shipped config does this.
 
 Outcome-style labels (`success`, `error`, `transient`, ...) stay finite per metric.
 
@@ -72,6 +76,8 @@ scrape_configs:
     scrape_interval: 15s
     metrics_path: /metrics
 ```
+
+A target label named `endpoint` (common with the Prometheus Operator and VictoriaMetrics scrape objects) collides with the head gauges' own `endpoint` label, so the stored series carry it as `exported_endpoint`. Native channels set an empty `endpoint`, so they carry only the scrape's label.
 
 ## Useful queries
 
@@ -96,8 +102,12 @@ rate(substreams_websocket_blocks_skipped_total[5m])
 # p99 connection lifetime
 histogram_quantile(0.99, sum by (le) (rate(substreams_websocket_connection_duration_seconds_bucket[10m])))
 
-# Streams falling behind real time (alert on > 60s drift sustained)
-max by (stream) (substreams_websocket_head_block_time_drift)
+# Channel head age: seconds since the newest block's timestamp. Keeps
+# growing when blocks stop, so it is safe to alert on (for example > 600 for 2m).
+time() - max by (stream) (substreams_websocket_head_block_timestamp_seconds)
+
+# Source head age per Substreams package, with or without subscribers
+time() - max by (network, package_name) (substreams_websocket_substreams_head_block_timestamp_seconds)
 
 # Per-stream head block — useful to spot stalled streams
 max by (stream) (substreams_websocket_head_block_number)

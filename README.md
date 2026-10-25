@@ -337,7 +337,7 @@ GET /metrics
 # ...
 ```
 
-Full catalog + recommended PromQL queries: [`docs/metrics.md`](docs/metrics.md). Cardinality is bounded — `module_hash` and `client_id` are deliberately not labels.
+Head freshness: `substreams_websocket_head_block_timestamp_seconds` (per channel) and `substreams_websocket_substreams_head_block_timestamp_seconds` (per source) carry the newest block's timestamp, so `time() - value` keeps growing when blocks stop. Alert on those, not on `head_block_time_drift`, which freezes. Full catalog + recommended PromQL queries: [`docs/metrics.md`](docs/metrics.md). Cardinality is bounded — `module_hash` and `client_id` are deliberately not labels.
 
 ---
 

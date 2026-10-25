@@ -147,7 +147,32 @@ fn describe() {
         "substreams_websocket_head_block_time_drift",
         Unit::Seconds,
         "Lag (now - block_timestamp) in seconds for the latest block per \
-         stream-table. Labelled by stream/network/table/spkg/endpoint."
+         stream-table, computed when the gauge is updated. It freezes when \
+         updates stop, so do not alert on it for staleness; use \
+         time() - substreams_websocket_head_block_timestamp_seconds. \
+         Labelled by stream/network/table/spkg/endpoint."
+    );
+    describe_gauge!(
+        "substreams_websocket_head_block_timestamp_seconds",
+        Unit::Seconds,
+        "Block timestamp (Unix seconds) of the latest block per stream-table. \
+         Set together with head_block_number; time() - value is the channel's \
+         head age and keeps growing when blocks stop. Labelled by \
+         stream/network/table/spkg/endpoint."
+    );
+    describe_gauge!(
+        "substreams_websocket_substreams_head_block_number",
+        "Latest block number received from upstream per Substreams source, \
+         set on every block before the subscriber check and decode. Labelled \
+         by network/package_name/package_version."
+    );
+    describe_gauge!(
+        "substreams_websocket_substreams_head_block_timestamp_seconds",
+        Unit::Seconds,
+        "Block timestamp (Unix seconds) of the latest block received from \
+         upstream per Substreams source, set on every block before the \
+         subscriber check and decode. Labelled by \
+         network/package_name/package_version."
     );
 
     // ---- Block hot-path ---------------------------------------------------
