@@ -51,4 +51,5 @@ tonic-prost-build = "0.14"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }
 urlencoding = "2"

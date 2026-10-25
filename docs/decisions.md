@@ -48,7 +48,15 @@ Default bumped from tonic's 4 MiB to 64 MiB; configurable via `SUBSTREAMS_MAX_DE
 
 Rejected: keeping default and asking providers to split.
 
-Why: Solana SPL-transfer blocks routinely exceed 4 MiB after gzip decompression. The cap is per-message; oversizing it costs nothing on normal blocks and avoids a hard failure on the fat ones. Some chains (e.g. Hyperliquid hypercore) exceed even 64 MiB and would otherwise fail every block (`Error decompressing: size limit, of 67108864 bytes, exceeded`) — those raise the cap per stream rather than forcing a global bump.
+Why: Solana SPL-transfer blocks routinely exceed 4 MiB after decompression. The cap is per-message; oversizing it costs nothing on normal blocks and avoids a hard failure on the fat ones. Some chains (e.g. Hyperliquid hypercore) exceed even 64 MiB and would otherwise fail every block (`Error decompressing: size limit, of 67108864 bytes, exceeded`) — those raise the cap per stream rather than forcing a global bump.
+
+## zstd response compression
+
+The Substreams client sends the request uncompressed and advertises `grpc-accept-encoding: zstd,gzip,identity`, so Substreams tier1 compresses responses with zstd. Gzip remains the fallback for a server that does not register zstd.
+
+Rejected: `send_compressed(Gzip)` on the request (the previous setup). dgrpc's compression handler keeps an explicit request `grpc-encoding`, so it pinned every response to gzip even though zstd was accepted.
+
+Why: zstd decompresses faster than gzip and usually compresses better at comparable speed, on the client's hottest path (every block). The request is small, so compressing it gains nothing. Mechanism and server-side source references: [`substreams.md`](substreams.md#grpc-service-shape).
 
 ## HTTP/2 + TCP keepalive
 

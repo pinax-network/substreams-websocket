@@ -34,7 +34,7 @@ The `lib.rs` re-exports a small public surface; everything wires together in `sr
 
 - `src/main.rs` — Clap CLI + env mapping. Builds `Config` from `streams.yaml` (or inline `SUBSTREAMS_WEBSOCKET_STREAMS_YAML` env var, which wins; TOML equivalents also supported) and per-stream defaults. Two subcommands: `serve`, `stream`.
 - `src/config.rs` — `Config`, `StreamConfig`, `SubstreamsConfig`, `WebSocketConfig`. Pure data + `Config::validate()`. Validation rejects duplicate `(network, manifest, module)` triples.
-- `src/substreams.rs` — gRPC client. JWT exchange (`api_key → bearer`), HTTP/2 + TCP keepalive tuning, 64 MiB decode cap, package loading from local path or HTTPS, `StreamEvent` enum.
+- `src/substreams.rs` — gRPC client. JWT exchange (`api_key → bearer`), HTTP/2 + TCP keepalive tuning, zstd-preferred response compression (uncompressed request, `grpc-accept-encoding: zstd,gzip,identity`; see `docs/substreams.md`), 64 MiB decode cap, package loading from local path or HTTPS, `StreamEvent` enum.
 - `src/module_hash.rs` — Canonical Substreams module-hash computation (matches `substreams info` output). Identity key for cursor files.
 - `src/decoder.rs` — Decodes `DatabaseChanges` → `DatabaseChangesBlockMessage`. Each row carries an `@table` field; block-level meta (`block_num`, `block_hash`, `timestamp`, `minute`) is hoisted to the envelope and stripped from rows.
 - `src/event_filter.rs` — Server-side row filtering by client-supplied `key=value` constraints (capped by `MAX_FILTER_FIELDS` / `MAX_FILTER_VALUES`).
