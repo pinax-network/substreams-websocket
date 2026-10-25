@@ -741,6 +741,76 @@ mod tests {
         publisher.activity().unwrap();
     }
 
+    fn head_value(metric: &str, module_hash: &str, table: &str) -> Option<f64> {
+        let spkg = format!("spkg=\"native:{module_hash}\"");
+        let table = format!("table=\"{table}\"");
+        crate::metrics::render().lines().find_map(|line| {
+            (line.starts_with(metric) && line.contains(&spkg) && line.contains(&table))
+                .then(|| line.rsplit_once(' ').and_then(|(_, v)| v.parse().ok()))
+                .flatten()
+        })
+    }
+
+    #[tokio::test]
+    async fn publish_advances_head_timestamp_for_every_declared_table() {
+        // Native channels are source-driven: every published block refreshes
+        // the head gauges of every declared table, including tables without
+        // rows in that block and blocks without any rows or subscribers.
+        let mut src = source();
+        src.module_hash = "head-timestamp-all-tables".into();
+        src.package_name = "native_head_timestamp".into();
+        src.tables = vec!["transfers".into(), "approvals".into()];
+        let mut server = EmbeddedServer::prepare_with_native(config(), vec![src.clone()])
+            .await
+            .unwrap();
+        let mut publisher = server.native_publisher(0).unwrap();
+        publisher.started().await.unwrap();
+        let mut ctx = context(100);
+        ctx.module_hash = src.module_hash.clone();
+        publisher.publish_block(ctx, rows()).await.unwrap();
+        for table in ["transfers", "approvals"] {
+            assert_eq!(
+                head_value(
+                    "substreams_websocket_head_block_timestamp_seconds",
+                    &src.module_hash,
+                    table
+                ),
+                Some(1792699200.0),
+                "{table}"
+            );
+            assert_eq!(
+                head_value(
+                    "substreams_websocket_head_block_number",
+                    &src.module_hash,
+                    table
+                ),
+                Some(100.0),
+                "{table}"
+            );
+        }
+
+        let mut ctx = context(101);
+        ctx.module_hash = src.module_hash.clone();
+        ctx.timestamp_seconds += 12;
+        publisher.publish_block(ctx, vec![]).await.unwrap();
+        for table in ["transfers", "approvals"] {
+            assert_eq!(
+                head_value(
+                    "substreams_websocket_head_block_timestamp_seconds",
+                    &src.module_hash,
+                    table
+                ),
+                Some(1792699212.0),
+                "{table} advances on an empty block"
+            );
+        }
+        // The per-source Substreams gauges are reader-only.
+        assert!(!crate::metrics::render().lines().any(|line| {
+            line.starts_with("substreams_websocket_substreams_head_block_")
+                && line.contains("package_name=\"native_head_timestamp\"")
+        }));
+    }
+
     #[tokio::test]
     async fn prepared_blocks_are_bound_to_one_publisher_and_session() {
         let mut first_server = EmbeddedServer::prepare_with_native(config(), vec![source()])

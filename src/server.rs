@@ -1110,8 +1110,7 @@ enum ReadOutcome {
 
 /// Rolling per-connection profile of the block hot-path, flushed to the logs
 /// periodically. Surfaces the decode / fan-out cost split and head drift in
-/// Grafana (via the log search) without needing a metrics backend — the WS
-/// server exports no Prometheus head-lag metric yet (#76).
+/// the logs, next to the Prometheus head gauges (`docs/metrics.md`).
 #[derive(Default)]
 struct BlockProfile {
     blocks: u64,
@@ -1269,6 +1268,9 @@ async fn handle_substream_event(
                 "package_version" => identity.package_version.clone()
             )
             .increment(1);
+            // Source head: set before the subscriber check and before decode,
+            // so it follows every received block whatever happens next.
+            update_source_head_gauges(identity, number, timestamp_seconds);
 
             // Skip the decode/serialize/fan-out hot-path entirely when nobody
             // is subscribed — decoding + serializing the block is the dominant
@@ -1443,13 +1445,38 @@ async fn handle_substream_event(
     }
 }
 
+/// Update the per-source head gauges from a received Substreams block. Called
+/// for every block before the subscriber check and before decode, so they
+/// advance whether or not anyone is subscribed, whether or not tables are
+/// declared, and even when the block then fails to decode. Labels match
+/// `substreams_websocket_substreams_blocks_total`. Native sources do not set
+/// these (the host owns its source-level signal).
+fn update_source_head_gauges(identity: &StreamIdentity, block_num: u64, timestamp_seconds: i64) {
+    metrics::gauge!(
+        "substreams_websocket_substreams_head_block_number",
+        "network" => identity.network.clone(),
+        "package_name" => identity.package_name.clone(),
+        "package_version" => identity.package_version.clone()
+    )
+    .set(block_num as f64);
+    metrics::gauge!(
+        "substreams_websocket_substreams_head_block_timestamp_seconds",
+        "network" => identity.network.clone(),
+        "package_name" => identity.package_name.clone(),
+        "package_version" => identity.package_version.clone()
+    )
+    .set(timestamp_seconds as f64);
+}
+
 /// Update per-stream head-block gauges. One block applies to every table
 /// emitted by the same spkg, so we update gauges for each operator-declared
 /// table (or, when none are declared, the set of tables that appear in
 /// `events`). Called for every block, including the no-subscriber skip path,
 /// which passes no events. Drift is `now - block_timestamp` (seconds,
-/// fractional); not clamped — negative values surface clock skew between this
-/// server and the block producer.
+/// fractional), computed here, so it freezes when updates stop; not clamped —
+/// negative values surface clock skew between this server and the block
+/// producer. The timestamp gauge carries the block time itself, so
+/// `time() - timestamp` keeps growing when updates stop.
 fn update_head_block_gauges(
     identity: &StreamIdentity,
     block_num: u64,
@@ -1500,13 +1527,22 @@ fn update_head_block_gauges(
         .set(block_num);
         metrics::gauge!(
             "substreams_websocket_head_block_time_drift",
-            "stream" => stream_label,
+            "stream" => stream_label.clone(),
             "network" => identity.network.clone(),
             "table" => table.clone(),
             "spkg" => identity.manifest.clone(),
             "endpoint" => identity.endpoint.clone(),
         )
         .set(drift);
+        metrics::gauge!(
+            "substreams_websocket_head_block_timestamp_seconds",
+            "stream" => stream_label,
+            "network" => identity.network.clone(),
+            "table" => table.clone(),
+            "spkg" => identity.manifest.clone(),
+            "endpoint" => identity.endpoint.clone(),
+        )
+        .set(timestamp_seconds as f64);
     }
 }
 
@@ -5495,6 +5531,16 @@ mod tests {
                 (30.0..120.0).contains(&drift),
                 "drift {drift} for {stream} should be ~30s (block_ts was now-30); rendered:\n{rendered}"
             );
+
+            let timestamp = find_metric_value(
+                &rendered,
+                "substreams_websocket_head_block_timestamp_seconds",
+                &matchers_ref,
+            )
+            .unwrap_or_else(|| {
+                panic!("head_block_timestamp_seconds gauge missing for {stream} in:\n{rendered}")
+            });
+            assert_eq!(timestamp, block_ts as f64, "head timestamp for {stream}");
         }
     }
 
@@ -5698,6 +5744,431 @@ mod tests {
                 (5.0..60.0).contains(&drift),
                 "drift {drift} for {table} should follow the latest block (~5s), not the stall"
             );
+
+            assert_eq!(
+                channel_head_timestamp(&rendered, "gauge-test-net-skip", table),
+                Some((now_secs - 5) as f64),
+                "head timestamp for {table} follows the latest block, not the stall"
+            );
         }
+        assert_eq!(
+            source_head(&rendered, "gauge-test-net-skip"),
+            (Some(101.0), Some((now_secs - 5) as f64)),
+            "source head follows every skipped block"
+        );
+    }
+
+    // ---- Source-driven head gauges ---------------------------------------
+    //
+    // Each test uses its own network label: the metrics registry is a
+    // process-wide singleton shared by every test.
+
+    fn gauge_identity(network: &str, tables: &[&str]) -> super::StreamIdentity {
+        super::StreamIdentity {
+            network: network.to_owned(),
+            package_name: "gauge_pkg".to_owned(),
+            package_version: "v1".to_owned(),
+            module_hash: "h".to_owned(),
+            manifest: format!("./{network}.spkg"),
+            endpoint: format!("https://{network}:443"),
+            tables: tables.iter().map(|t| (*t).to_owned()).collect(),
+        }
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is past UNIX epoch")
+            .as_secs() as i64
+    }
+
+    fn wall_now() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is past UNIX epoch")
+            .as_secs_f64()
+    }
+
+    /// One row per table, as an encoded `DatabaseChanges` payload.
+    fn rows_payload(tables: &[&str]) -> Vec<u8> {
+        let changes = DatabaseChanges {
+            table_changes: tables
+                .iter()
+                .map(|table| TableChange {
+                    table: (*table).to_owned(),
+                    ordinal: 0,
+                    operation: 1,
+                    fields: vec![Field {
+                        name: "amount".to_owned(),
+                        value: "1".to_owned(),
+                        update_op: 1,
+                    }],
+                    primary_key: None,
+                })
+                .collect(),
+        };
+        let mut payload = Vec::new();
+        changes.encode(&mut payload).expect("changes encode");
+        payload
+    }
+
+    async fn feed_block(
+        identity: &super::StreamIdentity,
+        clients: &super::ClientRegistry,
+        cursors: &CursorStore,
+        profile: &mut BlockProfile,
+        number: u64,
+        timestamp_seconds: i64,
+        payload: Vec<u8>,
+    ) {
+        super::handle_substream_event(
+            identity,
+            clients,
+            cursors,
+            StreamEvent::Block {
+                number,
+                id: format!("block-{number}"),
+                timestamp: String::new(),
+                timestamp_seconds,
+                output_type_url: String::new(),
+                payload,
+                cursor: format!("cursor-{number}"),
+            },
+            profile,
+        )
+        .await;
+    }
+
+    async fn subscribe(clients: &super::ClientRegistry, selector: &str) -> super::RegisteredClient {
+        let mut filter = StreamFilter::default();
+        filter.add(StreamId::parse(selector).expect("selector parses"));
+        clients
+            .register(&config(), filter)
+            .await
+            .expect("client registers")
+            .0
+    }
+
+    fn channel_head_timestamp(rendered: &str, network: &str, table: &str) -> Option<f64> {
+        let stream = format!("stream=\"{network}@{table}\"");
+        find_metric_value(
+            rendered,
+            "substreams_websocket_head_block_timestamp_seconds",
+            &[stream.as_str()],
+        )
+    }
+
+    fn channel_head_number(rendered: &str, network: &str, table: &str) -> Option<f64> {
+        let stream = format!("stream=\"{network}@{table}\"");
+        find_metric_value(
+            rendered,
+            "substreams_websocket_head_block_number",
+            &[stream.as_str()],
+        )
+    }
+
+    fn channel_drift(rendered: &str, network: &str, table: &str) -> Option<f64> {
+        let stream = format!("stream=\"{network}@{table}\"");
+        find_metric_value(
+            rendered,
+            "substreams_websocket_head_block_time_drift",
+            &[stream.as_str()],
+        )
+    }
+
+    /// `(head_block_number, head_block_timestamp_seconds)` of the source on
+    /// `network` (unique per test).
+    fn source_head(rendered: &str, network: &str) -> (Option<f64>, Option<f64>) {
+        let network = format!("network=\"{network}\"");
+        (
+            find_metric_value(
+                rendered,
+                "substreams_websocket_substreams_head_block_number",
+                &[network.as_str()],
+            ),
+            find_metric_value(
+                rendered,
+                "substreams_websocket_substreams_head_block_timestamp_seconds",
+                &[network.as_str()],
+            ),
+        )
+    }
+
+    #[test]
+    fn update_head_block_gauges_timestamp_is_block_time_not_wall_clock() {
+        crate::metrics::init();
+        let identity = gauge_identity("gauge-test-net-ts", &["swaps"]);
+        super::update_head_block_gauges(&identity, 7, 1_700_000_000, &[]);
+        let rendered = crate::metrics::render();
+        assert_eq!(
+            channel_head_timestamp(&rendered, "gauge-test-net-ts", "swaps"),
+            Some(1_700_000_000.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribed_blocks_advance_channel_and_source_head_gauges() {
+        // Subscribed stream with declared tables: the block is decoded and
+        // carries rows for one table only. Both declared channels and the
+        // source advance.
+        crate::metrics::init();
+        let net = "gauge-test-net-sub";
+        let identity = gauge_identity(net, &["swaps", "transfers"]);
+        let clients = super::ClientRegistry::default();
+        let _client = subscribe(&clients, &format!("{net}@swaps")).await;
+        let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
+        let cursors = CursorStore::new(cursors_dir.path());
+        let now = unix_now();
+        let mut profile = BlockProfile::default();
+        feed_block(
+            &identity,
+            &clients,
+            &cursors,
+            &mut profile,
+            500,
+            now - 3,
+            rows_payload(&["swaps"]),
+        )
+        .await;
+        assert_eq!(profile.blocks, 1, "the block is decoded, not skipped");
+        assert_eq!(profile.skipped, 0);
+
+        let rendered = crate::metrics::render();
+        for table in ["swaps", "transfers"] {
+            assert_eq!(channel_head_number(&rendered, net, table), Some(500.0));
+            assert_eq!(
+                channel_head_timestamp(&rendered, net, table),
+                Some((now - 3) as f64),
+                "{table} advances even without rows in the block"
+            );
+        }
+        assert_eq!(
+            source_head(&rendered, net),
+            (Some(500.0), Some((now - 3) as f64))
+        );
+        // Same label set as substreams_blocks_total.
+        let labels = [
+            "network=\"gauge-test-net-sub\"",
+            "package_name=\"gauge_pkg\"",
+            "package_version=\"v1\"",
+        ];
+        for metric in [
+            "substreams_websocket_substreams_blocks_total",
+            "substreams_websocket_substreams_head_block_number",
+            "substreams_websocket_substreams_head_block_timestamp_seconds",
+        ] {
+            assert!(
+                find_metric_value(&rendered, metric, &labels).is_some(),
+                "{metric} carries network/package_name/package_version:\n{rendered}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_head_gauges_follow_every_block_without_declared_tables() {
+        // No declared tables and no subscribers: the block is skipped before
+        // decode, so there are no rows to name a channel. The source gauges
+        // still follow every block; no per-channel series is created (the
+        // documented limitation for discover-at-runtime streams).
+        crate::metrics::init();
+        let net = "gauge-test-net-undecl";
+        let identity = gauge_identity(net, &[]);
+        let clients = super::ClientRegistry::default();
+        let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
+        let cursors = CursorStore::new(cursors_dir.path());
+        let now = unix_now();
+        let mut profile = BlockProfile::default();
+        for (number, age) in [(200, 40), (201, 2)] {
+            feed_block(
+                &identity,
+                &clients,
+                &cursors,
+                &mut profile,
+                number,
+                now - age,
+                rows_payload(&["swaps"]),
+            )
+            .await;
+        }
+        assert_eq!(profile.skipped, 2, "both blocks take the skip path");
+
+        let rendered = crate::metrics::render();
+        assert_eq!(
+            source_head(&rendered, net),
+            (Some(201.0), Some((now - 2) as f64))
+        );
+        let network_label = format!("network=\"{net}\"");
+        assert!(
+            !rendered
+                .lines()
+                .any(|line| line.starts_with("substreams_websocket_head_block_")
+                    && line.contains(&network_label)),
+            "no per-channel head series without declared tables or decoded rows:\n{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn decode_error_advances_source_but_not_channel_head() {
+        // A subscribed block that fails to decode delivers nothing on the
+        // channel, so the channel head stays put; the source head still
+        // follows upstream, which tells the two failure modes apart.
+        crate::metrics::init();
+        let net = "gauge-test-net-decode";
+        let identity = gauge_identity(net, &["swaps"]);
+        let clients = super::ClientRegistry::default();
+        let _client = subscribe(&clients, &format!("{net}@swaps")).await;
+        let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
+        let cursors = CursorStore::new(cursors_dir.path());
+        let now = unix_now();
+        let mut profile = BlockProfile::default();
+        let decode_errors = |rendered: &str| {
+            let network_label = format!("network=\"{net}\"");
+            find_metric_value(
+                rendered,
+                "substreams_websocket_substreams_errors_total",
+                &[network_label.as_str(), "kind=\"decode\""],
+            )
+            .unwrap_or(0.0)
+        };
+
+        feed_block(
+            &identity,
+            &clients,
+            &cursors,
+            &mut profile,
+            300,
+            now - 10,
+            rows_payload(&["swaps"]),
+        )
+        .await;
+        let before = crate::metrics::render();
+        assert_eq!(
+            channel_head_timestamp(&before, net, "swaps"),
+            Some((now - 10) as f64)
+        );
+
+        // Truncated varint: not a valid DatabaseChanges message.
+        feed_block(
+            &identity,
+            &clients,
+            &cursors,
+            &mut profile,
+            301,
+            now - 1,
+            vec![0xff; 4],
+        )
+        .await;
+        let after = crate::metrics::render();
+        assert_eq!(decode_errors(&after), decode_errors(&before) + 1.0);
+        assert_eq!(
+            channel_head_timestamp(&after, net, "swaps"),
+            Some((now - 10) as f64),
+            "channel head keeps the last delivered block"
+        );
+        assert_eq!(channel_head_number(&after, net, "swaps"), Some(300.0));
+        assert_eq!(
+            source_head(&after, net),
+            (Some(301.0), Some((now - 1) as f64)),
+            "source head follows the undecodable block"
+        );
+    }
+
+    #[tokio::test]
+    async fn head_timestamp_staleness_grows_while_blocks_stop_and_recovers_after_reconnect() {
+        // The reader stops receiving blocks (upstream stall, then a
+        // reconnect). Nothing updates the gauges in between, so the drift
+        // gauge freezes at its last small value and hides the stall, while
+        // `now - head_block_timestamp_seconds` keeps growing. The reconnected
+        // session goes through the same `handle_substream_event` (with a fresh
+        // per-connection profile, as `read_loop` does) and the gauges resume,
+        // catch-up blocks included.
+        crate::metrics::init();
+        let net = "gauge-test-net-stall";
+        let identity = gauge_identity(net, &["swaps"]);
+        let clients = super::ClientRegistry::default();
+        let cursors_dir = tempfile::tempdir().expect("cursor tempdir");
+        let cursors = CursorStore::new(cursors_dir.path());
+        let block_ts = unix_now() - 2;
+
+        // First session: one block, unsubscribed.
+        let mut profile = BlockProfile::default();
+        feed_block(
+            &identity,
+            &clients,
+            &cursors,
+            &mut profile,
+            400,
+            block_ts,
+            Vec::new(),
+        )
+        .await;
+        let rendered = crate::metrics::render();
+        let staleness_1 = wall_now() - channel_head_timestamp(&rendered, net, "swaps").unwrap();
+        let drift_1 = channel_drift(&rendered, net, "swaps").unwrap();
+        let source_staleness_1 = wall_now() - source_head(&rendered, net).1.unwrap();
+
+        // Stream ends, no blocks while the reader backs off.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let rendered = crate::metrics::render();
+        assert_eq!(
+            channel_head_timestamp(&rendered, net, "swaps"),
+            Some(block_ts as f64)
+        );
+        let staleness_2 = wall_now() - channel_head_timestamp(&rendered, net, "swaps").unwrap();
+        let source_staleness_2 = wall_now() - source_head(&rendered, net).1.unwrap();
+        assert!(
+            staleness_2 >= staleness_1 + 1.0,
+            "staleness grows while blocks stop: {staleness_1} -> {staleness_2}"
+        );
+        assert!(
+            source_staleness_2 >= source_staleness_1 + 1.0,
+            "source staleness grows too: {source_staleness_1} -> {source_staleness_2}"
+        );
+        assert_eq!(
+            channel_drift(&rendered, net, "swaps"),
+            Some(drift_1),
+            "drift is frozen at its update-time value (why it cannot alert)"
+        );
+
+        // Reconnected session resumes from the cursor: a catch-up block that
+        // is still behind, then the head. Set semantics: the catch-up shows
+        // its real lag before the head block clears it.
+        let mut profile = BlockProfile::default();
+        let now = unix_now();
+        feed_block(
+            &identity,
+            &clients,
+            &cursors,
+            &mut profile,
+            401,
+            now - 120,
+            Vec::new(),
+        )
+        .await;
+        let rendered = crate::metrics::render();
+        assert_eq!(
+            channel_head_timestamp(&rendered, net, "swaps"),
+            Some((now - 120) as f64)
+        );
+        feed_block(
+            &identity,
+            &clients,
+            &cursors,
+            &mut profile,
+            402,
+            now - 1,
+            Vec::new(),
+        )
+        .await;
+        let rendered = crate::metrics::render();
+        assert_eq!(channel_head_number(&rendered, net, "swaps"), Some(402.0));
+        assert_eq!(
+            channel_head_timestamp(&rendered, net, "swaps"),
+            Some((now - 1) as f64)
+        );
+        assert_eq!(
+            source_head(&rendered, net),
+            (Some(402.0), Some((now - 1) as f64))
+        );
     }
 }
