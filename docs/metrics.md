@@ -47,6 +47,8 @@ All metrics are namespaced `substreams_websocket_*`. Naming follows Prometheus c
 | `substreams_websocket_head_block_time_drift` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Lag (`now - block_timestamp`) in seconds for the latest block, same labels as `head_block_number`. Sub-second precision (block timestamp is integer seconds, but `now` is `f64`). Can go **negative** if a block's timestamp is ahead of this server's clock — a signal of clock skew between producer and consumer; not clamped. Useful for time-sync issues (`drift < -X`). **Computed when the gauge is updated, so it freezes at its last value when updates stop**: a stalled stream keeps reporting the small drift of its last block. Do not alert on it for staleness; use `head_block_timestamp_seconds` instead. |
 | `substreams_websocket_head_block_timestamp_seconds` | gauge | `stream`, `network`, `table`, `spkg`, `endpoint` | Block timestamp (Unix seconds) of the latest block, same labels as `head_block_number` and set in the same update, on the same paths: decoded blocks, blocks skipped for lack of subscribers (declared tables), and native `publish_prepared` (every declared table, even without rows). `time() - value` is the channel's head age; it keeps growing when updates stop, so it is the staleness signal. Set, not max: catching up from an old cursor shows the real lag. Undo leaves it unchanged; a block that fails to decode does not advance it (the source gauges above do). |
 
+A block without a clock is recorded with timestamp `0`, so it shows as maximally stale: both `head_block_timestamp_seconds` gauges read `0` (`time() - value` is the full Unix time, ~1.8e9 s) and `head_block_time_drift` reports the same.
+
 ## Shutdown
 
 | Metric | Type | Labels | Notes |
