@@ -55,8 +55,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let descriptors = FileDescriptorSet::decode(output.stdout.as_slice())?;
+        // Server stubs are generated only for the test build (`#[cfg(test)]`
+        // on every server mod): the Substreams client tests drive the real
+        // client against an in-process tonic server. Release builds compile
+        // the client only, exactly as before.
         tonic_prost_build::configure()
-            .build_server(false)
+            .build_server(true)
+            .server_mod_attribute(".", "#[cfg(test)]")
             .compile_fds(descriptors)?;
     }
 

@@ -191,22 +191,43 @@ impl SubstreamsClient {
         ensure_module_exists(&package, &self.config.module)?;
         let request = build_blocks_request(&self.config, package)?;
         let channel = connect_channel(&self.config).await?;
-        // Decoded message cap (default 64 MiB, configurable per stream).
-        // Substreams DatabaseChanges payloads for chains with many transactions
-        // per block (e.g. Solana SPL transfers) routinely exceed tonic's 4 MiB
-        // default after gzip decompression; some chains exceed 64 MiB and raise
-        // this via `SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES` / per-stream config.
-        let mut client = StreamClient::new(channel)
-            .max_decoding_message_size(self.config.max_decode_message_bytes)
-            .send_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Zstd);
+        let mut client = stream_client(channel, self.config.max_decode_message_bytes);
         let mut request = Request::new(request);
         apply_auth_metadata(request.metadata_mut(), &self.config)?;
         let stream = client.blocks(request).await?.into_inner();
 
         Ok(SubstreamsStream { stream })
     }
+}
+
+/// Build the `sf.substreams.rpc.v2.Stream` client with the response
+/// compression we negotiate and the decoded-message cap.
+///
+/// Compression: the request is sent uncompressed (it is small: the package
+/// plus a few scalars) and we advertise `grpc-accept-encoding: zstd,gzip,identity`.
+/// Substreams tier1 (grpc-go behind dgrpc's `standard.CompressionHandler`)
+/// keeps an explicit request `grpc-encoding` if one is sent; otherwise it
+/// injects the first compressor from our `grpc-accept-encoding` that it has
+/// registered, and grpc-go then compresses every response with it. So with no
+/// `send_compressed`, zstd listed first selects zstd responses, gzip remains
+/// the fallback for a server without zstd, and identity the last resort. Do
+/// not add `send_compressed(Gzip)` back: an explicit request `grpc-encoding:
+/// gzip` pins the responses to gzip. Accept order here is the order
+/// advertised. See `docs/substreams.md`.
+///
+/// Decoded message cap (default 64 MiB, configurable per stream): Substreams
+/// DatabaseChanges payloads for chains with many transactions per block (e.g.
+/// Solana SPL transfers) routinely exceed tonic's 4 MiB default after
+/// decompression; some chains exceed 64 MiB and raise this via
+/// `SUBSTREAMS_MAX_DECODE_MESSAGE_BYTES` / per-stream config. tonic applies
+/// the cap to the decompressed output as well as the wire frame, for zstd and
+/// gzip alike, so a highly compressible oversized block fails with
+/// `RESOURCE_EXHAUSTED` instead of being inflated without bound.
+fn stream_client(channel: Channel, max_decode_message_bytes: usize) -> StreamClient<Channel> {
+    StreamClient::new(channel)
+        .max_decoding_message_size(max_decode_message_bytes)
+        .accept_compressed(CompressionEncoding::Zstd)
+        .accept_compressed(CompressionEncoding::Gzip)
 }
 
 pub struct SubstreamsStream {
@@ -695,6 +716,354 @@ mod tests {
             format_clickhouse_timestamp(Some(timestamp)),
             "2026-05-12 18:00:00"
         );
+    }
+
+    /// End-to-end compression negotiation: the real `SubstreamsClient` against
+    /// an in-process tonic server fronted by a layer that reproduces
+    /// Substreams tier1's dgrpc `standard.CompressionHandler`.
+    mod compression {
+        use std::{
+            net::SocketAddr,
+            pin::Pin,
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+
+        use tonic::{
+            Code, Status,
+            transport::{Server, server::TcpIncoming},
+        };
+
+        use super::*;
+        use crate::substreams::pb::sf::substreams::{
+            rpc::v2::{
+                BlockScopedData, MapModuleOutput,
+                stream_server::{Stream, StreamServer},
+            },
+            v1::Clock,
+        };
+
+        const OUTPUT_TYPE_URL: &str =
+            "type.googleapis.com/sf.substreams.sink.database.v1.DatabaseChanges";
+        const BLOCK_NUMBER: u64 = 42;
+
+        /// What the server saw for the one `Blocks` call.
+        #[derive(Debug, Default, Clone)]
+        struct Seen {
+            request_grpc_encoding: Option<String>,
+            request_accept_encoding: Option<String>,
+            /// The compressor the dgrpc emulation selected.
+            selected: Option<String>,
+            /// `grpc-encoding` on the response headers (None = identity).
+            response_grpc_encoding: Option<String>,
+        }
+
+        fn header(headers: &http::HeaderMap, name: &str) -> Option<String> {
+            headers
+                .get(name)
+                .map(|value| value.to_str().expect("ascii header").to_owned())
+        }
+
+        /// Mirror of dgrpc `server/standard/compression.go` `CompressionHandler`
+        /// (streamingfast/dgrpc@99e20897): keep an explicit request
+        /// `grpc-encoding` (rejecting an unregistered one), else take the first
+        /// registered compressor listed in `grpc-accept-encoding`, else
+        /// `identity` (or 400 when compression is enforced). `registered`
+        /// stands in for grpc-go's `encoding.GetCompressor` registry.
+        fn dgrpc_select(
+            headers: &http::HeaderMap,
+            registered: &[&str],
+            enforce: bool,
+        ) -> Result<String, String> {
+            if let Some(explicit) = header(headers, "grpc-encoding") {
+                let explicit = explicit.trim().to_owned();
+                if !explicit.is_empty() {
+                    return if registered.contains(&explicit.as_str()) {
+                        Ok(explicit)
+                    } else {
+                        Err(format!("grpc-encoding {explicit} is not supported"))
+                    };
+                }
+            }
+            let accepted = header(headers, "grpc-accept-encoding").unwrap_or_default();
+            let first = accepted
+                .split(',')
+                .map(|entry| entry.split(';').next().unwrap_or_default().trim())
+                .find(|name| registered.contains(name));
+            match first {
+                Some(name) => Ok(name.to_owned()),
+                None if enforce => Err("no supported compression found.".to_owned()),
+                None => Ok("identity".to_owned()),
+            }
+        }
+
+        struct FakeTier1 {
+            payload: Vec<u8>,
+        }
+
+        type BlocksStream =
+            Pin<Box<dyn futures_util::Stream<Item = Result<Response, Status>> + Send>>;
+
+        #[tonic::async_trait]
+        impl Stream for FakeTier1 {
+            type BlocksStream = BlocksStream;
+
+            async fn blocks(
+                &self,
+                _request: tonic::Request<BlocksRequest>,
+            ) -> Result<tonic::Response<Self::BlocksStream>, Status> {
+                let response = block_response(self.payload.clone());
+                Ok(tonic::Response::new(Box::pin(futures_util::stream::iter(
+                    [Ok(response)],
+                ))))
+            }
+        }
+
+        fn block_response(payload: Vec<u8>) -> Response {
+            Response {
+                message: Some(response::Message::BlockScopedData(BlockScopedData {
+                    output: Some(MapModuleOutput {
+                        name: "swaps".to_owned(),
+                        map_output: Some(prost_types::Any {
+                            type_url: OUTPUT_TYPE_URL.to_owned(),
+                            value: payload,
+                        }),
+                        ..Default::default()
+                    }),
+                    clock: Some(Clock {
+                        id: "block-42".to_owned(),
+                        number: BLOCK_NUMBER,
+                        timestamp: None,
+                    }),
+                    cursor: "cursor-42".to_owned(),
+                    ..Default::default()
+                })),
+            }
+        }
+
+        /// Compressible but non-trivial payload (repeating text).
+        fn compressible_payload(len: usize) -> Vec<u8> {
+            b"swap raydium SOL/USDC amount_in=1000 amount_out=42 "
+                .iter()
+                .copied()
+                .cycle()
+                .take(len)
+                .collect()
+        }
+
+        /// Start the fake tier1 on an ephemeral port. `registered` is the
+        /// server's compressor registry; tier1 registers both gzip and zstd.
+        async fn start_server(
+            registered: &'static [&'static str],
+            payload: Vec<u8>,
+        ) -> (SocketAddr, Arc<Mutex<Seen>>) {
+            // Pinax runs tier1 with compression enforced.
+            start_server_with(registered, true, payload).await
+        }
+
+        async fn start_server_with(
+            registered: &'static [&'static str],
+            enforce: bool,
+            payload: Vec<u8>,
+        ) -> (SocketAddr, Arc<Mutex<Seen>>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("local addr");
+            let seen = Arc::new(Mutex::new(Seen::default()));
+
+            let on_request = {
+                let seen = seen.clone();
+                move |mut request: http::Request<tonic::body::Body>| {
+                    let headers = request.headers_mut();
+                    let selected = dgrpc_select(headers, registered, enforce)
+                        .unwrap_or_else(|error| panic!("dgrpc would answer 400: {error}"));
+                    {
+                        let mut seen = seen.lock().unwrap();
+                        seen.request_grpc_encoding = header(headers, "grpc-encoding");
+                        seen.request_accept_encoding = header(headers, "grpc-accept-encoding");
+                        seen.selected = Some(selected.clone());
+                    }
+                    // dgrpc: `r.Header.Add("grpc-encoding", compressor)` when the
+                    // client sent none; grpc-go then responds with the request's
+                    // `grpc-encoding`. tonic instead picks the response encoding
+                    // from `grpc-accept-encoding`, so narrow that header to the
+                    // selected compressor to reproduce grpc-go's choice.
+                    if !headers.contains_key("grpc-encoding") {
+                        headers.insert(
+                            "grpc-encoding",
+                            http::HeaderValue::from_str(&selected).unwrap(),
+                        );
+                    }
+                    if selected == "identity" {
+                        headers.remove("grpc-accept-encoding");
+                    } else {
+                        headers.insert(
+                            "grpc-accept-encoding",
+                            http::HeaderValue::from_str(&selected).unwrap(),
+                        );
+                    }
+                    request
+                }
+            };
+            let on_response = {
+                let seen = seen.clone();
+                move |response: http::Response<tonic::body::Body>| {
+                    seen.lock().unwrap().response_grpc_encoding =
+                        header(response.headers(), "grpc-encoding");
+                    response
+                }
+            };
+
+            let service = StreamServer::new(FakeTier1 { payload })
+                .accept_compressed(CompressionEncoding::Gzip)
+                .accept_compressed(CompressionEncoding::Zstd)
+                .send_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Zstd);
+            let layer = tower::ServiceBuilder::new()
+                .map_request(on_request)
+                .map_response(on_response);
+            tokio::spawn(
+                Server::builder()
+                    .layer(layer)
+                    .add_service(service)
+                    .serve_with_incoming(TcpIncoming::from(listener)),
+            );
+            (addr, seen)
+        }
+
+        fn client_config(addr: SocketAddr, max_decode_message_bytes: usize) -> SubstreamsConfig {
+            SubstreamsConfig {
+                endpoint: Some(format!("http://{addr}")),
+                params: Vec::new(),
+                max_decode_message_bytes,
+                ..config()
+            }
+        }
+
+        async fn first_event(
+            addr: SocketAddr,
+            max_decode_message_bytes: usize,
+        ) -> Result<Option<StreamEvent>, SubstreamsError> {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let mut stream =
+                    SubstreamsClient::new(client_config(addr, max_decode_message_bytes))
+                        .stream_with_package(manifest())
+                        .await?;
+                stream.next_event().await
+            })
+            .await
+            .expect("stream did not finish in time")
+        }
+
+        fn assert_request_negotiation(seen: &Seen) {
+            assert_eq!(
+                seen.request_grpc_encoding, None,
+                "the request must not pin a grpc-encoding (dgrpc keeps it for the responses)"
+            );
+            assert_eq!(
+                seen.request_accept_encoding.as_deref(),
+                Some("zstd,gzip,identity"),
+                "zstd must be advertised first, gzip as fallback"
+            );
+        }
+
+        async fn assert_round_trip(registered: &'static [&'static str], expected: Option<&str>) {
+            let payload = compressible_payload(256 * 1024);
+            let (addr, seen) = start_server(registered, payload.clone()).await;
+
+            let event = first_event(addr, crate::config::DEFAULT_MAX_DECODE_MESSAGE_BYTES)
+                .await
+                .expect("stream decodes");
+
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(
+                seen.selected.as_deref(),
+                Some(expected.unwrap_or("identity"))
+            );
+            assert_eq!(seen.response_grpc_encoding.as_deref(), expected);
+            assert_request_negotiation(&seen);
+            match event {
+                Some(StreamEvent::Block {
+                    number,
+                    output_type_url,
+                    payload: decoded,
+                    cursor,
+                    ..
+                }) => {
+                    assert_eq!(number, BLOCK_NUMBER);
+                    assert_eq!(output_type_url, OUTPUT_TYPE_URL);
+                    assert_eq!(cursor, "cursor-42");
+                    assert!(decoded == payload, "payload must survive the round trip");
+                }
+                other => panic!("expected a block, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn tier1_selects_zstd_responses() {
+            // Substreams tier1 registers zstd and gzip (among others).
+            assert_round_trip(&["gzip", "zstd"], Some("zstd")).await;
+        }
+
+        #[tokio::test]
+        async fn gzip_responses_still_decode_when_server_lacks_zstd() {
+            assert_round_trip(&["gzip"], Some("gzip")).await;
+        }
+
+        #[tokio::test]
+        async fn identity_responses_still_decode() {
+            // No registered compressor and compression not enforced: dgrpc
+            // falls through to identity.
+            let payload = compressible_payload(4 * 1024);
+            let (addr, seen) = start_server_unenforced(payload.clone()).await;
+            let event = first_event(addr, crate::config::DEFAULT_MAX_DECODE_MESSAGE_BYTES)
+                .await
+                .expect("stream decodes");
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.selected.as_deref(), Some("identity"));
+            assert_eq!(seen.response_grpc_encoding, None);
+            assert_request_negotiation(&seen);
+            assert!(
+                matches!(event, Some(StreamEvent::Block { payload: decoded, .. }) if decoded == payload)
+            );
+        }
+
+        #[tokio::test]
+        async fn oversized_zstd_message_fails_with_decode_cap() {
+            const CAP: usize = 64 * 1024;
+            // 4 MiB of zeros: the zstd frame is tiny (well under the cap), so
+            // only the decompressed-size bound can reject it.
+            let payload = vec![0u8; 4 * 1024 * 1024];
+            let encoded = block_response(payload.clone()).encode_to_vec();
+            let compressed = zstd::encode_all(encoded.as_slice(), 0).expect("zstd");
+            assert!(compressed.len() < CAP, "wire frame must fit under the cap");
+
+            let (addr, seen) = start_server(&["gzip", "zstd"], payload).await;
+            let error = first_event(addr, CAP)
+                .await
+                .expect_err("oversized message must fail");
+
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.response_grpc_encoding.as_deref(), Some("zstd"));
+            assert_request_negotiation(&seen);
+            match error {
+                SubstreamsError::Status(status) => {
+                    assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+                    assert!(
+                        status
+                            .message()
+                            .contains(&format!("size limit, of {CAP} bytes, exceeded")),
+                        "{status:?}"
+                    );
+                }
+                other => panic!("expected a tonic status, got {other:?}"),
+            }
+        }
+
+        async fn start_server_unenforced(payload: Vec<u8>) -> (SocketAddr, Arc<Mutex<Seen>>) {
+            start_server_with(&[], false, payload).await
+        }
     }
 
     fn config() -> SubstreamsConfig {
