@@ -906,15 +906,15 @@
     <h2>Stream live blockchain data over WebSocket</h2>
     <p class="tagline">
       Decoded blocks, swaps, transfers, and any Substreams <code>DatabaseChanges</code>
-      output — delivered in seconds. Subscribe to one or many streams across SVM, EVM,
-      TVM, HyperLiquid, Polymarket, and any chain Pinax supports. Resume exactly where
-      you left off after a disconnect.
+      output — delivered in seconds. Subscribe to one or many streams across Solana,
+      Ethereum and the other EVM chains, and HyperLiquid. The feed is live-only: after a
+      disconnect, reconnect to rejoin it and backfill any gap with Substreams.
     </p>
 
     <div class="features">
       <div class="feature">
         <h3>Real-time, multi-chain</h3>
-        <p>One generic decoder for every <code>db_out</code>-style Substreams package. Solana, Ethereum, Base, Arbitrum, TVM, HyperLiquid, Polymarket — same URL pattern.</p>
+        <p>One generic decoder for every <code>db_out</code>-style Substreams package. Solana, Ethereum, Base, Arbitrum and the other EVM chains, HyperLiquid — same URL pattern.</p>
       </div>
       <div class="feature">
         <h3>Reorg-aware</h3>
@@ -974,7 +974,7 @@
   "client_id": 1,
   "streams": [
     {
-      "network": "solana-mainnet",
+      "network": "solana",
       "module": "db_out",
       "manifest": "https://.../svm-dex-v0.5.1.spkg",
       "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797",
@@ -983,7 +983,7 @@
       "tables": ["swaps"]
     }
   ],
-  "subscriptions": ["solana-mainnet@swaps"],
+  "subscriptions": ["solana@swaps"],
   "wrap_envelope": false
 }</pre>
   </section>
@@ -992,7 +992,7 @@
     <h2>Block payload</h2>
     <p>One payload per <code>(network, table)</code> group per block. A spkg that emits both <code>swaps</code> and <code>transfers</code> in one block produces two per-table broadcasts.</p>
 <pre>{
-  "network":     "solana-mainnet",
+  "network":     "solana",
   "table":       "swaps",
   "block_num":   350000000,
   "block_hash":  "Gsk6...",
@@ -1035,7 +1035,7 @@
     <p>Add to the per-connection subscription set. Idempotent.</p>
 <pre>// request
 { "method": "SUBSCRIBE",
-  "params": ["solana-mainnet@swaps", "ethereum-mainnet@transfers"],
+  "params": ["solana@swaps", "eth@erc20_transfers"],
   "id": 1 }
 
 // reply
@@ -1048,7 +1048,7 @@
     <p>Remove from the subscription set. Silent on unknown selectors.</p>
 <pre>// request
 { "method": "UNSUBSCRIBE",
-  "params": ["ethereum-mainnet@transfers"],
+  "params": ["eth@erc20_transfers"],
   "id": 2 }
 
 // reply
@@ -1063,7 +1063,7 @@
 { "method": "LIST_SUBSCRIPTIONS", "id": 3 }
 
 // reply
-{ "result": ["solana-mainnet@swaps", "ethereum-mainnet@*"], "id": 3 }</pre>
+{ "result": ["solana@swaps", "eth@*"], "id": 3 }</pre>
     <p>Insertion order preserved. Wildcards returned verbatim, not expanded.</p>
   </section>
 
@@ -1072,7 +1072,7 @@
     <p>Drop non-matching events from the wire for the given selector. <code>params[1]</code> is an <strong>SQE expression string</strong> (the same language as Firehose <code>substreams run -t</code>): <code>field:value</code> string equality (case-insensitive), bare <code>value</code> matches any column, combined with <code>||</code> (OR), <code>&amp;&amp;</code> / whitespace (AND), <code>!</code> (NOT), and <code>( )</code> grouping. Missing field on an event is a miss. Wildcard selectors are accepted and applied to every matching channel. <code>SET_FILTER</code> <strong>replaces</strong> the filter for that selector (not accumulate — combine with <code>||</code> in one expression) — read the <code>{"result"|"error"}</code> reply, and use <code>LIST_FILTERS</code> to confirm one is active.</p>
 <pre>// request
 { "method": "SET_FILTER",
-  "params": ["solana-mainnet@swaps", "protocol:raydium_cpmm && user:F2MUE…"],
+  "params": ["solana@swaps", "protocol:raydium_cpmm && user:F2MUE…"],
   "id": 1 }
 
 // reply (accept)
@@ -1086,7 +1086,7 @@
     <h2>CLEAR_FILTER</h2>
     <p>Drop the filter for the listed selectors.</p>
 <pre>// request
-{ "method": "CLEAR_FILTER", "params": ["solana-mainnet@swaps"], "id": 2 }
+{ "method": "CLEAR_FILTER", "params": ["solana@swaps"], "id": 2 }
 
 // reply
 { "result": null, "id": 2 }</pre>
@@ -1100,7 +1100,7 @@
 { "method": "LIST_FILTERS", "id": 3 }
 
 // reply
-{ "result": { "solana-mainnet@swaps": "protocol:raydium_cpmm" }, "id": 3 }</pre>
+{ "result": { "solana@swaps": "protocol:raydium_cpmm" }, "id": 3 }</pre>
     <p>Returns the selector → expression-string map. An empty <code>{}</code> means no filter is active.</p>
   </section>
 
@@ -1108,34 +1108,37 @@
     <h2>Event filters</h2>
     <p>Per-subscription filters drop events from <code>events[]</code> before delivery. The filter is an <strong>SQE expression string</strong> (StreamingFast Substreams Query Expression — the same language as Firehose <code>substreams run -t</code>). Pass <code>?filter=&lt;url-encoded-expr&gt;</code> (alias <code>?sqe=</code>) on connect, or use the live <code>SET_FILTER</code> / <code>CLEAR_FILTER</code> / <code>LIST_FILTERS</code> commands.</p>
 <pre># ?filter=protocol:raydium_cpmm
-ws://host/ws/solana-mainnet@swaps?filter=protocol%3Araydium_cpmm</pre>
+ws://host/ws/solana@swaps?filter=protocol%3Araydium_cpmm</pre>
     <p>Semantics:</p>
     <ul>
       <li><strong><code>field:value</code> — string equality only.</strong> ASCII-case-insensitive (checksummed or lowercase EVM both match). No regex, range, substring.</li>
       <li><strong>bare <code>value</code> (no <code>field:</code>).</strong> Matches when <em>any</em> string column of the event equals it (e.g. <code>0xWALLET</code>).</li>
       <li><strong>Operators.</strong> <code>||</code> (OR), <code>&amp;&amp;</code> or whitespace (AND), <code>!</code> (NOT), <code>( )</code> grouping; <code>&amp;&amp;</code> binds tighter than <code>||</code>. Quote values containing spaces or <code>( ) | &amp; ' "</code> using <code>'…'</code> or <code>"…"</code>.</li>
-      <li><strong>OR across columns works.</strong> A wallet that may appear in any of several columns (e.g. <code>tx_from</code>, <code>maker</code>, or <code>taker</code>) is expressible: <code>tx_from:0xW || maker:0xW || taker:0xW</code>, or just the bare term <code>0xW</code>.</li>
+      <li><strong>OR across columns works.</strong> A wallet that may appear in any of several columns (e.g. <code>tx_from</code>, <code>from</code>, or <code>to</code> on <code>eth@erc20_transfers</code>) is expressible: <code>tx_from:0xW || from:0xW || to:0xW</code>, or just the bare term <code>0xW</code>.</li>
       <li><strong>Missing field = miss.</strong> Events without the filtered column are dropped.</li>
       <li><strong>Schema-agnostic.</strong> Server doesn't know swap / transfer schemas. Any column name works.</li>
       <li><strong>Top-level fields not filterable.</strong> Only columns inside <code>events[*]</code>.</li>
       <li><strong>Zero matches = block skipped</strong> for that client. No zero-event broadcasts.</li>
-      <li><strong>Filters apply to wildcard selectors too.</strong> A filter on <code>*@*</code> / <code>*@swaps</code> / <code>solana-mainnet@*</code> is resolved against each outgoing <code>(network, table)</code> at broadcast time.</li>
+      <li><strong>Filters apply to wildcard selectors too.</strong> A filter on <code>*@*</code> / <code>*@swaps</code> / <code>solana@*</code> is resolved against each outgoing <code>(network, table)</code> at broadcast time.</li>
     </ul>
     <p>Bounds — the values cap is the <strong>total number of terms across the whole expression</strong>, not per field; over-cap (or a parse error / non-string) rejects the filter and leaves the previous one in place:</p>
 <pre>SUBSTREAMS_WEBSOCKET_MAX_FILTER_FIELDS=16   # max distinct field names
 SUBSTREAMS_WEBSOCKET_MAX_FILTER_VALUES=512  # max total terms in the expression</pre>
     <p>Common filter shapes per stream — server does not enforce these, just operator-friendly examples matching commonly-present columns:</p>
-<pre># SVM swaps — Raydium CPMM by user
+<pre># solana@swaps — Raydium CPMM by user
 protocol:raydium_cpmm && user:F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8
 
-# SVM swaps — WSOL on either leg
+# solana@swaps — WSOL on either leg
 input_mint:So11111111111111111111111111111111111111112 || output_mint:So11111111111111111111111111111111111111112
 
-# SVM SPL transfers — a wallet as source OR destination
+# solana@spl_transfer — a wallet as source OR destination
 source:&lt;wallet&gt; || destination:&lt;wallet&gt;
 
-# SVM system transfers — system program touching a wallet in any role
-program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destination:&lt;wallet&gt; || fee_payer:&lt;wallet&gt;)</pre>
+# solana@system_transfer — system program touching a wallet in any role
+program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destination:&lt;wallet&gt; || fee_payer:&lt;wallet&gt;)
+
+# eth@erc20_transfers — USDC sent or received by a wallet
+log_address:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 && (from:&lt;wallet&gt; || to:&lt;wallet&gt;)</pre>
     <p>Full spec: <a href="https://github.com/pinax-network/substreams-websocket/blob/main/docs/filters.md"><code>docs/filters.md</code></a>.</p>
   </section>
 
@@ -2054,7 +2057,7 @@ program_id:11111111111111111111111111111111 && (source:&lt;wallet&gt; || destina
   function applyFilterPreset(expr) {
       counter += 1;
       var sel = document.getElementById('stream-select');
-      var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : 'solana-mainnet@swaps';
+      var selector = sel && sel.value && sel.value.indexOf('*') === -1 ? sel.value : 'solana@swaps';
       var body = { method: 'SET_FILTER', params: [selector, expr], id: counter };
       cmdEl.value = JSON.stringify(body);
 

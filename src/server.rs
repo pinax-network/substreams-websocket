@@ -605,9 +605,9 @@ async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
                     { "name": "streams", "in": "path", "required": true,
                       "description": "One or more `<network>@<table>` selectors joined by `/`. `*` is a wildcard on either side.",
                       "schema": { "type": "string" },
-                      "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
+                      "example": "solana@swaps/eth@erc20_transfers" },
                     { "name": "filter", "in": "query", "required": false,
-                      "description": "URL-encoded SQE filter expression (alias `sqe`), e.g. `maker:0xW || taker:0xW`. Operators: `||`, `&&` (or whitespace), `!`, `( )`; `field:value` is exact equality, a bare `value` matches any column. See /SKILL.md.",
+                      "description": "URL-encoded SQE filter expression (alias `sqe`), e.g. `from:0xW || to:0xW`. Operators: `||`, `&&` (or whitespace), `!`, `( )`; `field:value` is exact equality, a bare `value` matches any column. See /SKILL.md.",
                       "schema": { "type": "string" } }
                 ],
                 "responses": {
@@ -628,9 +628,9 @@ async fn openapi_json(State(state): State<AppState>) -> impl IntoResponse {
                     { "name": "streams", "in": "query", "required": true,
                       "description": "One or more `<network>@<table>` selectors joined by `/`.",
                       "schema": { "type": "string" },
-                      "example": "solana-mainnet@swaps/ethereum-mainnet@transfers" },
+                      "example": "solana@swaps/eth@erc20_transfers" },
                     { "name": "filter", "in": "query", "required": false,
-                      "description": "URL-encoded SQE filter expression (alias `sqe`), e.g. `maker:0xW || taker:0xW`. See /SKILL.md.",
+                      "description": "URL-encoded SQE filter expression (alias `sqe`), e.g. `from:0xW || to:0xW`. See /SKILL.md.",
                       "schema": { "type": "string" } }
                 ],
                 "responses": {

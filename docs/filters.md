@@ -14,21 +14,21 @@ protocol:raydium_cpmm && user:F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8
 
 | Expression | Matches |
 |---|---|
-| `maker:0xW` | field equals value (case-insensitive) |
-| `maker:0xW \|\| taker:0xW` | OR — wallet as maker OR taker |
-| `maker:0xA,0xB,0xC` | comma list — field equals ANY of these (watchlist) |
-| `protocol:clob && maker:0xW` | AND (whitespace also means AND: `protocol:clob maker:0xW`) |
-| `(maker:0xW \|\| taker:0xW) && !amm:0xdead` | grouping + negation |
+| `from:0xW` | field equals value (case-insensitive) |
+| `from:0xW \|\| to:0xW` | OR — wallet as sender OR recipient |
+| `from:0xA,0xB,0xC` | comma list — field equals ANY of these (watchlist) |
+| `log_address:0xTOKEN && to:0xW` | AND (whitespace also means AND: `log_address:0xTOKEN to:0xW`) |
+| `(from:0xW \|\| to:0xW) && !log_address:0xTOKEN` | grouping + negation |
 | `0xWALLET` | bare term — ANY column equals `0xWALLET` |
 | `0xA,0xB,0xC` | bare comma list — ANY column equals ANY of these |
 | `"two words"` or `label:'a b'` | quote values containing spaces or `( ) \| & ' "` |
 
 - **`field:value` — string equality only.** **ASCII-case-insensitive** on that `events[*]` column, so a checksummed or lowercased EVM address both match (supply the exact value for case-significant data like Solana base58 keys). No regex, no range, no substring.
 - **bare `value` (no `field:`).** Matches when **any** string column of the event equals it (e.g. `0xWALLET`). Great for "this wallet in any role".
-- **Comma list — `field:a,b,c`.** Shorthand for `field:a || field:b || field:c`; bare `a,b,c` is the any-column form. This is the ergonomic shape for a large watchlist — `maker:0xA,0xB,… || taker:0xA,0xB,… || tx_from:0xA,0xB,…`. Each value counts as one term toward `MAX_FILTER_VALUES`, and all values share their field's count toward `MAX_FILTER_FIELDS`. To keep a **literal** comma in a value, quote it: `label:"a,b"`.
+- **Comma list — `field:a,b,c`.** Shorthand for `field:a || field:b || field:c`; bare `a,b,c` is the any-column form. This is the ergonomic shape for a large watchlist — `from:0xA,0xB,… || to:0xA,0xB,… || tx_from:0xA,0xB,…`. Each value counts as one term toward `MAX_FILTER_VALUES`, and all values share their field's count toward `MAX_FILTER_FIELDS`. To keep a **literal** comma in a value, quote it: `label:"a,b"`.
 - **Operators:** `||` (OR), `&&` or whitespace (AND), `!` (NOT), `( )` (grouping). `&&` binds tighter than `||`.
 - **Quoting.** Use `'…'` or `"…"` around values containing spaces or `( ) | & ' "`.
-- **OR across columns works.** `tx_from:0xW || maker:0xW || taker:0xW` (or just bare `0xW`) matches a wallet in any role.
+- **OR across columns works.** `tx_from:0xW || from:0xW || to:0xW` (or just bare `0xW`) matches a wallet in any role on `eth@erc20_transfers`.
 - **Missing fields are a miss.** Filtering on `protocol` against an event that has no `protocol` column drops the event.
 - **Schema-agnostic.** The server does not know the swap / transfer schema. Any column name works.
 - **Top-level fields are not filterable.** `block_num`, `network`, `module_hash`, etc. always pass through. The filter applies only to columns inside `events[*]`.
@@ -39,12 +39,12 @@ URL-encoded SQE expression on the WebSocket upgrade. The query param is `?filter
 
 ```
 # ?filter=protocol:raydium_cpmm
-ws://host/ws/solana-mainnet@swaps?filter=protocol%3Araydium_cpmm
-# ?sqe=maker:0xW || taker:0xW
-ws://host/stream?streams=solana-mainnet@swaps&sqe=maker%3A0xW%20%7C%7C%20taker%3A0xW
+ws://host/ws/solana@swaps?filter=protocol%3Araydium_cpmm
+# ?sqe=from:0xW || to:0xW
+ws://host/stream?streams=eth@erc20_transfers&sqe=from%3A0xW%20%7C%7C%20to%3A0xW
 ```
 
-The filter applies to **every selector** in the URL, including wildcards: `EventFilterSet` resolves wildcard selectors (`*@*`, `*@swaps`, `solana-mainnet@*`) against each outgoing `(network, table)` at broadcast time, so `/ws/*@*?filter=...` filters every channel.
+The filter applies to **every selector** in the URL, including wildcards: `EventFilterSet` resolves wildcard selectors (`*@*`, `*@swaps`, `solana@*`) against each outgoing `(network, table)` at broadcast time, so `/ws/*@*?filter=...` filters every channel.
 
 For different filters per channel on one connection, use the live `SET_FILTER` command.
 
@@ -55,7 +55,7 @@ For different filters per channel on one connection, use the live `SET_FILTER` c
 ```json
 // request
 { "method": "SET_FILTER",
-  "params": ["solana-mainnet@swaps", "protocol:raydium_cpmm && user:F2MUE…"],
+  "params": ["solana@swaps", "protocol:raydium_cpmm && user:F2MUE…"],
   "id": 1 }
 
 // reply (accept)
@@ -72,7 +72,7 @@ For different filters per channel on one connection, use the live `SET_FILTER` c
 
 ```json
 // request
-{ "method": "CLEAR_FILTER", "params": ["solana-mainnet@swaps"], "id": 2 }
+{ "method": "CLEAR_FILTER", "params": ["solana@swaps"], "id": 2 }
 
 // reply
 { "result": null, "id": 2 }
@@ -87,7 +87,7 @@ Drops the filter for the listed selectors. Silently ignores selectors without a 
 { "method": "LIST_FILTERS", "id": 3 }
 
 // reply
-{ "result": { "solana-mainnet@swaps": "protocol:raydium_cpmm" }, "id": 3 }
+{ "result": { "solana@swaps": "protocol:raydium_cpmm" }, "id": 3 }
 ```
 
 Returns the current selector → expression-string map. An empty `{}` means no filter is active.
@@ -105,7 +105,7 @@ The values cap is the **total number of terms across the whole expression**, not
 
 Examples per table — the server doesn't enforce these, they're just operator-friendly suggestions matching the columns commonly present.
 
-### SVM swaps (`solana-mainnet@swaps`)
+### SVM swaps (`solana@swaps`)
 
 ```
 # Raydium CPMM swaps by a specific user
@@ -119,7 +119,7 @@ F2MUEfN1HG5mC5EiUoxhjjc7HpKi4QQnzvipnbGx6Av8
 input_mint:So11111111111111111111111111111111111111112 || output_mint:So11111111111111111111111111111111111111112
 ```
 
-### SVM SPL transfers (`solana-mainnet@spl_transfers`)
+### SVM SPL transfers (`solana@spl_transfer`)
 
 ```
 # A wallet as source OR destination of an SPL transfer
@@ -129,11 +129,21 @@ source:<wallet> || destination:<wallet>
 mint:<mint> && program_id:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
 ```
 
-### SVM system transfers (`solana-mainnet@system_transfers`)
+### SVM system transfers (`solana@system_transfer`)
 
 ```
 # System-program transfers touching a wallet in any role
 program_id:11111111111111111111111111111111 && (source:<wallet> || destination:<wallet> || fee_payer:<wallet>)
+```
+
+### EVM ERC-20 transfers (`eth@erc20_transfers`, and the same table on the other EVM networks)
+
+```
+# A wallet as sender OR recipient
+from:<wallet> || to:<wallet>
+
+# USDC on Ethereum (the token contract is `log_address`), sent or received by a wallet
+log_address:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 && (from:<wallet> || to:<wallet>)
 ```
 
 ## Performance
