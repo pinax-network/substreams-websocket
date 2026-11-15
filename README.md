@@ -192,26 +192,26 @@ Array of Substreams sources. No global block, no secrets, **no operator-supplied
 
 ```yaml
 streams:
-  - network: solana-mainnet
+  - network: solana
     endpoint: https://solana.substreams.pinax.network:443
     manifest: https://github.com/pinax-network/substreams-svm/releases/download/svm-dex-v0.5.1/svm-dex-v0.5.1.spkg
     # module defaults to "db_out"
 
-  - network: ethereum-mainnet
+  - network: eth
     endpoint: https://eth.substreams.pinax.network:443
     manifest: https://github.com/pinax-network/substreams-evm/releases/download/evm-dex-v0.7.0/evm-dex-v0.7.0.spkg
 ```
 
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
-| `network` | yes | -- | Chain id (`solana-mainnet`, `ethereum-mainnet`, ...). |
+| `network` | yes | -- | Network id (`solana`, `eth`, `arbone`, ...). |
 | `endpoint` | yes | -- | Substreams gRPC URL. |
 | `manifest` | yes | -- | Local path or HTTPS URL of `.spkg`. The spkg's `package_meta[0].name` + `version` are required (used for cursor file naming). |
 | `module` | no | `db_out` | Must emit `proto:sf.substreams.sink.database.v1.DatabaseChanges`. |
 | `start_block` | no | `"-1"` | Negative = relative to head. Persisted cursor wins on resume. |
 | `stop_block` | no | `"0"` | `"0"` = indefinite. |
 | `params` | no | `[]` | `"module=value"` strings. |
-| `tables` | no | `[]` | Operator-declared DatabaseChanges tables this spkg emits (e.g. `["swaps", "transfers"]`). Surfaced in the welcome message for client-side discovery. Empty = runtime discovery only. |
+| `tables` | no | `[]` | Operator-declared DatabaseChanges tables this spkg emits (e.g. `["spl_transfer", "system_transfer"]`). Surfaced in the welcome message for client-side discovery. Empty = runtime discovery only. |
 | `token` / `api_key` / `api_key_header` / `auth_url` | no | from `.env` | Per-stream overrides. |
 
 Validation refuses duplicate `(network, manifest, module)` triples. Non-DatabaseChanges output or missing `package_meta` fails fast at startup.
@@ -244,11 +244,11 @@ A network has at most one alias, an alias can't also be a configured network, an
 
 ## WebSocket API
 
-URL conventions mirror Binance market streams. Selectors: `<network>@<table>` (`solana-mainnet@swaps`). `*` wildcard on either side. `<table>` is the DatabaseChanges table emitted by the spkg's `db_out` module.
+URL conventions mirror Binance market streams. Selectors: `<network>@<table>` (`solana@swaps`). `*` wildcard on either side. `<table>` is the DatabaseChanges table emitted by the spkg's `db_out` module.
 
 ```
-ws://host:8080/ws/solana-mainnet@swaps                # single, raw
-ws://host:8080/ws/solana-mainnet@swaps/ethereum-mainnet@transfers   # multi, wrapped
+ws://host:8080/ws/solana@swaps                        # single, raw
+ws://host:8080/ws/solana@swaps/eth@erc20_transfers    # multi, wrapped
 ws://host:8080/stream?streams=*@swaps                 # query mode, wrapped
 ```
 
@@ -333,7 +333,7 @@ The server exposes Prometheus metrics on `/metrics` (configurable via `SUBSTREAM
 ```
 GET /metrics
 # substreams_websocket_active_connections 4
-# substreams_websocket_broadcast_blocks_total{network="solana-mainnet",table="swaps"} 1234
+# substreams_websocket_broadcast_blocks_total{network="solana",table="swaps"} 1234
 # ...
 ```
 

@@ -19,9 +19,9 @@ If you're an AI agent or programmatic client, this page tells you everything you
 
 ## Server URL conventions
 
-Stream selectors are `<network>@<table>` (Binance market-streams style). `*` is a wildcard on either side. `<network>` is a chain identifier (e.g. `solana-mainnet`, `ethereum-mainnet`). `<table>` is the DatabaseChanges table emitted by the spkg's `db_out` module (e.g. `swaps`, `transfers`, `spl_transfers`).
+Stream selectors are `<network>@<table>` (Binance market-streams style). `*` is a wildcard on either side. `<network>` is the configured network id; Pinax servers use Pinax network ids (e.g. `solana`, `eth`, `base`, `arbone`, `hyperliquid`). `<table>` is the DatabaseChanges table emitted by the spkg's `db_out` module (e.g. `swaps`, `erc20_transfers`, `spl_transfer`). `GET /streams` lists the channels a server actually serves.
 
-The `<network>` side also accepts a comma-separated list to subscribe to the same table across multiple chains in one selector: `<n1>,<n2>,...@<table>` (e.g. `solana-mainnet,ethereum-mainnet@swaps`). The server expands it into one entry per network — `LIST_SUBSCRIPTIONS` echoes the expanded form. Mixing `*` with named networks (`*,solana-mainnet@swaps`) is rejected; use a bare `*` instead. Comma on the `<table>` side is not supported.
+The `<network>` side also accepts a comma-separated list to subscribe to the same table across multiple chains in one selector: `<n1>,<n2>,...@<table>` (e.g. `eth,base@erc20_transfers`). The server expands it into one entry per network — `LIST_SUBSCRIPTIONS` echoes the expanded form. Mixing `*` with named networks (`*,eth@erc20_transfers`) is rejected; use a bare `*` instead. Comma on the `<table>` side is not supported.
 
 A network can have an **alias** — another name the server accepts for it, listed as `network_alias` in `/streams` and the welcome `streams[]` (e.g. `"network": "eth", "network_alias": "mainnet"`). You may subscribe, filter and unsubscribe with either name. Everything the server sends you uses the name you subscribed with: the payload's `network`, the `{"stream":"<network>@<table>"}` envelope, lifecycle and `dropped` frames, `subscriptions`, `LIST_SUBSCRIPTIONS` and `LIST_FILTERS`. If you use both names for one network on one connection, the most recent subscription's name wins. Through a network wildcard (`*@…`) you see the configured `network`, unless the server keeps wildcard clients on the alias.
 
@@ -38,10 +38,10 @@ Bare `/ws` (no streams) returns HTTP 400. Use `/ws/*@*` to subscribe to everythi
 Examples:
 
 ```
-wss://<host>/ws/solana-mainnet@swaps
-wss://<host>/ws/solana-mainnet@swaps/ethereum-mainnet@transfers
+wss://<host>/ws/solana@swaps
+wss://<host>/ws/solana@swaps/eth@erc20_transfers
 wss://<host>/ws/*@swaps
-wss://<host>/ws/solana-mainnet,ethereum-mainnet@swaps
+wss://<host>/ws/eth,base@erc20_transfers
 wss://<host>/stream?streams=*@*
 ```
 
@@ -56,7 +56,7 @@ On connect, the server sends a single `session` message describing every configu
   "client_id": 1,
   "streams": [
     {
-      "network": "solana-mainnet",
+      "network": "solana",
       "module": "db_out",
       "manifest": "https://.../svm-dex-v0.5.1.spkg",
       "module_hash": "bd388f2e39f5dcc237cfbdb8d6c96d9e5678c797",
@@ -65,7 +65,7 @@ On connect, the server sends a single `session` message describing every configu
       "tables": ["swaps"]
     }
   ],
-  "subscriptions": ["solana-mainnet@swaps"],
+  "subscriptions": ["solana@swaps"],
   "wrap_envelope": false
 }
 ```
@@ -81,7 +81,7 @@ One message per `(network, table)` group per block. A spkg that emits both `swap
 
 ```json
 {
-  "network": "solana-mainnet",
+  "network": "solana",
   "table": "swaps",
   "block_num": 350000000,
   "block_hash": "Gsk6...",
@@ -115,7 +115,7 @@ Field reference:
 When `wrap_envelope` is `true`, the same object is delivered nested under `data`:
 
 ```json
-{ "stream": "solana-mainnet@swaps", "data": { /* the above */ } }
+{ "stream": "solana@swaps", "data": { /* the above */ } }
 ```
 
 ## Stream lifecycle messages
@@ -162,14 +162,14 @@ Invalid commands do **not** close the connection.
 ### Examples
 
 ```json
-{ "method": "SUBSCRIBE",         "params": ["solana-mainnet@swaps"], "id": 1 }
+{ "method": "SUBSCRIBE",         "params": ["solana@swaps"], "id": 1 }
 // -> { "result": null, "id": 1 }
 
-{ "method": "UNSUBSCRIBE",       "params": ["solana-mainnet@swaps"], "id": 2 }
+{ "method": "UNSUBSCRIBE",       "params": ["solana@swaps"], "id": 2 }
 // -> { "result": null, "id": 2 }
 
 { "method": "LIST_SUBSCRIPTIONS", "id": 3 }
-// -> { "result": ["solana-mainnet@swaps"], "id": 3 }
+// -> { "result": ["solana@swaps"], "id": 3 }
 ```
 
 ### Rules
@@ -187,28 +187,28 @@ Reduce bandwidth by asking the server to drop non-matching events before deliver
 
 | Expression | Matches |
 |---|---|
-| `maker:0xW` | field equals value (case-insensitive) |
-| `maker:0xW \|\| taker:0xW` | OR — wallet as maker OR taker |
-| `maker:0xA,0xB,0xC` | comma list — field equals ANY of these (watchlist) |
-| `protocol:clob && maker:0xW` | AND (whitespace also means AND: `protocol:clob maker:0xW`) |
-| `(maker:0xW \|\| taker:0xW) && !amm:0xdead` | grouping + negation |
+| `from:0xW` | field equals value (case-insensitive) |
+| `from:0xW \|\| to:0xW` | OR — wallet as sender OR recipient |
+| `from:0xA,0xB,0xC` | comma list — field equals ANY of these (watchlist) |
+| `log_address:0xTOKEN && to:0xW` | AND (whitespace also means AND: `log_address:0xTOKEN to:0xW`) |
+| `(from:0xW \|\| to:0xW) && !log_address:0xTOKEN` | grouping + negation |
 | `0xWALLET` | bare term — ANY column equals `0xWALLET` |
 | `0xA,0xB,0xC` | bare comma list — ANY column equals ANY of these |
 | `"two words"` or `label:'a b'` | quote values containing spaces or `( ) \| & ' "` |
 
 - `field:value` — **ASCII-case-insensitive** string equality on that event column, so a checksummed or lowercased EVM address both match. An event missing `field` is a miss. (Note: case-insensitivity is convenient for hex addresses but relaxes matching for case-significant values like Solana base58 keys — supply the exact value there.)
 - bare `value` (no `field:`) — matches when **any** string column of the event equals it. Great for "this wallet in any role": `0xW1 || 0xW2`.
-- **comma list** — `field:a,b,c` is shorthand for `field:a || field:b || field:c` (and bare `a,b,c` for any column equals any of them). This is the ergonomic form for a large watchlist: `maker:0xA,0xB,0xC || taker:0xA,0xB,0xC || tx_from:0xA,0xB,0xC`. Each value still counts as one term toward `MAX_FILTER_VALUES`. To keep a literal comma in a value, quote it: `label:"a,b"`.
+- **comma list** — `field:a,b,c` is shorthand for `field:a || field:b || field:c` (and bare `a,b,c` for any column equals any of them). This is the ergonomic form for a large watchlist: `from:0xA,0xB,0xC || to:0xA,0xB,0xC || tx_from:0xA,0xB,0xC`. Each value still counts as one term toward `MAX_FILTER_VALUES`. To keep a literal comma in a value, quote it: `label:"a,b"`.
 - operators: `||` (or), `&&` or whitespace (and), `!` (not), `( )` (grouping). `&&` binds tighter than `||`.
 - only `events[*]` columns are filtered; top-level `block_num` / `network` / `module_hash` are not.
 
 ```
-ws://host/ws/polymarket@ctfexchange_order_filled?filter=maker%3A0xW%20%7C%7C%20taker%3A0xW
+ws://host/ws/eth@erc20_transfers?filter=from%3A0xW%20%7C%7C%20to%3A0xW
 ```
 
 ```json
 { "method": "SET_FILTER",
-  "params": ["polymarket@ctfexchange_order_filled", "tx_from:0xW || maker:0xW || taker:0xW"],
+  "params": ["eth@erc20_transfers", "tx_from:0xW || from:0xW || to:0xW"],
   "id": 1 }
 // -> { "result": null, "id": 1 }   on accept
 // -> { "error":  "...", "id": 1 }   on reject (previous filter left unchanged)
@@ -266,7 +266,7 @@ Or just connect to `wss://<host>/ws/*@*` and read the `session` message — it a
 ### "Tail every event from a single stream"
 
 ```
-wss://<host>/ws/solana-mainnet@swaps
+wss://<host>/ws/solana@swaps
 ```
 
 Payloads come raw, no envelope. Parse top-level fields directly.
@@ -274,7 +274,7 @@ Payloads come raw, no envelope. Parse top-level fields directly.
 ### "Tail two streams and demultiplex"
 
 ```
-wss://<host>/ws/solana-mainnet@swaps/solana-mainnet@transfers
+wss://<host>/ws/solana@swaps/solana@spl_transfer
 ```
 
 Each frame is `{"stream":"<id>","data":...}`. Switch on `stream` to dispatch.
